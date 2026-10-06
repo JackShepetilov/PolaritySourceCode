@@ -5,10 +5,9 @@
 #include "SmokeCloud.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Weapons/SmokeCanisterProjectile.h"
-#include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 
-void UAbilityHandler_SmokeScreen::OnPerShotEffect_Implementation()
+void UAbilityHandler_SmokeScreen::SpawnThrown(const FVector& Location, const FRotator& Rotation)
 {
 	const UAbilityDefinition_SmokeScreen* Def = Cast<UAbilityDefinition_SmokeScreen>(GetDefinition());
 	AShooterCharacter* Caster = GetOwningCharacter();
@@ -24,26 +23,13 @@ void UAbilityHandler_SmokeScreen::OnPerShotEffect_Implementation()
 		return;
 	}
 
-	// Same muzzle the burst uses, so the canister leaves the hand the animation is throwing with
-	// rather than from the camera.
-	FVector SpawnLoc = Caster->GetPawnViewLocation();
-	if (const USkeletalMeshComponent* FPMesh = Caster->GetFirstPersonMesh())
-	{
-		if (!Def->ProjectileSpawnSocket.IsNone())
-		{
-			SpawnLoc = FPMesh->GetSocketLocation(Def->ProjectileSpawnSocket);
-		}
-	}
-
-	const FRotator Facing = Caster->GetBaseAimRotation();
-
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = Caster;
 	SpawnParams.Instigator = Caster;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	ASmokeCanisterProjectile* Canister = Caster->GetWorld()->SpawnActor<ASmokeCanisterProjectile>(
-		Def->CanisterProjectileClass, SpawnLoc, Facing, SpawnParams);
+		Def->CanisterProjectileClass, Location, Rotation, SpawnParams);
 	if (!Canister)
 	{
 		return;
@@ -60,6 +46,5 @@ void UAbilityHandler_SmokeScreen::OnPerShotEffect_Implementation()
 	Canister->Launch(Def->ProjectileSpeed, Def->ProjectileGravityScale, Def->CloudClass, Shape,
 		Def->SightPenetration, Def->TurnRateMultiplier, Def->SplitCount, Def->SplitSpacing);
 
-	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] SmokeScreen: canister away from socket %s"),
-		*Def->ProjectileSpawnSocket.ToString());
+	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] SmokeScreen: canister away from %s"), *Location.ToCompactString());
 }

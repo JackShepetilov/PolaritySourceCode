@@ -12,23 +12,35 @@ EHitFeedbackCue UHitFeedbackSet::ResolveCue(const FHitFeedbackContext& Context)
 		return Context.bHeadshot ? EHitFeedbackCue::HeadshotKill : EHitFeedbackCue::Kill;
 	}
 
-	if (Context.bShieldBroken)
+	// Breaking a part (a track, the sights) is the same news as breaking a shield: the job changed.
+	if (Context.bShieldBroken || Context.bPartBroken)
 	{
 		return EHitFeedbackCue::ShieldBreak;
 	}
 
-	// A shield that was still holding is what the shot hit, and that is true whether or not any
-	// health was written. In this game a held shield absorbs the damage completely, so a shield hit
-	// is ALWAYS a zero-damage hit: testing bZeroDamage before this made HitShield unreachable in
-	// every case that matters, which is the only case there is.
-	if (Context.bShieldHit)
+	// Did nothing, and why: bounced off the plate, or hit a part that is already gone. Above the
+	// headshot and the shield on purpose; these are the hits the player has to stop making.
+	if (Context.bDeflected)
 	{
-		return EHitFeedbackCue::HitShield;
+		return EHitFeedbackCue::Deflected;
+	}
+	if (Context.bDeadPart)
+	{
+		return EHitFeedbackCue::DeadPart;
 	}
 
+	// A headshot is a headshot whether the head was under armour or not: with armour on every
+	// grunt, testing the shield first hid every headshot for as long as the armour held.
 	if (Context.bHeadshot)
 	{
 		return EHitFeedbackCue::Headshot;
+	}
+
+	// A shield that was still holding is what the shot hit, and that is true whether or not any
+	// health was written. Tested before bZeroDamage: a hit the shield took whole wrote no health.
+	if (Context.bShieldHit)
+	{
+		return EHitFeedbackCue::HitShield;
 	}
 
 	// Connected and charged, but there was no shield to speak of -- a prop, or a target that carries
@@ -51,6 +63,8 @@ int32 UHitFeedbackSet::GetCueRank(EHitFeedbackCue Cue)
 	case EHitFeedbackCue::Headshot:		return 2;
 	case EHitFeedbackCue::HitShield:	return 1;
 	case EHitFeedbackCue::HitFlesh:		return 1;
+	case EHitFeedbackCue::Deflected:	return 1;
+	case EHitFeedbackCue::DeadPart:		return 1;
 	case EHitFeedbackCue::ZeroDamage:	return 0;
 	case EHitFeedbackCue::None:
 	default:							return -1;
@@ -70,6 +84,8 @@ const FHitFeedbackCue* UHitFeedbackSet::FindCue(EHitFeedbackCue Cue) const
 	case EHitFeedbackCue::Kill:			Found = &Kill;			break;
 	case EHitFeedbackCue::HeadshotKill:	Found = &HeadshotKill;	break;
 	case EHitFeedbackCue::ZeroDamage:	Found = &ZeroDamage;	break;
+	case EHitFeedbackCue::Deflected:	Found = &Deflected;		break;
+	case EHitFeedbackCue::DeadPart:		Found = &DeadPart;		break;
 	default:							return nullptr;
 	}
 

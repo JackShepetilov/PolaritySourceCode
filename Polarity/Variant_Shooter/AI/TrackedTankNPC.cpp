@@ -11,6 +11,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/DamageType.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "Engine/DamageEvents.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
@@ -24,6 +26,13 @@
 // that never had its own).
 #include "EMFVelocityModifier.h"
 #include "../DamageTypes/DamageType_DroneExplosion.h"
+#include "Variant_Shooter/Shield/HitZoneComponent.h"
+#include "Variant_Shooter/Buildables/TurretBuildable.h"
+#include "Variant_Shooter/ShooterCharacter.h"
+#include "Components/StateTreeAIComponent.h"
+#include "Coop/CoopPlayers.h"
+#include "EngineUtils.h"
+#include "NavigationSystem.h"
 
 namespace
 {
@@ -99,6 +108,43 @@ ATrackedTankNPC::ATrackedTankNPC(const FObjectInitializer& ObjectInitializer)
 	CriticalHullFXComponent = CreateDefaultSubobject<UNiagaraComponent>(TEXT("CriticalHullFX"));
 	CriticalHullFXComponent->SetupAttachment(TankMesh);
 	CriticalHullFXComponent->bAutoActivate = false;
+
+	// The parts of the body. Starting boxes measured off the tankette mesh (377 x 208 x 213, root at
+	// the bottom centre, +X forward); the Blueprint is where they get tuned, with
+	// polarity.debug.hitzones 1 to see them.
+	HitZones = CreateDefaultSubobject<UHitZoneComponent>(TEXT("HitZones"));
+	HitZones->bUseZoneCollision = true;
+	{
+		FHitZone Hull;
+		Hull.Name = TEXT("Hull");
+		Hull.Center = FVector(0.0f, 0.0f, 110.0f);
+		Hull.Extent = FVector(180.0f, 75.0f, 95.0f);
+		Hull.Accepts = EHitZoneAccepts::HeavyOnly;
+
+		FHitZone TrackLeft;
+		TrackLeft.Name = TEXT("TrackLeft");
+		TrackLeft.Center = FVector(0.0f, -85.0f, 40.0f);
+		TrackLeft.Extent = FVector(185.0f, 20.0f, 40.0f);
+		TrackLeft.BrokenEffectOffset = FVector(0.0f, -24.0f, 0.0f);
+		TrackLeft.Pool = 300.0f;
+
+		FHitZone TrackRight = TrackLeft;
+		TrackRight.Name = TEXT("TrackRight");
+		TrackRight.Center.Y = 85.0f;
+		TrackRight.BrokenEffectOffset.Y = 24.0f;
+
+		FHitZone Optics;
+		Optics.Name = TEXT("Optics");
+		Optics.Bone = TEXT("turret_yaw");
+		// Imported turret bones carry scale 100; box coordinates are in their native space.
+		Optics.Center = FVector(0.4f, 0.0f, 0.3f);
+		Optics.Extent = FVector(0.15f, 0.2f, 0.15f);
+		Optics.BrokenEffectOffset = FVector(0.0f, -0.24f, 0.0f);
+		Optics.Pool = 150.0f;
+
+		HitZones->Zones = { TrackLeft, TrackRight, Optics, Hull };
+		HitZones->FallbackZone = TEXT("Hull");
+	}
 }
 
 // polarity.debug.novfx: та же глушилка, что у оружия. Гасится только картинка - урон, звук и
@@ -113,6 +159,14 @@ static bool TankNoVFX()
 void ATrackedTankNPC::BeginPlay()
 {
 	Super::BeginPlay();
+	if (HitZones && HitZones->bUseZoneCollision)
+	{
+		// The capsule is for locomotion. Shots and aim queries use the actual part boxes. Vehicle
+		// collides like Pawn in every engine profile, and rounds ignore exactly this type
+		// (AShooterProjectile::BeginPlay), so a shot through the air beside a track is a miss.
+		GetCapsuleComponent()->SetCollisionObjectType(ECC_Vehicle);
+		GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
 
 	MaxHPAtSpawn = CurrentHP;
 	BaseMaxWalkSpeed = GetCharacterMovement() ? GetCharacterMovement()->MaxWalkSpeed : 0.0f;
@@ -151,7 +205,266 @@ void ATrackedTankNPC::BeginPlay()
 		CriticalHullFXComponent->SetAsset(CriticalHullFX);
 	}
 
+	if (HitZones)
+	{
+		// Every machine: the broken event drives the VFX on clients too (it comes from the replicated
+		// mask); the handlers keep the decisions to the server.
+		HitZones->OnZoneBroken.AddUniqueDynamic(this, &ATrackedTankNPC::HandleZoneBroken);
+		HitZones->OnZonePoolHit.AddUniqueDynamic(this, &ATrackedTankNPC::HandleZonePoolHit);
+	}
+
 	UpdateTankStage();
+}
+
+// ==================== Hit Zones ====================
+
+bool ATrackedTankNPC::HasZones() const
+{
+	return HitZones && HitZones->Zones.Num() > 0;
+}
+
+void ATrackedTankNPC::HandleZoneBroken(UHitZoneComponent* Zones, FName ZoneName)
+{
+	if (!HasAuthority() || bIsDead)
+	{
+		return;
+	}
+
+	if (ZoneName == TrackLeftZone || ZoneName == TrackRightZone)
+	{
+		const int32 Broken = (HitZones->IsZoneBroken(TrackLeftZone) ? 1 : 0) + (HitZones->IsZoneBroken(TrackRightZone) ? 1 : 0);
+		UE_LOG(LogTemp, Warning, TEXT("[TANK_DEBUG] %s lost %s (%d of 2 tracks gone)"), *GetName(), *ZoneName.ToString(), Broken);
+		if (Broken >= 2)
+		{
+			Immobilize();
+		}
+		else
+		{
+			TrackSpeedMultiplier = OneTrackSpeedMultiplier;
+			UpdateTankStage();
+		}
+		return;
+	}
+
+	if (ZoneName == OpticsZone)
+	{
+		BeginRamming();
+	}
+}
+
+bool ATrackedTankNPC::IsRamTargetAlive(const AActor* Target) const
+{
+	if (!IsValid(Target))
+	{
+		return false;
+	}
+	if (const AShooterCharacter* Player = Cast<AShooterCharacter>(Target))
+	{
+		return !Player->IsDead();
+	}
+	if (const ATurretBuildable* Turret = Cast<ATurretBuildable>(Target))
+	{
+		return !Turret->IsDestroyed() && Turret->GetHealth() > 0.0f;
+	}
+	return false;
+}
+
+void ATrackedTankNPC::SelectRamTarget()
+{
+	RamTarget.Reset();
+	float BestDistance = TNumericLimits<float>::Max();
+	const auto Consider = [this, &BestDistance](AActor* Candidate)
+	{
+		if (!IsRamTargetAlive(Candidate))
+		{
+			return;
+		}
+		const float Distance = FVector::DistSquared(GetActorLocation(), Candidate->GetActorLocation());
+		if (Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			RamTarget = Candidate;
+		}
+	};
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* Player : Players)
+	{
+		Consider(Player);
+	}
+	for (TActorIterator<ATurretBuildable> It(GetWorld()); It; ++It)
+	{
+		Consider(*It);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[TANK_DEBUG] %s ram target %s"), *GetName(), *GetNameSafe(RamTarget.Get()));
+}
+
+void ATrackedTankNPC::BeginRamming()
+{
+	if (!HasAuthority() || bIsDead || bRamming)
+	{
+		return;
+	}
+	// Release the old movement owners before stopping their tree; their exits can stop movement.
+	EndTurretCover();
+	EndSiegeMarch();
+	EndDazzle();
+	bRamming = true;
+	RamMoveClock = RamHitClock = 0.0f;
+	OnRep_bRamming();
+	if (AShooterAIController* AI = Cast<AShooterAIController>(GetController()))
+	{
+		if (UStateTreeAIComponent* Tree = AI->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			Tree->StopLogic(TEXT("Ram"));
+		}
+		AI->StopMovement();
+	}
+	SelectRamTarget();
+	ForceNetUpdate();
+	UE_LOG(LogTemp, Warning, TEXT("[TANK_DEBUG] %s optics destroyed: ramming, HP %.1f"), *GetName(), CurrentHP);
+}
+
+void ATrackedTankNPC::OnRep_bRamming()
+{
+	if (bRamming)
+	{
+		StopShooting();
+		if (MachineGun) { MachineGun->StopFiring(); }
+		if (CannonWeapon) { CannonWeapon->StopFiring(); }
+		ClearTurretAim();
+	}
+}
+
+void ATrackedTankNPC::TickRamming(float DeltaSeconds)
+{
+	if (!bRamming || bIsDead)
+	{
+		return;
+	}
+	RamHitClock = FMath::Max(0.0f, RamHitClock - DeltaSeconds);
+	RamMoveClock -= DeltaSeconds;
+	if (!IsRamTargetAlive(RamTarget.Get()))
+	{
+		// Retry an empty battlefield on the path cadence, not by scanning the world every frame.
+		if (RamMoveClock > 0.0f) { return; }
+		SelectRamTarget();
+	}
+	AActor* const Target = RamTarget.Get();
+	AShooterAIController* const AI = Cast<AShooterAIController>(GetController());
+	if (!Target || !AI || bImmobilized || bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	{
+		if (AI && !Target) { AI->StopMovement(); }
+		RamMoveClock = FMath::Max(RamMoveInterval, 0.1f);
+		return;
+	}
+
+	// Contact uses the capsule against the target's collision bounds, including the vertical gap.
+	// false excludes non-colliding camera/widget/field components from contact distance.
+	const FBox Bounds = Target->GetComponentsBoundingBox(false);
+	const FVector Center = GetActorLocation();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	const float Radius = Capsule->GetScaledCapsuleRadius();
+	const float Axis = Capsule->GetScaledCapsuleHalfHeight() - Radius;
+	FVector NearestOnAxis = Center;
+	NearestOnAxis.Z = FMath::Clamp(Bounds.GetCenter().Z, Center.Z - Axis, Center.Z + Axis);
+	const bool bContact = Bounds.IsValid && Bounds.ComputeSquaredDistanceToPoint(NearestOnAxis)
+		<= FMath::Square(Radius + RamContactPadding);
+	if (bContact)
+	{
+		if (AI->GetMoveStatus() != EPathFollowingStatus::Idle) { AI->StopMovement(); }
+		if (RamHitClock <= 0.0f && RamDamage > 0.0f)
+		{
+			RamHitClock = FMath::Max(RamHitInterval, 0.05f);
+			const float Applied = UGameplayStatics::ApplyDamage(Target, RamDamage, GetController(), this, UDamageType::StaticClass());
+			UE_LOG(LogTemp, Log, TEXT("[TANK_DEBUG] %s ram hit %s: %.1f"), *GetName(), *GetNameSafe(Target), Applied);
+		}
+		return;
+	}
+	if (RamMoveClock <= 0.0f)
+	{
+		RamMoveClock = FMath::Max(RamMoveInterval, 0.1f);
+		if (Cast<ATurretBuildable>(Target))
+		{
+			// A building's pivot is inside its navmesh hole: use its reachable edge, as siege march does.
+			const UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+			FNavLocation Goal;
+			if (Nav && Nav->ProjectPointToNavigation(Bounds.GetCenter(), Goal, Bounds.GetExtent() + FVector(150.0f, 150.0f, 300.0f)))
+			{
+				AI->MoveToLocation(Goal.Location, 0.0f, false);
+			}
+		}
+		else
+		{
+			AI->MoveToActor(Target, 0.0f, false);
+		}
+	}
+}
+
+void ATrackedTankNPC::HandleZonePoolHit(UHitZoneComponent* Zones, FName ZoneName, float Damage, AActor* Attacker)
+{
+	if (!HasAuthority() || bIsDead || ZoneName != OpticsZone || !HitZones)
+	{
+		return;
+	}
+
+	// Every OpticsBlindStep of the sights' pool lost blinds it once.
+	const float Lost = 1.0f - HitZones->GetZonePoolFraction(OpticsZone);
+	const int32 Steps = FMath::FloorToInt(Lost / FMath::Max(OpticsBlindStep, 0.05f));
+	if (Steps > OpticsBlindSteps)
+	{
+		OpticsBlindSteps = Steps;
+		ApplyDazzle(Attacker, OpticsBlindSeconds, 1.0f, nullptr);
+	}
+}
+
+void ATrackedTankNPC::ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay)
+{
+	UWorld* const World = GetWorld();
+	if (!HasAuthority() || bIsDead || bRamming || !World || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < BlindImmuneUntil)
+	{
+		return;
+	}
+
+	const bool bWasBlind = IsBlind();
+	Super::ApplyDazzle(Source, Duration, SpreadMultiplier, Overlay);
+
+	// The immunity runs from the end of THIS blinding: a light held on the sights blinds, lets go for
+	// BlindImmunitySeconds, blinds again; it never holds the tank blind for good.
+	BlindImmuneUntil = Now + Duration + BlindImmunitySeconds;
+
+	if (!bWasBlind)
+	{
+		BlindSweepCenterYaw = TurretYaw;
+		BlindSweepStart = Now;
+		StopShooting();
+		if (Weapon)
+		{
+			Weapon->StopFiring();
+		}
+		UE_LOG(LogTemp, Log, TEXT("[TANK_DEBUG] %s blinded by %s for %.1fs"), *GetName(), *GetNameSafe(Source), Duration);
+	}
+}
+
+void ATrackedTankNPC::OnRep_bWrecked()
+{
+	if (!bWrecked)
+	{
+		ApplyStageVFX(TankDamageStage);
+		return;
+	}
+	// The wreck burns. And it stays seen: on a client the death may have arrived first and hidden it.
+	ApplyStageVFX(ETankDamageStage::Critical);
+	if (USkeletalMeshComponent* const HullMesh = GetMesh())
+	{
+		HullMesh->SetVisibility(true);
+	}
 }
 
 // ==================== Weapons ====================
@@ -287,8 +600,12 @@ UMeshComponent* ATrackedTankNPC::GetHitFlashMeshComponent() const
 
 float ATrackedTankNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
-	// Track-zone classification must read the event before Super consumes anything
-	RegisterTrackHit(Damage, DamageEvent, EventInstigator, DamageCauser);
+	// Track-zone classification must read the event before Super consumes anything. Only the old
+	// height rule: a tank with hit zones has real track parts, sorted inside Super.
+	if (!HasZones())
+	{
+		RegisterTrackHit(Damage, DamageEvent, EventInstigator, DamageCauser);
+	}
 
 	const float AppliedDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 
@@ -386,6 +703,9 @@ void ATrackedTankNPC::OnRep_bImmobilized()
 
 void ATrackedTankNPC::Die()
 {
+	if (!HasAuthority() || bIsDead) { return; }
+	bWrecked = UHitZoneComponent::IsHeavyDamageType(LastKillingDamageType);
+	if (bWrecked) { OnRep_bWrecked(); }
 	if (bExplodeOnDeath)
 	{
 		// Before Super: Die() zeroes the EMF charge that scales the blast
@@ -503,6 +823,8 @@ void ATrackedTankNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 
 	DOREPLIFETIME(ATrackedTankNPC, TankDamageStage);
 	DOREPLIFETIME(ATrackedTankNPC, bImmobilized);
+	DOREPLIFETIME(ATrackedTankNPC, bWrecked);
+	DOREPLIFETIME(ATrackedTankNPC, bRamming);
 	DOREPLIFETIME(ATrackedTankNPC, TurretYaw);
 	DOREPLIFETIME(ATrackedTankNPC, GunPitch);
 }
@@ -517,6 +839,7 @@ void ATrackedTankNPC::Tick(float DeltaSeconds)
 	// the result off the two replicated angles.
 	if (HasAuthority())
 	{
+		TickRamming(DeltaSeconds);
 		UpdateTurret(DeltaSeconds);
 	}
 }
@@ -552,10 +875,23 @@ void ATrackedTankNPC::UpdateTurret(float DeltaSeconds)
 	// turret would only move for the tasks that aim it deliberately, and a tank firing straight
 	// past its own barrel is the first thing anyone notices. Kept in locals, because latching the
 	// member here would freeze the turret on the position the enemy had when it was first seen.
-	FVector AimAt = TurretAimLocation;
-	bool bAiming = bHasTurretAim;
+	// Blind: the turret swings slowly from side to side around where it was looking. That is the
+	// tell: it is not tracking anyone, and not on target, so nothing fires.
+	if (IsBlind() && !IsDead() && GetWorld())
+	{
+		const float Phase = (GetWorld()->GetTimeSeconds() - BlindSweepStart) / FMath::Max(BlindSweepPeriod, 0.5f);
+		TurretDesiredYaw = FRotator::NormalizeAxis(BlindSweepCenterYaw + BlindSweepDegrees * FMath::Sin(Phase * UE_TWO_PI));
+		TurretDesiredPitch = 0.0f;
+		bTurretTracking = false;
+		TurretYaw = FMath::FixedTurn(TurretYaw, TurretDesiredYaw, TurretYawRate * DeltaSeconds);
+		GunPitch = FMath::FixedTurn(GunPitch, TurretDesiredPitch, GunPitchRate * DeltaSeconds);
+		return;
+	}
 
-	if (!bAiming)
+	FVector AimAt = TurretAimLocation;
+	bool bAiming = bHasTurretAim && !bRamming;
+
+	if (!bAiming && !bRamming)
 	{
 		if (const AShooterAIController* AI = Cast<AShooterAIController>(GetController()))
 		{
@@ -619,7 +955,7 @@ void ATrackedTankNPC::UpdateTankStage()
 	// Speed follows the stage; immobilization wins over any multiplier
 	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
 	{
-		CMC->MaxWalkSpeed = bImmobilized ? 0.0f : BaseMaxWalkSpeed * GetStageSpeedMultiplier();
+		CMC->MaxWalkSpeed = bImmobilized ? 0.0f : BaseMaxWalkSpeed * GetStageSpeedMultiplier() * TrackSpeedMultiplier;
 	}
 }
 
@@ -652,7 +988,8 @@ void ATrackedTankNPC::ApplyStageVFX(ETankDamageStage Stage)
 
 void ATrackedTankNPC::OnRep_TankDamageStage()
 {
-	ApplyStageVFX(TankDamageStage);
+	// A late stage packet must not extinguish a heavy-damage wreck.
+	ApplyStageVFX(bWrecked ? ETankDamageStage::Critical : TankDamageStage);
 }
 
 // ==================== Pool Recycling ====================
@@ -663,6 +1000,18 @@ void ATrackedTankNPC::ResetForPool(const FVector& NewLocation, const FRotator& N
 	TankDamageStage = ETankDamageStage::Intact;
 	TrackAccumulatedDamage = 0.0f;
 	bImmobilized = false;
+	bWrecked = false;
+	bRamming = false;
+	RamTarget.Reset();
+	RamMoveClock = RamHitClock = 0.0f;
+	TrackSpeedMultiplier = 1.0f;
+	OpticsBlindSteps = 0;
+	BlindImmuneUntil = -1.0f;
+	BlindSweepStart = -1.0f;
+	if (HitZones)
+	{
+		HitZones->ResetZones();
+	}
 
 	Super::ResetForPool(NewLocation, NewRotation);
 

@@ -128,6 +128,7 @@ private:
 	UFUNCTION() void HandleAbilitySwitched(int32 NewActiveSlot);
 	UFUNCTION() void HandleCooldownStarted(float Duration);
 	UFUNCTION() void HandleCooldownEnded();
+	UFUNCTION() void HandleCooldownAdjusted(float Remaining, float Total);
 
 	/** Re-evaluate the active ability: add/refresh its entry, or remove it if there is none. */
 	void RefreshAbilityEntry();

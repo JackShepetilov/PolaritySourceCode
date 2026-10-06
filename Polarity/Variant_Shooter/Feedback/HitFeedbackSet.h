@@ -35,7 +35,11 @@ enum class EHitFeedbackCue : uint8
 	/** This hit killed, through the head. */
 	HeadshotKill,
 	/** Connected but dealt no health damage -- the ionizer charging a target up. */
-	ZeroDamage
+	ZeroDamage,
+	/** Bounced off a part that only heavy damage gets through (a tank's hull plate). */
+	Deflected,
+	/** Landed on a part that is already destroyed (a broken track): nothing left to hurt there. */
+	DeadPart
 };
 
 /**
@@ -136,6 +140,18 @@ struct FHitFeedbackContext
 	UPROPERTY(BlueprintReadWrite, Category = "Hit")
 	bool bZeroDamage = false;
 
+	/** Refused by a hit zone that takes heavy damage only (UHitZoneComponent). */
+	UPROPERTY(BlueprintReadWrite, Category = "Hit")
+	bool bDeflected = false;
+
+	/** Landed on a hit zone that is already broken. */
+	UPROPERTY(BlueprintReadWrite, Category = "Hit")
+	bool bDeadPart = false;
+
+	/** This shot is the one that broke a hit zone (a track, the sights). Sounds like a shield break. */
+	UPROPERTY(BlueprintReadWrite, Category = "Hit")
+	bool bPartBroken = false;
+
 	/** Landed by something the player owns but is not holding: a turret firing the gun they gave
 	 *  it. The confirmation is theirs, but it is a report, not a reward: it draws as its own
 	 *  smaller marker, speaks with its own quieter set, and never punches the camera. */
@@ -186,6 +202,14 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Confirmation (2D)")
 	FHitFeedbackCue ZeroDamage;
+
+	/** Bounced off heavy plate: did nothing, and the player must hear that at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Confirmation (2D)")
+	FHitFeedbackCue Deflected;
+
+	/** Landed on a part that is already destroyed. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Confirmation (2D)")
+	FHitFeedbackCue DeadPart;
 
 	// ==================== Impacts, 3D, everyone ====================
 

@@ -87,6 +87,9 @@
 #include "Variant_Shooter/Abilities/AbilityHandler.h"
 #include "Variant_Shooter/Abilities/AbilityDefinition_Grapple.h"
 #include "Variant_Shooter/Abilities/AbilityHandler_Grapple.h"
+#include "Variant_Shooter/Abilities/AbilityDefinition_Throw.h"
+#include "Variant_Shooter/Abilities/AbilityHandler_Throw.h"
+#include "Upgrades/Upgrades/Upgrade_MeleeCloak.h"
 #include "Variant_Shooter/UI/LootCardWidget.h"
 #include "Variant_Shooter/UI/LootOutline.h"
 #include "CableComponent.h"
@@ -553,6 +556,10 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Started, this, &AShooterCharacter::DoAbilityPressed);
 			EnhancedInputComponent->BindAction(AbilityAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoAbilityReleased);
 		}
+		if (FetchAction)
+		{
+			EnhancedInputComponent->BindAction(FetchAction, ETriggerEvent::Started, this, &AShooterCharacter::DoFetchPressed);
+		}
 
 		// Building: the menu key, the slot keys and the placement keys. The actions themselves live
 		// on the component, next to the mapping contexts it pushes and pops.
@@ -685,6 +692,7 @@ void AShooterCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	// Everyone needs both: a downed player is a ragdoll on every screen, and a rescuer has to be
 	// able to see that the body in front of them is one that can be picked up.
 	DOREPLIFETIME(AShooterCharacter, bIsDowned);
+	DOREPLIFETIME(AShooterCharacter, bCloaked);
 	DOREPLIFETIME(AShooterCharacter, bTerminalDeath);
 }
 
@@ -978,6 +986,8 @@ void AShooterCharacter::EnterDownedState()
 	{
 		AbilityComponent->CancelCast();
 	}
+	AbortItemFetch();
+	SetCloaked(false);
 	if (IsValid(CurrentWeapon))
 	{
 		CurrentWeapon->DeactivateWeapon();
@@ -1275,7 +1285,7 @@ namespace
 }
 
 void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
-	AShooterWeapon* Weapon)
+	AShooterWeapon* Weapon, FName HitBone)
 {
 	if (!HitActor || Damage <= 0.0f)
 	{
@@ -1290,12 +1300,13 @@ void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<U
 		{
 			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 		}
+		DamageEvent.HitInfo.BoneName = HitBone;
 		HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
 		return;
 	}
 
 	// Client: the hit only counts once the server has applied it.
-	Server_ReportDamage(HitActor, Damage, DamageTypeClass, Weapon);
+	Server_ReportDamage(HitActor, Damage, DamageTypeClass, Weapon, HitBone);
 }
 
 void AShooterCharacter::Server_FireProjectile_Implementation(AShooterWeapon* Weapon,
@@ -1325,7 +1336,7 @@ void AShooterCharacter::Server_FireProjectile_Implementation(AShooterWeapon* Wea
 }
 
 void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, float Damage,
-	TSubclassOf<UDamageType> DamageTypeClass, AShooterWeapon* Weapon)
+	TSubclassOf<UDamageType> DamageTypeClass, AShooterWeapon* Weapon, FName HitBone)
 {
 	if (!HitActor || Damage <= 0.0f)
 	{
@@ -1386,6 +1397,9 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 	{
 		DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 	}
+	// Which bone the client says it hit: decides armour coverage on the victim. Not validated, the
+	// same trust as the rest of the report; the worst a lie buys is a limb hit going past armour.
+	DamageEvent.HitInfo.BoneName = HitBone;
 
 	// The class passive's own damage, first and unconditionally. It is the half that is meant to
 	// reach health through a shield that is still standing, so it must not sit behind the gate the
@@ -1463,6 +1477,84 @@ void AShooterCharacter::Server_ReportMeleeDamage_Implementation(AActor* HitActor
 	HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
 }
 
+// ==================== Melee upgrades: cloak and kick recoil ====================
+
+void AShooterCharacter::SetCloaked(bool bNewCloaked, float Duration)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearTimer(CloakTimer);
+	if (bNewCloaked && Duration > 0.0f)
+	{
+		FTimerDelegate Expire;
+		Expire.BindWeakLambda(this, [this]() { SetCloaked(false); });
+		GetWorldTimerManager().SetTimer(CloakTimer, Expire, Duration, false);
+	}
+
+	if (bCloaked == bNewCloaked)
+	{
+		return;
+	}
+	bCloaked = bNewCloaked;
+
+	UE_LOG(LogTemp, Warning, TEXT("[CLOAK_DEBUG] %s cloak %s (%.1fs)"), *GetName(),
+		bCloaked ? TEXT("ON") : TEXT("OFF"), Duration);
+
+	// The listen server is a machine with a screen too, and gets no OnRep for its own writes.
+	OnRep_Cloaked();
+}
+
+void AShooterCharacter::OnRep_Cloaked()
+{
+	BP_OnCloakChanged(bCloaked);
+}
+
+void AShooterCharacter::Server_RequestMeleeCloak_Implementation()
+{
+	const UUpgrade_MeleeCloak* const Cloak = FindComponentByClass<UUpgrade_MeleeCloak>();
+	if (!Cloak || bIsDowned || IsDead())
+	{
+		return;
+	}
+
+	KeepHandsEmptyAfterMelee();
+	SetCloaked(true, Cloak->GetCloakDuration());
+}
+
+void AShooterCharacter::Server_EndMeleeCloak_Implementation()
+{
+	SetCloaked(false);
+}
+
+void AShooterCharacter::KeepHandsEmptyAfterMelee()
+{
+	if (WeaponSwitchPhase == EWeaponSwitchPhase::StowedForMelee)
+	{
+		bRestoreHolsterAfterMelee = true;
+	}
+}
+
+void AShooterCharacter::Server_ApplyMeleeRecoil_Implementation(FVector LaunchVelocity)
+{
+	// Bounded the same way a reported shove is: never more than the melee settings on THIS machine
+	// say a hit can throw somebody.
+	const float MaxSpeed = MeleeAttackComponent ? MeleeAttackComponent->GetMaxReportedKnockbackDistance() * 4.0f : 0.0f;
+	if (MaxSpeed <= 0.0f || bIsDowned || IsDead())
+	{
+		return;
+	}
+
+	// The owning client has already launched itself; the host's own character is launched by the
+	// caller. So this only has to move the authority's copy of a REMOTE player.
+	if (!IsLocallyControlled())
+	{
+		LaunchCharacter(LaunchVelocity.GetClampedToMaxSize(MaxSpeed), true, true);
+	}
+}
+
 void AShooterCharacter::Server_ReportMeleeKnockback_Implementation(AActor* Target, FVector Direction,
 	float Distance, float Duration)
 {
@@ -1496,6 +1588,12 @@ void AShooterCharacter::Server_ReportMeleeKnockback_Implementation(AActor* Targe
 		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s reported a %.0f cm melee shove, ceiling is %.0f - clamped"),
 			*GetName(), Distance, DistanceCeiling);
 		Distance = DistanceCeiling;
+	}
+
+	// The one place the authority learns a client's swing landed. @see UUpgradeComponent::OnMeleeHitAuthority
+	if (UpgradeManager)
+	{
+		UpgradeManager->NotifyMeleeHitAuthority(Target);
 	}
 
 	// The attacker is whoever sent this, so its location is right here and does not need sending.
@@ -1583,13 +1681,13 @@ void AShooterCharacter::Server_ReportBeamEffect_Implementation(AShooterWeapon* W
 }
 
 void AShooterCharacter::Server_ReportImpactEffect_Implementation(AShooterWeapon* Weapon,
-	FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte)
+	FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte, uint8 ScaleByte)
 {
 	// Ownership rather than "is it equipped", same as the shot and the reload above: an impact from
 	// a bullet fired a moment before a weapon switch still belongs to this player.
 	if (Weapon && OwnedWeapons.Contains(Weapon))
 	{
-		Weapon->Multicast_PlayImpactEffect(Location, Normal, SurfaceByte);
+		Weapon->Multicast_PlayImpactEffect(Location, Normal, SurfaceByte, ScaleByte);
 	}
 }
 
@@ -2521,8 +2619,11 @@ void AShooterCharacter::UpdateLeftHandPose(float DeltaTime)
 {
 	const bool bWallrunning = GetApexMovement() && GetApexMovement()->IsWallRunning();
 
+	// The cast offset poses the left arm for a one-armed cast. A throw is a two-handed animation of
+	// its own, and the offset on top of it drags the left hand somewhere the animation never put it.
 	const UAbilityComponent* AbilComp = FindComponentByClass<UAbilityComponent>();
-	const bool bCasting = AbilComp && AbilComp->IsCasting();
+	const bool bCasting = AbilComp && AbilComp->IsCasting()
+		&& !Cast<UAbilityDefinition_Throw>(AbilComp->GetActiveAbility());
 
 	LeftHandWallrunAlpha = FMath::FInterpTo(LeftHandWallrunAlpha, bWallrunning ? 1.0f : 0.0f,
 		DeltaTime, LeftHandPoseInterpSpeed);
@@ -3653,12 +3754,12 @@ void AShooterCharacter::DoAbilityPressed()
 		return;
 	}
 
-	// The grapple fetches whatever drop the brackets are on. The claim goes first so the server has
-	// it when the activation lands (same actor channel, both reliable, so they arrive in order), and
-	// it goes even when it is null, so an old claim cannot ride along on a press that aimed at a wall.
-	if (AbilityComponent && Cast<UAbilityDefinition_Grapple>(AbilityComponent->GetActiveAbility()))
+	// A thrown ability draws its arc while the key stays down. Remembered here, locally, because the
+	// handler that runs the throw lives on the authority and this is the owning player's own screen.
+	if (AbilityComponent && Cast<UAbilityDefinition_Throw>(AbilityComponent->GetActiveAbility()))
 	{
-		Server_SetGrappleFetchTarget(GrappleFetchTarget.Get());
+		bThrowAimHeld = true;
+		ThrowAimPressTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	}
 
 	if (AbilityComponent)
@@ -3667,10 +3768,33 @@ void AShooterCharacter::DoAbilityPressed()
 	}
 }
 
+void AShooterCharacter::UpdateThrowAiming()
+{
+	if (!bThrowAimHeld || !IsLocallyControlled() || !AbilityComponent)
+	{
+		return;
+	}
+
+	// IsCasting is the authority's answer, so a press it refused (cooldown) never draws an arc.
+	const UAbilityDefinition_Throw* ThrowDef = Cast<UAbilityDefinition_Throw>(AbilityComponent->GetActiveAbility());
+	if (!ThrowDef || !AbilityComponent->IsCasting())
+	{
+		return;
+	}
+
+	const float HeldFor = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f) - ThrowAimPressTime;
+	if (HeldFor >= ThrowDef->AimPreviewDelay)
+	{
+		UAbilityHandler_Throw::DrawAimPreview(this, ThrowDef);
+	}
+}
+
 void AShooterCharacter::DoAbilityReleased()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_INPUT_DEBUG] DoAbilityReleased (C++ AbilityAction binding) @ %.3fs"),
 		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
+
+	bThrowAimHeld = false;
 
 	// Hand the authority the enemy that was actually highlighted, THEN fire. Order matters: the
 	// handler reads the aim target, so it has to be there before the activation arrives.
@@ -3690,11 +3814,126 @@ void AShooterCharacter::DoAbilityReleased()
 	}
 }
 
-void AShooterCharacter::Server_SetGrappleFetchTarget_Implementation(AActor* FetchTarget)
+void AShooterCharacter::DoFetchPressed()
 {
-	// Believed here and checked where it is used, like the ability aim target below: the handler
-	// runs the reach and availability test itself. @see UAbilityHandler_Grapple::OnActivate
-	GrappleFetchClaim = FetchTarget;
+	if (!FetchDefinition || IsWeaponSwitchInProgress())
+	{
+		return;
+	}
+
+	// The item the brackets are on, which this machine picked. Nothing bracketed, nothing thrown.
+	if (AActor* const Target = GrappleFetchTarget.Get())
+	{
+		Server_FetchItem(Target);
+	}
+}
+
+void AShooterCharacter::Server_FetchItem_Implementation(AActor* FetchTarget)
+{
+	// One hook: not while another fetch is in the air, and not while an ability has the hands
+	// (the grapple swing draws the same cable).
+	if (!FetchDefinition || bItemFetchInFlight || bIsDowned || IsDead()
+		|| (AbilityComponent && AbilityComponent->IsCasting()))
+	{
+		return;
+	}
+
+	static constexpr float FetchClaimMarginCm = 300.0f;
+	if (!UAbilityHandler_Grapple::IsFetchable(this, FetchTarget, FetchDefinition, FetchClaimMarginCm))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s claimed %s, but it is taken or out of reach"),
+			*GetName(), *GetNameSafe(FetchTarget));
+		return;
+	}
+
+	StartItemFetch(FetchTarget);
+}
+
+void AShooterCharacter::StartItemFetch(AActor* Drop)
+{
+	UWorld* const World = GetWorld();
+	if (!World || !Drop || !FetchDefinition)
+	{
+		return;
+	}
+
+	PendingItemFetch = Drop;
+	bItemFetchInFlight = true;
+
+	FVector Start, End;
+	GetAimRay(1.0f, Start, End);
+	FVector Anchor, Extent;
+	Drop->GetActorBounds(true, Anchor, Extent);
+
+	// The same flight speed as the grapple's own throw, so a fetch reads as the same hook.
+	const FGrappleLevelStats Stats = FetchDefinition->GetStatsAtLevel(1);
+	const float TravelTime = FVector::Dist(Start, Anchor) / FMath::Max(Stats.HookTravelSpeed, 1.0f);
+
+	// bCanAttach false: nobody swings. The drop rides the line back instead. @see UpdateGrappleVisual
+	Multicast_PlayGrappleThrow(Anchor, TravelTime, false, FetchDefinition, Drop);
+
+	// Both hands go on the line. The new gun is drawn when it arrives.
+	// @see ADroppedRangedWeapon::CompletePull
+	BeginWeaponFetchStow(FetchDefinition);
+
+	UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s threw at %s, %.0f cm, travel %.2fs"),
+		*GetName(), *Drop->GetName(), FVector::Dist(GetActorLocation(), Drop->GetActorLocation()), TravelTime);
+
+	if (TravelTime > 0.0f)
+	{
+		World->GetTimerManager().SetTimer(ItemFetchTravelTimer, this, &AShooterCharacter::FinishItemFetch,
+			TravelTime, false);
+	}
+	else
+	{
+		FinishItemFetch();
+	}
+}
+
+void AShooterCharacter::FinishItemFetch()
+{
+	if (!bItemFetchInFlight)
+	{
+		return;
+	}
+	bItemFetchInFlight = false;
+
+	AActor* const Drop = PendingItemFetch.Get();
+	PendingItemFetch.Reset();
+
+	// No radius test here, on purpose: the hook already reached it, and walking away while it flew
+	// should not snap the line. Only "somebody else got there first" is a refusal, and the item's
+	// own pull gate answers that.
+	IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Drop);
+	if (Fetchable && Fetchable->BeginGrappleFetchPull(this))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s hooked %s, pulling it in"), *GetName(), *Drop->GetName());
+		// A weapon gives the hands back itself; anything else is watched until it has arrived.
+		if (!Fetchable->FinishesFetchItself())
+		{
+			WatchGrappleFetch(Drop);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s's hook arrived, but %s is gone or already taken"),
+			*GetName(), *GetNameSafe(Drop));
+
+		// Nothing is coming back, so the weapon that was put away comes back out.
+		FinishWeaponFetch(false);
+	}
+}
+
+void AShooterCharacter::AbortItemFetch()
+{
+	if (!bItemFetchInFlight)
+	{
+		return;
+	}
+	bItemFetchInFlight = false;
+	PendingItemFetch.Reset();
+	GetWorldTimerManager().ClearTimer(ItemFetchTravelTimer);
+	FinishWeaponFetch(false);
 }
 
 void AShooterCharacter::WatchGrappleFetch(AActor* Item)
@@ -3719,13 +3958,6 @@ void AShooterCharacter::PollWatchedFetch()
 	GetWorldTimerManager().ClearTimer(WatchedFetchTimer);
 	WatchedFetch.Reset();
 	FinishWeaponFetch(false);
-}
-
-AActor* AShooterCharacter::ConsumeGrappleFetchClaim()
-{
-	AActor* Claim = GrappleFetchClaim.Get();
-	GrappleFetchClaim.Reset();
-	return Claim;
 }
 
 void AShooterCharacter::BeginWeaponFetchStow(const UAbilityDefinition_Grapple* Def)
@@ -4028,12 +4260,11 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 	}
 
 	// The brackets promise "press now and the hook brings this back", so they show only when that is
-	// true: the grapple is the ability in hand, it can fire right now, and nothing else has already
-	// borrowed the brackets for a different promise.
-	const UAbilityDefinition_Grapple* Def = AbilityComponent
-		? Cast<UAbilityDefinition_Grapple>(AbilityComponent->GetActiveAbility()) : nullptr;
+	// true: no ability has the hands, and nothing else has already borrowed the brackets for a
+	// different promise. Every player has the fetch hook, whatever ability is equipped.
+	const UAbilityDefinition_Grapple* Def = FetchDefinition;
 	AActor* Target = nullptr;
-	if (Def && Def->bCanFetchWeapons && AbilityComponent->CanActivate()
+	if (Def && Def->bCanFetchWeapons && !(AbilityComponent && AbilityComponent->IsCasting())
 		&& !bAbilityAiming && !bMeleeFocusReticleActive)
 	{
 		Target = UAbilityHandler_Grapple::FindFetchTarget(this, Def);
@@ -4111,7 +4342,7 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Input = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
 		{
-			const TArray<FKey> Keys = Input->QueryKeysMappedToAction(AbilityAction);
+			const TArray<FKey> Keys = Input->QueryKeysMappedToAction(FetchAction);
 			if (Keys.Num() > 0)
 			{
 				KeyLabel = Keys[0].GetDisplayName(false);
@@ -4431,6 +4662,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	// First of the three that borrow the brackets, so the other two always get the last word on them.
 	UpdateGrappleFetchAiming();
 	UpdateAbilityAiming();
+	UpdateThrowAiming();
 	UpdateMeleeFocusReticle();
 
 	// ==================== FPS Animation Pack: state handoff ====================
@@ -4926,11 +5158,12 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	float TargetAlpha = bWantsToAim ? 1.0f : 0.0f;
 
 	// Interpolate alpha (used by other systems like recoil WeaponFraction)
+	// A stock speeds the sight up and down (ShooterWeapon_Stock.cpp).
 	CurrentADSAlpha = FMath::FInterpTo(
 		CurrentADSAlpha,
 		TargetAlpha,
 		DeltaTime,
-		MovementSettings->ADSInterpSpeed
+		MovementSettings->ADSInterpSpeed * (CurrentWeapon ? CurrentWeapon->GetStockADSSpeed() : 1.0f)
 	);
 
 	DumpADSDiagnostics(this, CurrentADSAlpha, CurrentWeapon);
@@ -6621,7 +6854,7 @@ void AShooterCharacter::PlayFiringMontage(UAnimMontage* Montage)
 	}
 }
 
-void AShooterCharacter::PlayReloadMontage(UAnimMontage* Montage)
+void AShooterCharacter::PlayReloadMontage(UAnimMontage* Montage, float PlayRate)
 {
 	if (!Montage)
 	{
@@ -6633,7 +6866,7 @@ void AShooterCharacter::PlayReloadMontage(UAnimMontage* Montage)
 	{
 		if (UAnimInstance* AnimInstance = FPMesh->GetAnimInstance())
 		{
-			AnimInstance->Montage_Play(Montage);
+			AnimInstance->Montage_Play(Montage, PlayRate);
 		}
 	}
 
@@ -7019,7 +7252,21 @@ FVector AShooterCharacter::GetWeaponTargetLocation()
 	FHitResult OutHit;
 	GetWorld()->LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, QueryParams);
 
-	return OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
+	const FVector WorldPoint = OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
+
+	// Pawns ignore ECC_Visibility, so the trace above looks straight through an enemy and answers
+	// with the wall BEHIND it. A projectile leaves the muzzle, which sits below and beside the eye,
+	// and converges on that far point: at the enemy's own distance it is still off the crosshair,
+	// low, and a round aimed at a head went through the chest (every logged head-aimed shot read
+	// bone=spine_03). Whoever stands on the ray in front of the wall is what is being aimed at.
+	FHitResult PawnHit;
+	if (GetWorld()->LineTraceSingleByObjectType(PawnHit, Start, WorldPoint,
+		FCollisionObjectQueryParams(ECC_Pawn), QueryParams))
+	{
+		return PawnHit.ImpactPoint;
+	}
+
+	return WorldPoint;
 }
 
 static bool DropOwnedRangedWeaponForPickupReplacement(
@@ -8188,6 +8435,16 @@ void AShooterCharacter::OnWeaponHitFeedback(const FHitFeedbackContext& Context)
 		HitMarkerComponent->RegisterHitFeedback(Context);
 	}
 
+	// The enemy's bar comes up the moment this player's own shot connects, without waiting for the
+	// server's damage report. Local player only, and not for the turret's hits.
+	if (HitActor && !Context.bRemote && IsLocallyControlled())
+	{
+		if (UEMFChargeWidgetSubsystem* const Bars = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+		{
+			Bars->NotifyLocalHit(HitActor);
+		}
+	}
+
 	// === Stream style hook ===
 	if (bKilled)
 	{
@@ -9057,6 +9314,8 @@ void AShooterCharacter::Die()
 	{
 		AbilityComponent->CancelCast();
 	}
+	AbortItemFetch();
+	SetCloaked(false);
 
 	// Same reason as the cast above: the character is reused, so a swap caught mid-animation would
 	// carry its phase into the next life and lock firing there. The held trigger goes with it.

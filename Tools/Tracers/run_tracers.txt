@@ -1,0 +1,4 @@
+import unreal
+p = "C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_8/Source/Tools/Tracers/build_tracers" + "." + "py"
+g = {"__name__": "__main__", "__file__": p}
+exec(compile(open(p, encoding="utf-8").read(), p, "exec"), g)

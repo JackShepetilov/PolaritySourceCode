@@ -762,7 +762,26 @@ void UAbilityComponent::StartCooldown(float Duration)
 		return;
 	}
 	CooldownTimeRemaining = Duration;
+	CooldownTotal = Duration;
 	OnCooldownStarted.Broadcast(Duration);
+}
+
+void UAbilityComponent::ReduceCooldownByFraction(float Fraction)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || CooldownTimeRemaining <= 0.0f || Fraction <= 0.0f)
+	{
+		return;
+	}
+
+	CooldownTimeRemaining = FMath::Max(0.0f, CooldownTimeRemaining - CooldownTotal * FMath::Min(Fraction, 1.0f));
+	if (CooldownTimeRemaining <= 0.0f)
+	{
+		OnCooldownEnded.Broadcast();
+	}
+	else
+	{
+		OnCooldownAdjusted.Broadcast(CooldownTimeRemaining, CooldownTotal);
+	}
 }
 
 // ==================== Handler factory ====================

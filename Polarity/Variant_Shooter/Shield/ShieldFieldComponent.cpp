@@ -9,7 +9,12 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
+#include "Sound/SoundAttenuation.h"
+#include "Sound/SoundBase.h"
 #include "TimerManager.h"
 
 UShieldFieldComponent::UShieldFieldComponent()
@@ -53,6 +58,11 @@ float UShieldFieldComponent::GetShieldFraction() const
 		return 1.0f;
 	}
 	return FMath::Clamp(CurrentShield / MaxShield, 0.0f, 1.0f);
+}
+
+bool UShieldFieldComponent::CoversBone(FName BoneName) const
+{
+	return BoneName.IsNone() || CoveredBones.Num() == 0 || CoveredBones.Contains(BoneName);
 }
 
 float UShieldFieldComponent::AbsorbDamage(float InDamage, AActor* Instigator, UPrimitiveComponent* HitComponent)
@@ -200,11 +210,33 @@ void UShieldFieldComponent::HandleShieldTransition(bool bWasUp, bool bIsUp, AAct
 	// fields, already configured on the assets), so it is deliberately not played here as well.
 	if (bWasUp && !bIsUp)
 	{
+		PlayTransitionPresentation(BreakEffect, BreakSound);
 		OnShieldBroken.Broadcast(Instigator, HitComponent);
 	}
 	else if (!bWasUp && bIsUp)
 	{
+		PlayTransitionPresentation(RestoredEffect, RestoredSound);
 		OnShieldRestored.Broadcast();
+	}
+}
+
+void UShieldFieldComponent::PlayTransitionPresentation(UNiagaraSystem* Effect, USoundBase* Sound) const
+{
+	const AActor* const Owner = GetOwner();
+	if (!Owner || GetNetMode() == NM_DedicatedServer || !HasBegunPlay())
+	{
+		return;
+	}
+
+	if (Effect && Owner->GetRootComponent())
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAttached(Effect, Owner->GetRootComponent(), NAME_None,
+			FVector::ZeroVector, FRotator::ZeroRotator, EAttachLocation::KeepRelativeOffset, true);
+	}
+
+	if (Sound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, Sound, Owner->GetActorLocation(), 1.0f, 1.0f, 0.0f, PresentationSoundAttenuation);
 	}
 }
 
@@ -230,9 +262,11 @@ void UShieldFieldComponent::UpdateRegenTimer()
 		return;
 	}
 
-	// Only a broken shield in Timed mode has a clock at all. Manual mode never starts one: the
-	// abilities are what bring a shield back there.
-	if (RegenMode != EShieldRegenMode::Timed || IsShieldUp() || MaxShield <= KINDA_SMALL_NUMBER)
+	// Only a shield below its pool in Timed mode has a clock at all, which is what the header says
+	// Timed means ("after RegenDelay without a hit it rebuilds"); it used to wait for a full break,
+	// so a merely damaged shield never came back. Manual mode never starts one: the abilities are
+	// what bring a shield back there.
+	if (RegenMode != EShieldRegenMode::Timed || CurrentShield >= MaxShield - KINDA_SMALL_NUMBER || MaxShield <= KINDA_SMALL_NUMBER)
 	{
 		World->GetTimerManager().ClearTimer(RegenTimerHandle);
 		return;
@@ -252,7 +286,7 @@ void UShieldFieldComponent::TickRegen()
 		return;
 	}
 
-	if (RegenMode != EShieldRegenMode::Timed || IsShieldUp())
+	if (RegenMode != EShieldRegenMode::Timed || CurrentShield >= MaxShield - KINDA_SMALL_NUMBER)
 	{
 		World->GetTimerManager().ClearTimer(RegenTimerHandle);
 		return;

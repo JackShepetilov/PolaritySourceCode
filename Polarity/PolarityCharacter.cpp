@@ -141,6 +141,20 @@ void APolarityCharacter::BeginPlay()
 					 "camera-parented hierarchy. The view will not follow the animation."),
 				*EyeSocket.ToString());
 
+			// The constructor already hung the camera off this mesh at the socket, so the camera has
+			// to come off it first. Without this the mesh -> camera attach below would form a cycle,
+			// the engine aborts it ("would form cycle. Aborting."), and the camera stays parented to a
+			// socket that does not resolve. Every NPC and drone has no first person mesh at all and
+			// lands here, and each transform update of that camera then logs
+			// "GetSocketInfoByName(FPCamera): No SkeletalMesh", which was 815 MB of log in one hour.
+			if (FirstPersonCameraComponent->GetAttachParent() != GetCapsuleComponent())
+			{
+				FirstPersonCameraComponent->AttachToComponent(GetCapsuleComponent(),
+					FAttachmentTransformRules::KeepRelativeTransform);
+			}
+			FirstPersonCameraComponent->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
+			FirstPersonCameraComponent->SetRelativeRotation(FRotator::ZeroRotator);
+
 			if (FirstPersonMesh->GetAttachParent() != FirstPersonCameraComponent)
 			{
 				FirstPersonMesh->AttachToComponent(FirstPersonCameraComponent,
@@ -1383,7 +1397,7 @@ UAISense_Sight::EVisibilityResult APolarityCharacter::CanBeSeenFrom(const FCanBe
 	OutSightStrength = 0.0f;
 
 	const UWorld* World = GetWorld();
-	if (!World)
+	if (!World || IsHiddenFromAI())
 	{
 		return UAISense_Sight::EVisibilityResult::NotVisible;
 	}

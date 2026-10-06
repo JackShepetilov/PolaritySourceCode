@@ -5,6 +5,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "UserSettings/EnhancedInputUserSettings.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "InputMappingContext.h"
 #include "Kismet/GameplayStatics.h"
@@ -22,6 +23,7 @@
 #include "AI/SquadSpawn/SquadSpawnSubsystem.h"
 #include "AI/SquadSpawn/SquadLoadout.h"
 #include "AI/SquadSpawn/SquadScenario.h"
+#include "Variant_Shooter/UI/DamageNumbersSubsystem.h"
 
 // ==================== Squad spawn console commands ====================
 
@@ -355,12 +357,77 @@ void AShooterPlayerController::SetRunHUDVisible(bool bVisible, bool bAnimated)
 	OnRunHUDVisibilityChanged.Broadcast(bVisible, bAnimated);
 }
 
+void AShooterPlayerController::Client_ReportDamageNumber_Implementation(AActor* Target, float Damage, float ArmorDamage, uint8 Flags)
+{
+	ShowDamageNumber(Target, Damage, ArmorDamage, Flags);
+}
+
+void AShooterPlayerController::ShowDamageNumber(AActor* Target, float Damage, float ArmorDamage, uint8 Flags)
+{
+	// The number is drawn for the person at this screen, and this controller is theirs.
+	if (!IsLocalController() || !Target)
+	{
+		return;
+	}
+	if (UDamageNumbersSubsystem* const Numbers = GetWorld() ? GetWorld()->GetSubsystem<UDamageNumbersSubsystem>() : nullptr)
+	{
+		Numbers->ReportDamageNumber(Target, Damage, ArmorDamage, Flags);
+	}
+}
+
 void AShooterPlayerController::SetupInputComponent()
 {
 	Super::SetupInputComponent();
 
 	// NOTE: IMC setup moved to BeginPlay() to ensure AddMappingContext and
 	// RegisterInputMappingContexts happen together (prevents Vector2D corruption)
+
+#if !UE_BUILD_SHIPPING
+	// Debug slow motion on F6, for looking at effects frame by frame: 1 -> 0.25 -> 0.05 -> 1.
+	// It only turns the existing polarity.debug.timescale; URunDirectorSubsystem applies that to
+	// the world on the authority every tick, so on a remote client the key changes nothing.
+	// A raw key and not an input action on purpose: a debug key should not need an asset.
+	if (InputComponent)
+	{
+		FInputKeyBinding SlowMotion(FInputChord(EKeys::F6), IE_Pressed);
+		SlowMotion.KeyDelegate.GetDelegateForManualSet().BindLambda([]()
+		{
+			IConsoleVariable* const TimeScale = IConsoleManager::Get().FindConsoleVariable(TEXT("polarity.debug.timescale"));
+			if (!TimeScale)
+			{
+				return;
+			}
+
+			const float Current = TimeScale->GetFloat();
+			const float Next = (Current > 0.5f) ? 0.25f : (Current > 0.1f ? 0.05f : 1.0f);
+			TimeScale->Set(Next, ECVF_SetByConsole);
+			UE_LOG(LogTemp, Log, TEXT("[TIME_DEBUG] polarity.debug.timescale = %.2f"), Next);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(7700, 2.0f, FColor::Yellow, FString::Printf(TEXT("Time x%.2f"), Next));
+			}
+		});
+		InputComponent->KeyBindings.Add(SlowMotion);
+
+		// Debug infinite ammo on F7: toggles polarity.debug.infiniteammo (see ShooterWeapon.cpp).
+		FInputKeyBinding InfiniteAmmo(FInputChord(EKeys::F7), IE_Pressed);
+		InfiniteAmmo.KeyDelegate.GetDelegateForManualSet().BindLambda([]()
+		{
+			if (IConsoleVariable* const Cheat = IConsoleManager::Get().FindConsoleVariable(TEXT("polarity.debug.infiniteammo")))
+			{
+				const int32 Next = Cheat->GetInt() != 0 ? 0 : 1;
+				Cheat->Set(Next, ECVF_SetByConsole);
+				UE_LOG(LogTemp, Log, TEXT("[AMMO_DEBUG] polarity.debug.infiniteammo = %d"), Next);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(7701, 2.0f, FColor::Yellow,
+						Next ? TEXT("Infinite ammo ON") : TEXT("Infinite ammo OFF"));
+				}
+			}
+		});
+		InputComponent->KeyBindings.Add(InfiniteAmmo);
+	}
+#endif
 }
 
 namespace

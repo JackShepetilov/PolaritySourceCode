@@ -4,7 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AbilityDefinition.h"
+#include "AbilityDefinition_Throw.h"
 #include "AbilityDefinition_NitroGate.generated.h"
 
 class ANitroGate;
@@ -50,7 +50,7 @@ struct FNitroGateLevelStats
  * changes when the planned upgrade gives enemies a different outcome.
  */
 UCLASS(BlueprintType)
-class POLARITY_API UAbilityDefinition_NitroGate : public UAbilityDefinition
+class POLARITY_API UAbilityDefinition_NitroGate : public UAbilityDefinition_Throw
 {
 	GENERATED_BODY()
 
@@ -85,7 +85,14 @@ public:
 	TArray<FNitroGateLevelStats> Levels;
 
 	virtual int32 GetMaxLevel() const override { return Levels.Num(); }
+
+	/** From Levels, as before. The throw base's own cooldown and charge fields are not read here. */
 	virtual FAbilityCommonStats GetCommonStatsAtLevel(int32 Level) const override;
+
+	virtual float GetThrowSpeed() const override { return ThrowSpeed; }
+
+	/** Read off the gate class, where the flight is configured, so the preview follows the gate. */
+	virtual float GetThrowGravityScale() const override;
 
 	UFUNCTION(BlueprintPure, Category = "Gate|Levels")
 	FNitroGateLevelStats GetStatsAtLevel(int32 Level) const;

@@ -9,6 +9,7 @@
 class UStaticMeshComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
+class UHitZoneComponent;
 
 /**
  * Visible damage progression on the tank hull (same shape as the flying drone's stages):
@@ -228,6 +229,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tank|Tracks")
 	bool IsImmobilized() const { return bImmobilized; }
 
+	UFUNCTION(BlueprintPure, Category = "Tank|Zones")
+	bool IsRamming() const { return bRamming; }
+
+	UFUNCTION(BlueprintPure, Category = "Tank|Zones")
+	bool IsBlind() const { return IsDazzled(); }
+
+	FName GetOpticsZoneName() const { return OpticsZone; }
+	FName GetTrackLeftZoneName() const { return TrackLeftZone; }
+	FName GetTrackRightZoneName() const { return TrackRightZone; }
+
 protected:
 
 	float TrackAccumulatedDamage = 0.0f;
@@ -240,6 +251,118 @@ protected:
 
 	UFUNCTION()
 	void OnRep_bImmobilized();
+
+	// ==================== Hit Zones ====================
+	// Docs/Damage_Model_Rework_Plan_2026-10-03.md §4, the author's rules: the hull plate takes heavy
+	// damage only; a track breaks under a rifle's magazine, one broken = slow, both = it stands; the
+	// sights take rifle fire too, a hit there blinds it for a while, and once they are gone the tank
+	// rams the nearest player or turret, without firing. The parts are boxes
+	// on the HitZones component (polarity.debug.hitzones 1 shows them). Without zones, the old track
+	// rule above (hits low on the hull) still applies.
+
+	/** The parts of the body. Zones named by the four names below. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UHitZoneComponent> HitZones;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tank|Zones")
+	FName TrackLeftZone = TEXT("TrackLeft");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tank|Zones")
+	FName TrackRightZone = TEXT("TrackRight");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Tank|Zones")
+	FName OpticsZone = TEXT("Optics");
+
+	/** Speed with one track gone (both gone: it stands). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float OneTrackSpeedMultiplier = 0.5f;
+
+	/** Each time the sights lose another this-much of their pool, the tank is blinded. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float OpticsBlindStep = 0.34f;
+
+	/** Seconds a hit on the sights blinds it. Blind: holds fire, turret sweeps. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.0", Units = "s"))
+	float OpticsBlindSeconds = 3.0f;
+
+	/** After a blinding ends, this long it cannot be blinded again (sights hits or a tactical light),
+	 *  so nothing keeps it blind forever. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.0", Units = "s"))
+	float BlindImmunitySeconds = 2.0f;
+
+	/** How far the turret sweeps either way while blind, and how long one sweep takes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.0", ClampMax = "180.0"))
+	float BlindSweepDegrees = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Zones", meta = (ClampMin = "0.5", Units = "s"))
+	float BlindSweepPeriod = 3.0f;
+
+	/** How long the burning wreck stands after death from heavy damage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Death", meta = (ClampMin = "1.0", Units = "s"))
+	float WreckSeconds = 45.0f;
+
+	/** Killed by heavy damage: dead for the game, standing for the eye. Set before Die() on purpose
+	 *  (AShooterNPC::GetWreckSeconds). */
+	UPROPERTY(ReplicatedUsing = OnRep_bWrecked, BlueprintReadOnly, Category = "Tank|Zones")
+	bool bWrecked = false;
+
+	UFUNCTION()
+	void OnRep_bWrecked();
+
+	/** Damage per contact while ramming. Tune on BP_TrackedTank. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Ramming", meta = (ClampMin = "0.0"))
+	float RamDamage = 40.0f;
+
+	/** Minimum time between contact hits, including when changing targets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Ramming", meta = (ClampMin = "0.05", Units = "s"))
+	float RamHitInterval = 1.0f;
+
+	/** Gap beyond physical contact that counts as a hit (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Ramming", meta = (ClampMin = "0.0", Units = "cm"))
+	float RamContactPadding = 10.0f;
+
+	/** How often to refresh the path to the remembered target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tank|Ramming", meta = (ClampMin = "0.1", Units = "s"))
+	float RamMoveInterval = 0.5f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_bRamming, BlueprintReadOnly, Category = "Tank|Ramming")
+	bool bRamming = false;
+
+	UFUNCTION()
+	void OnRep_bRamming();
+
+	void BeginRamming();
+	void TickRamming(float DeltaSeconds);
+	void SelectRamTarget();
+	bool IsRamTargetAlive(const AActor* Target) const;
+	TWeakObjectPtr<AActor> RamTarget;
+	float RamMoveClock = 0.0f;
+	float RamHitClock = 0.0f;
+
+	UFUNCTION()
+	void HandleZoneBroken(UHitZoneComponent* Zones, FName ZoneName);
+
+	UFUNCTION()
+	void HandleZonePoolHit(UHitZoneComponent* Zones, FName ZoneName, float Damage, AActor* Attacker);
+
+	virtual bool IsTriggerBlockedBySelf() const override { return IsBlind() || bRamming; }
+	virtual float GetWreckSeconds() const override { return bWrecked ? WreckSeconds : 0.0f; }
+	virtual void ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay) override;
+
+	/** Server: speed share left by the tracks (1 whole, OneTrackSpeedMultiplier with one gone). */
+	float TrackSpeedMultiplier = 1.0f;
+
+	/** Server: how many OpticsBlindStep the sights have lost so far. */
+	int32 OpticsBlindSteps = 0;
+
+	/** Server: no new blinding before this world time. */
+	float BlindImmuneUntil = -1.0f;
+
+	/** Server: the turret yaw the blind sweep swings around, and when it started. */
+	float BlindSweepCenterYaw = 0.0f;
+	float BlindSweepStart = -1.0f;
+
+	bool HasZones() const;
 
 	// ==================== Lifecycle & Overrides ====================
 

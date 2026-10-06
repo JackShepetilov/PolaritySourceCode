@@ -190,6 +190,16 @@ public:
 	UFUNCTION()
 	void OnRep_CurrentHP();
 
+	/** Health at full: CurrentHP as it stood at BeginPlay on the authority, and again after a pool
+	 *  reset. Replicated so a client that first sees an enemy already hurt still draws its bar
+	 *  against the right maximum. 0 until the authority has set it. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Replicated, Category = "Damage")
+	float ReplicatedMaxHP = 0.0f;
+
+	/** Full health for display. Never below current health, never zero while CurrentHP is not. */
+	UFUNCTION(BlueprintPure, Category = "Damage")
+	float GetMaxHealth() const { return FMath::Max(ReplicatedMaxHP, CurrentHP); }
+
 	// ==================== Shield bypass (Wizard active) ====================
 
 	/** While true, ionization aimed at this enemy is converted into health damage instead of charge.
@@ -285,6 +295,18 @@ public:
 	/** True while a tactical light's dazzle is running on this enemy. */
 	UFUNCTION(BlueprintPure, Category = "AI|Dazzle")
 	bool IsDazzled() const;
+
+	/** Knocked out of shooting for at least Duration from now; calling again while disarmed pushes
+	 *  the end out, never pulls it in. Gates TryStartShooting, so it covers what fires through that:
+	 *  the foot soldier. Flyers and the tank drive their own fire and are not touched. Authority. */
+	UFUNCTION(BlueprintCallable, Category = "AI|Disarm")
+	void ApplyFireLock(float Duration);
+
+	UFUNCTION(BlueprintPure, Category = "AI|Disarm")
+	bool IsFireLocked() const;
+
+	/** World time the disarm ends. */
+	float FireLockEndTime = -1.0f;
 
 	/** Inside Source's freezer cone: walk and turn slower, or for a flyer, run on slower time. Same
 	 *  source again replaces its numbers. */
@@ -615,13 +637,42 @@ protected:
 
 	// ==================== Hit Reactions ====================
 
-	/** Animation montage when hit from the front */
+	/** Legacy single flinch from the front. Used only when the pools below are all empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
 	TObjectPtr<UAnimMontage> HitReactionFrontMontage;
 
-	/** Animation montage when hit from behind */
+	/** Legacy single flinch from behind. Used only when the pools below are all empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
 	TObjectPtr<UAnimMontage> HitReactionBackMontage;
+
+	/** Flinch pools: additive montages, one picked at random per hit, never the same twice running.
+	 *
+	 *  Strength follows what the hit did. Light: the armour took it whole. Medium: it reached
+	 *  health. Heavy: it reached health through the head, or with HitReactionHeavyDamage or more.
+	 *  Direction comes second: a hit from behind takes Back, a hit from the side takes that side
+	 *  when its pool has anything, and a light hit from the front may borrow the side ones too.
+	 *  An empty pool falls back to the next weaker one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsLight;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsMedium;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsHeavy;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsBack;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsLeft;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools")
+	TArray<TObjectPtr<UAnimMontage>> HitReactionsRight;
+
+	/** A hit that reaches health with this much damage or more plays a Heavy flinch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions|Pools", meta = (ClampMin = "0.0"))
+	float HitReactionHeavyDamage = 50.0f;
 
 	/** Animation montage played during knockback */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions")
@@ -641,10 +692,18 @@ protected:
 
 	/** Minimum time between hit reaction animations */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hit Reactions", meta = (ClampMin = "0"))
-	float HitReactionCooldown = 0.5f;
+	float HitReactionCooldown = 0.2f;
 
 	/** Last time a hit reaction was played */
 	float LastHitReactionTime = -1.0f;
+
+	/** The flinch played last, so the next one is a different montage when the pool allows. */
+	TWeakObjectPtr<UAnimMontage> LastHitReactionMontage;
+
+	/** The flinch on every machine. Unreliable: one cosmetic twitch per hit, and a dropped one is
+	 *  simply a hit that did not twitch. The authority picks, so everyone sees the same montage. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayHitReaction(UAnimMontage* Montage);
 
 	/** Cone variance to apply while aiming */
 	UPROPERTY(EditAnywhere, Category = "Aim")
@@ -1214,6 +1273,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface", meta = (EditCondition = "bOverrideImpactSurface"))
 	TEnumAsByte<EPhysicalSurface> FleshImpactSurface = SurfaceType_Default;
 
+	/** Bones the hard armour visibly sits on (torso, head). While the shield holds, a hit on one of
+	 *  these looks like ShieldImpactSurface and a hit anywhere else like SoftArmorImpactSurface: the
+	 *  armour pool still takes both, but a round in the forearm does not throw plate fragments.
+	 *  Physics-asset body names, matched exactly. Empty = the whole body reads as ShieldImpactSurface
+	 *  (a drone's energy shield). A hit with no bone reads as ShieldImpactSurface too. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface", meta = (EditCondition = "bOverrideImpactSurface"))
+	TArray<FName> HardArmorBones;
+
+	/** Surface of a hit outside HardArmorBones while the shield still holds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Impact Surface", meta = (EditCondition = "bOverrideImpactSurface"))
+	TEnumAsByte<EPhysicalSurface> SoftArmorImpactSurface = SurfaceType_Default;
+
 public:
 
 	float GetChargeChangeOnMeleeHit() const { return ChargeChangeOnMeleeHit; }
@@ -1226,9 +1297,15 @@ public:
 	 *  shield is down (AShooterWeapon::IsTargetShieldDown), so the effect and the damage gate can
 	 *  never read two different numbers. */
 	UFUNCTION(BlueprintPure, Category = "Visuals|Impact Surface")
-	EPhysicalSurface GetImpactSurface(bool bShieldDown) const
+	EPhysicalSurface GetImpactSurface(bool bShieldDown, FName HitBone = NAME_None) const
 	{
-		return bShieldDown ? FleshImpactSurface.GetValue() : ShieldImpactSurface.GetValue();
+		if (bShieldDown)
+		{
+			return FleshImpactSurface.GetValue();
+		}
+
+		const bool bOnHardArmor = HitBone.IsNone() || HardArmorBones.Num() == 0 || HardArmorBones.Contains(HitBone);
+		return bOnHardArmor ? ShieldImpactSurface.GetValue() : SoftArmorImpactSurface.GetValue();
 	}
 
 	/** Delegate called when this NPC dies - can be bound in Blueprints */
@@ -1370,6 +1447,25 @@ public:
 	/** Handle incoming damage */
 	virtual float TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+protected:
+
+	/** Run a hit through this enemy's UShieldFieldComponent and return what is left over for health.
+	 *
+	 *  The one place the field is asked to absorb, shared by every TakeDamage that subtracts health
+	 *  itself (this class, AFlyingDrone, AKamikazeDroneNPC), so the three copies cannot drift apart.
+	 *  An enemy whose Blueprint carries no field, a broken field and the Wizard's opened window
+	 *  (bShieldBypassActive) all return Damage untouched. Authority only. */
+	float AbsorbDamageWithShieldField(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser);
+
+	/** Send the damage number for this hit to the player who dealt it. Server only.
+	 *
+	 *  Called once by every TakeDamage that writes health (this class, AFlyingDrone,
+	 *  AKamikazeDroneNPC), after health and death are settled, so the number knows the armour/health
+	 *  split and the kill for certain. The player is found from the instigating controller or up the
+	 *  causer's owner chain; a hit that reaches the player only through something they own (a turret)
+	 *  is marked remote. HealthDamage is what went past the armour. */
+	void ReportDamageNumber(float Damage, float HealthDamage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser);
+
 public:
 
 	//~Begin IShooterWeaponHolder interface
@@ -1437,7 +1533,7 @@ protected:
 	void DeactivateForDeath(float DestructionDelay, bool bHideMesh = true);
 
 	/** Play hit reaction animation based on damage direction */
-	void PlayHitReaction(const FVector& DamageDirection);
+	void PlayHitReaction(const FVector& DamageDirection, float Damage, float HealthDamage, bool bHeadHit);
 
 	/** Update overlay material based on current charge polarity */
 	void UpdateChargeOverlay(uint8 NewPolarity);
@@ -1467,6 +1563,15 @@ protected:
 
 	/** Try to start shooting (called periodically while waiting for permission) */
 	void TryStartShooting();
+
+	/** This body itself will not pull the trigger right now (a tank whose sights are blinded).
+	 *  TryStartShooting retries while it says so. */
+	virtual bool IsTriggerBlockedBySelf() const { return false; }
+
+	/** Above zero: death leaves the body standing, as it is, for this many seconds (a tank's wreck)
+	 *  instead of the death mode's visuals. Must answer the same on clients: back it with replicated
+	 *  state set before Die(). */
+	virtual float GetWreckSeconds() const { return 0.0f; }
 
 	/** Start the permission retry timer */
 	void StartPermissionRetryTimer();

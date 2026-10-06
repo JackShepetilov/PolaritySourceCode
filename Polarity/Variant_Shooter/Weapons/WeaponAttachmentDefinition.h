@@ -354,4 +354,28 @@ public:
 	/** Played where a jump leaves from. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle|Ricochet", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle && MuzzleEffect == EMuzzleEffect::Ricochet", EditConditionHides))
 	TObjectPtr<USoundBase> RicochetSound;
+
+	// ---------- Stock ----------
+	//
+	// Docs/Stock_Attachment_Plan_2026-10-01.md. Handling only. Speeds are multipliers on how fast
+	// a thing happens: 1.5 means it takes 1/1.5 of the time. Read live off the installed stock by
+	// AShooterWeapon::GetStock*, so nothing is cached and nothing has to be undone on removal.
+
+	/** Draw and holster of THIS gun: the switch montages play this much faster
+	 *  (AShooterWeapon::GetDrawPlayRate / GetHolsterPlayRate). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Stock", meta = (EditCondition = "Type == EWeaponAttachmentType::Stock", EditConditionHides, ClampMin = "0.1", ClampMax = "5.0"))
+	float SwapSpeedMultiplier = 1.0f;
+
+	/** How fast the sight comes up and goes down (the ADS alpha interp speed). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Stock", meta = (EditCondition = "Type == EWeaponAttachmentType::Stock", EditConditionHides, ClampMin = "0.1", ClampMax = "5.0"))
+	float ADSSpeedMultiplier = 1.0f;
+
+	/** Reload: montages, timers and the per round stages all run this much faster. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Stock", meta = (EditCondition = "Type == EWeaponAttachmentType::Stock", EditConditionHides, ClampMin = "0.1", ClampMax = "5.0"))
+	float ReloadSpeedMultiplier = 1.0f;
+
+	/** Multiplies the spread cone (base and bloom) while firing from the hip. Fades to 1 as the
+	 *  sight comes up, so aimed spread is left to the weapon. 0.6 = 40% tighter. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Stock", meta = (EditCondition = "Type == EWeaponAttachmentType::Stock", EditConditionHides, ClampMin = "0.0", ClampMax = "2.0"))
+	float HipSpreadMultiplier = 1.0f;
 };

@@ -27,6 +27,9 @@
 class UEMFVelocityModifier;
 class AActor;
 class UPrimitiveComponent;
+class UNiagaraSystem;
+class USoundBase;
+class USoundAttenuation;
 
 /** How the shield comes back after it has been stripped. */
 UENUM(BlueprintType)
@@ -99,6 +102,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Shield")
 	float GetMaxShield() const { return MaxShield; }
 
+	/** Does the armour cover a hit on this bone. True for an empty CoveredBones list (whole body)
+	 *  and for a hit with no bone at all (explosion, melee, a drone with no skeleton). */
+	UFUNCTION(BlueprintPure, Category = "Shield")
+	bool CoversBone(FName BoneName) const;
+
 	// ==================== The two ways damage enters ====================
 
 	/** Take InDamage against the pool and return what is LEFT OVER for health.
@@ -165,8 +173,10 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_Shield)
 	float CurrentShield = 0.0f;
 
-	/** Pool size, replicated so a client's bar normalises against the number the server used. */
-	UPROPERTY(ReplicatedUsing = OnRep_Shield)
+	/** Pool size, replicated so a client's bar normalises against the number the server used.
+	 *  Authored on the Blueprint that carries the component; UEnemyCombatProfile::ShieldCharge
+	 *  overrides it when set. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_Shield, Category = "Shield", meta = (ClampMin = "0.0"))
 	float MaxShield = 50.0f;
 
 	/** Polarity the field carries, -1 / 0 / +1, written by the ionization working on it. Presentation. */
@@ -178,6 +188,15 @@ protected:
 
 	UFUNCTION()
 	void OnRep_Shield();
+
+	// ==================== Coverage ====================
+
+	/** Bones the armour sits on. Empty = the whole body. Names are the bodies of the physics asset
+	 *  on the owner mesh, matched exactly (a hit reports the body it struck): listing spine_03 does
+	 *  NOT pull in the arms hanging off it. A hit on any other bone goes past the armour, straight
+	 *  to health. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Coverage")
+	TArray<FName> CoveredBones;
 
 	// ==================== Shield recovery ====================
 
@@ -198,6 +217,29 @@ protected:
 	/** Below this fraction of the pool a holding shield reads as cracked. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CrackedFraction = 0.33f;
+
+	/** Played on the owner when the shield breaks: the event has no hit point, so the enemy states
+	 *  it itself (energy pop on a drone, plate cracking on a mercenary). Every machine plays its own
+	 *  from the same transition, no RPC. What a HIT on the shield looks like is not here: that is
+	 *  the weapon's impact by surface, AShooterNPC::ShieldImpactSurface. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation")
+	TObjectPtr<UNiagaraSystem> BreakEffect;
+
+	/** World sound of the break. Leave empty while the owner's UEMFVelocityModifier::ShieldBreakSound
+	 *  is set: that one still plays through the mirror, and both together would double it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation")
+	TObjectPtr<USoundBase> BreakSound;
+
+	/** Played on the owner when a broken shield comes back. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation")
+	TObjectPtr<UNiagaraSystem> RestoredEffect;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation")
+	TObjectPtr<USoundBase> RestoredSound;
+
+	/** Attenuation for both sounds above. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Presentation")
+	TObjectPtr<USoundAttenuation> PresentationSoundAttenuation;
 
 	// ==================== The bridge to polarity physics ====================
 
@@ -220,6 +262,9 @@ protected:
 
 	/** Both sides of a whole<->broken transition. Server walks it in the mutation, client in OnRep. */
 	void HandleShieldTransition(bool bWasUp, bool bIsUp, AActor* Instigator, UPrimitiveComponent* HitComponent);
+
+	/** The owner's own break / restore presentation. Cosmetic, skipped on a dedicated server. */
+	void PlayTransitionPresentation(UNiagaraSystem* Effect, USoundBase* Sound) const;
 
 	/** One-way bridge: the shield hands its polarity to the charge meter. Never the reverse. */
 	void FeedPolarityCharge(float SignedAmount);

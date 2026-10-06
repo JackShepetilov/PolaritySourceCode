@@ -14,6 +14,7 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "Variant_Shooter/Shield/ShieldFieldComponent.h"
+#include "Components/ProgressBar.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Engine/World.h"
@@ -94,12 +95,13 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	}
 
 	// Distance-based scaling using EffectiveMinScaleDistance (adjusted by clutter reduction)
+	float Scale = 1.0f;
 	if (bEnableDistanceScaling)
 	{
 		float Distance = FVector::Dist(CameraLocation, WorldPos);
 		float ScaleRange = FMath::Max(EffectiveMinScaleDistance - MaxScaleDistance, 1.0f);
 		float Alpha = FMath::Clamp((Distance - MaxScaleDistance) / ScaleRange, 0.0f, 1.0f);
-		float Scale = FMath::Lerp(MaxWidgetScale, MinWidgetScale, Alpha);
+		Scale = FMath::Lerp(MaxWidgetScale, MinWidgetScale, Alpha);
 
 		// Hide widget when scale is effectively zero
 		if (Scale < KINDA_SMALL_NUMBER)
@@ -144,7 +146,18 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 
 		const float Outer = FMath::Max(ScreenCenterOuterRadius, ScreenCenterInnerRadius);
 		const float FadeBand = FMath::Max(Outer - ScreenCenterInnerRadius, KINDA_SMALL_NUMBER);
-		const float FocusAlpha = 1.0f - FMath::Clamp((NormalizedDist - ScreenCenterInnerRadius) / FadeBand, 0.0f, 1.0f);
+		float FocusAlpha = 1.0f - FMath::Clamp((NormalizedDist - ScreenCenterInnerRadius) / FadeBand, 0.0f, 1.0f);
+
+		// AUTHOR'S CALL 2026-10-04: the bar also stays up for a while after the player's own hit,
+		// wherever the crosshair has gone since, so it does not vanish mid-fight as the aim moves to
+		// the next target. Fades out over the last fifth of a second of that window.
+		if (ShowAfterHitSeconds > 0.0f && LastLocalHitTime >= 0.0)
+		{
+			const double Since = PC->GetWorld()->GetTimeSeconds() - LastLocalHitTime;
+			constexpr float FadeOutSeconds = 0.2f;
+			const float RecentAlpha = FMath::Clamp(static_cast<float>(ShowAfterHitSeconds - Since) / FadeOutSeconds, 0.0f, 1.0f);
+			FocusAlpha = FMath::Max(FocusAlpha, RecentAlpha);
+		}
 
 		if (FocusAlpha <= KINDA_SMALL_NUMBER)
 		{
@@ -164,6 +177,27 @@ void UEMFChargeWidget::UpdateScreenPosition(APlayerController* PC)
 	SetPositionInViewport(ScreenPosition, true);
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 	bWasVisibleLastFrame = true;
+}
+
+void UEMFChargeWidget::NotifyLocalHit()
+{
+	if (const UWorld* const World = GetWorld())
+	{
+		LastLocalHitTime = World->GetTimeSeconds();
+	}
+}
+
+float UEMFChargeWidget::ResolveMaxHP() const
+{
+	if (const AShooterNPC* const NPC = BoundNPC.Get())
+	{
+		const float Max = NPC->GetMaxHealth();
+		if (Max > 0.0f)
+		{
+			return Max;
+		}
+	}
+	return CachedMaxHP;
 }
 
 EChargeWidgetCategory UEMFChargeWidget::GetCategory() const
@@ -201,8 +235,9 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 	InNPC->OnDamageTaken.AddDynamic(this, &UEMFChargeWidget::OnNPCDamageTaken);
 	InNPC->OnHealthChanged.AddDynamic(this, &UEMFChargeWidget::OnNPCHealthChanged);
 
-	// Cache max HP for normalization
-	CachedMaxHP = InNPC->CurrentHP;
+	// Cache max HP for normalization. The enemy's replicated maximum when it has one: a client that
+	// first sees an enemy already hurt would otherwise draw that hurt value as full.
+	CachedMaxHP = InNPC->GetMaxHealth() > 0.0f ? InNPC->GetMaxHealth() : InNPC->CurrentHP;
 
 	// The shield is the field's number now, and it moves with damage rather than with charge, so the
 	// widget listens to the field itself. A bind without a field (never an NPC today, but the guard
@@ -228,7 +263,9 @@ void UEMFChargeWidget::BindToNPC(AShooterNPC* InNPC, float InVerticalOffset)
 	UpdateShieldState(false);
 	BP_OnBoundToNPC();
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
-	BP_OnHealthChanged(InNPC->CurrentHP, CachedMaxHP, 1.0f);
+	BP_OnHealthChanged(InNPC->CurrentHP, CachedMaxHP,
+		CachedMaxHP > 0.0f ? FMath::Clamp(InNPC->CurrentHP / CachedMaxHP, 0.0f, 1.0f) : 1.0f);
+	RefreshEnemyBars();
 }
 
 void UEMFChargeWidget::BindToProp(AEMFPhysicsProp* InProp, float InVerticalOffset)
@@ -391,6 +428,7 @@ void UEMFChargeWidget::ResetWidget()
 	CachedMaxCharge = 50.0f;
 	CachedMaxHP = 100.0f;
 	EffectiveMinScaleDistance = MinScaleDistance;
+	LastLocalHitTime = -1.0;
 
 	// Pooled widgets must not inherit the previous target's shield/focus state.
 	ShieldRemaining = 1.0f;
@@ -398,6 +436,12 @@ void UEMFChargeWidget::ResetWidget()
 	bShieldBroken = false;
 	bPropHasBeenCharged = false;
 	SetRenderOpacity(1.0f);
+
+	// RefreshEnemyBars hides the shield bar on an enemy with no field; the next target may be a prop.
+	if (UWidget* const ShieldBar = GetWidgetFromName(TEXT("Shield_PB")))
+	{
+		ShieldBar->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
 
 	// A pooled widget must not open on the previous target's damage readout. Cleared without firing
 	// the Blueprint event: the reset event below is where a Blueprint does its own tidying up.
@@ -558,6 +602,7 @@ void UEMFChargeWidget::HandleChargeUpdate(float InChargeValue, uint8 InPolarity)
 	// current by the time that event fires.
 	UpdateShieldState(true);
 	BP_OnChargeUpdated(CurrentCharge, CurrentPolarity, NormalizedCharge);
+	RefreshEnemyBars();
 }
 
 void UEMFChargeWidget::UpdateShieldState(bool bAllowBreakEffects)
@@ -651,12 +696,17 @@ void UEMFChargeWidget::OnNPCShieldChanged(float CurrentShield, float MaxShield)
 	// allowed here: the widget's own break sound only fires for targets whose field has no charge
 	// component to announce it, and the field always has one on an enemy.
 	UpdateShieldState(true);
+	RefreshEnemyBars();
 }
 
 void UEMFChargeWidget::OnNPCDamageTaken(AShooterNPC* DamagedNPC, float Damage, TSubclassOf<UDamageType> DamageType, FVector HitLocation, AActor* DamageCauser)
 {
 	// Kept for whatever else this hook feeds; the bar itself is driven by OnNPCHealthChanged now,
 	// which is the only one of the two that reaches a client.
+	//
+	// The drones' own TakeDamage copies (AFlyingDrone, AKamikazeDroneNPC) never broadcast
+	// OnHealthChanged on the authority, so this is the only post-damage news a host gets from them.
+	RefreshEnemyBars();
 }
 
 void UEMFChargeWidget::OnNPCHealthChanged(AShooterNPC* NPC, float NewHP)
@@ -666,14 +716,46 @@ void UEMFChargeWidget::OnNPCHealthChanged(AShooterNPC* NPC, float NewHP)
 		return;
 	}
 
-	// CachedMaxHP is taken from the NPC's HP at bind time. On the authority that is spawn time and
-	// therefore full health. On a client the widget binds when the enemy becomes relevant, which can
-	// be after it has already been hurt, and the bar would then read full at a damaged value. It
-	// self-corrects downward the moment more damage lands, and a real maximum on the NPC would fix
-	// it properly — there is no MaxHP field on the class today.
+	// The maximum comes from the NPC's replicated full health (AShooterNPC::GetMaxHealth), so a
+	// client that binds to an enemy already hurt no longer draws that hurt value as full.
 	const float HP = FMath::Max(NewHP, 0.0f);
-	const float Normalized = (CachedMaxHP > 0.0f) ? FMath::Clamp(HP / CachedMaxHP, 0.0f, 1.0f) : 0.0f;
-	BP_OnHealthChanged(HP, CachedMaxHP, Normalized);
+	const float MaxHP = ResolveMaxHP();
+	const float Normalized = (MaxHP > 0.0f) ? FMath::Clamp(HP / MaxHP, 0.0f, 1.0f) : 0.0f;
+	BP_OnHealthChanged(HP, MaxHP, Normalized);
+	RefreshEnemyBars();
+}
+
+void UEMFChargeWidget::RefreshEnemyBars()
+{
+	const AShooterNPC* const NPC = BoundNPC.Get();
+	if (!NPC)
+	{
+		return;
+	}
+
+	if (UProgressBar* const ShieldBar = Cast<UProgressBar>(GetWidgetFromName(TEXT("Shield_PB"))))
+	{
+		const UShieldFieldComponent* const Field = BoundShieldField.Get();
+		const bool bHasShield = Field && Field->GetMaxShield() > KINDA_SMALL_NUMBER;
+
+		// Hidden, not Collapsed: the readouts stacked over the bar keep their place.
+		ShieldBar->SetVisibility(bHasShield ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
+		if (bHasShield)
+		{
+			ShieldBar->SetPercent(Field->GetShieldFraction());
+		}
+	}
+
+	if (UProgressBar* const HealthBar = Cast<UProgressBar>(GetWidgetFromName(TEXT("HP_PB"))))
+	{
+		const float HP = FMath::Max(NPC->CurrentHP, 0.0f);
+		const float MaxHP = ResolveMaxHP();
+		HealthBar->SetPercent((MaxHP > 0.0f) ? FMath::Clamp(HP / MaxHP, 0.0f, 1.0f) : 0.0f);
+		if (UWidget* const HealthBox = HealthBar->GetParent())
+		{
+			HealthBox->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+	}
 }
 
 // ==================== Capture Zone ====================

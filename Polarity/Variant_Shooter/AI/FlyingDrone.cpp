@@ -262,8 +262,9 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 		}
 	}
 
-	// Reduce HP
-	CurrentHP -= Damage;
+	// Reduce HP, shield field first (same door as AShooterNPC::TakeDamage)
+	const float HealthDamage = AbsorbDamageWithShieldField(Damage, DamageEvent, EventInstigator, DamageCauser);
+	CurrentHP -= HealthDamage;
 
 	// Handle melee charge transfer (copied from ShooterNPC)
 	if (DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass()))
@@ -309,6 +310,7 @@ float AFlyingDrone::TakeDamage(float Damage, struct FDamageEvent const& DamageEv
 	// Broadcast damage taken event for damage numbers system
 	// Use actor center + offset for hit location (same as ShooterNPC)
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
+	ReportDamageNumber(Damage, HealthDamage, DamageEvent, EventInstigator, DamageCauser);
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
 	// Damage-stage progression and repair-retreat bookkeeping

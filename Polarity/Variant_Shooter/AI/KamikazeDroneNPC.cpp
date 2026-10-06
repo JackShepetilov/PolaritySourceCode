@@ -1301,8 +1301,9 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 		}
 	}
 
-	// Reduce HP
-	CurrentHP -= Damage;
+	// Reduce HP, shield field first (same door as AShooterNPC::TakeDamage)
+	const float HealthDamage = AbsorbDamageWithShieldField(Damage, DamageEvent, EventInstigator, DamageCauser);
+	CurrentHP -= HealthDamage;
 
 	// Handle melee: parry instead of charge transfer
 	const bool bIsMeleeDamage = DamageEvent.DamageTypeClass && DamageEvent.DamageTypeClass->IsChildOf(UDamageType_Melee::StaticClass());
@@ -1348,6 +1349,7 @@ float AKamikazeDroneNPC::TakeDamage(float Damage, struct FDamageEvent const& Dam
 
 	// Broadcast damage event
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 30.0f);
+	ReportDamageNumber(Damage, HealthDamage, DamageEvent, EventInstigator, DamageCauser);
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
 	// Retaliation: flag only — the StateTree condition reads it and calls BeginAttack.

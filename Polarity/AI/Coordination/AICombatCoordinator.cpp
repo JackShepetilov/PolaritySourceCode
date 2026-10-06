@@ -1921,6 +1921,13 @@ bool AAICombatCoordinator::HasLineOfSightToTarget(APawn* NPC) const
 		return false;
 	}
 
+	// And a cloaked player, who has collision and still is not there to be seen.
+	const APolarityCharacter* const TargetBody = Cast<APolarityCharacter>(Target);
+	if (TargetBody && TargetBody->IsHiddenFromAI())
+	{
+		return false;
+	}
+
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		HitResult, Start, End, ECC_Visibility, QueryParams
 	);

@@ -661,6 +661,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Melee|Validation")
 	float GetMaxReportedKnockbackDistance() const;
 
+	/** The owner's velocity when the current swing began, before the lunge changed it. What a
+	 *  momentum bonus is measured from. */
+	FVector GetOwnerVelocityAtAttackStart() const { return OwnerVelocityAtAttackStart; }
+
 	/** Actually shove Target, on the machine that owns the decision.
 	 *
 	 *  Static and public because the server reaches it from AShooterCharacter::Server_ReportMeleeKnockback

@@ -51,6 +51,11 @@ public:
 	 *
 	 *  The sight radius and the vision cone are checked by the sense BEFORE this is called, so this
 	 *  answers only the question of what is in the way. */
+	/** True while nothing may see this body, whatever stands between them. The player's cloak
+	 *  answers true; everything else never does. Read by CanBeSeenFrom and by the hand-rolled
+	 *  line-of-sight checks that sit beside it. */
+	virtual bool IsHiddenFromAI() const { return false; }
+
 	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context,
 		FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested,
 		float& OutSightStrength, int32* UserData = nullptr,

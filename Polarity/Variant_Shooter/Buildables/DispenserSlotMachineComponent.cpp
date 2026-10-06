@@ -50,6 +50,47 @@ namespace SlotMachine
 		}
 	}
 
+	/** Fits at least one of these guns. */
+	bool FitsAnyGun(const UWeaponAttachmentDefinition* Definition, const TArray<AShooterWeapon*>& Guns)
+	{
+		for (const AShooterWeapon* const Gun : Guns)
+		{
+			if (Gun && Definition->FitsWeapon(Gun->GetClass()))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Fills a slot the spinner actually lacks: it fits a gun in hand, that gun has nothing of this
+	 *  type on it, and nothing in the bag would fill the slot either. */
+	bool IsWantedAttachment(const UWeaponAttachmentDefinition* Definition, const TArray<AShooterWeapon*>& Guns,
+		const TArray<const UWeaponAttachmentDefinition*>& Owned)
+	{
+		for (const AShooterWeapon* const Gun : Guns)
+		{
+			if (!Gun || !Definition->FitsWeapon(Gun->GetClass()))
+			{
+				continue;
+			}
+			bool bSlotFilled = false;
+			for (const UWeaponAttachmentDefinition* const Have : Owned)
+			{
+				if (Have && Have->Type == Definition->Type && Have->FitsWeapon(Gun->GetClass()))
+				{
+					bSlotFilled = true;
+					break;
+				}
+			}
+			if (!bSlotFilled)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	float Eval(const FRuntimeFloatCurve& Source, float X, float Fallback)
 	{
 		const FRichCurve* const Curve = Source.GetRichCurveConst();
@@ -214,10 +255,126 @@ int32 UDispenserSlotMachineComponent::RankOf(const FDispenserCard& Card)
 
 void UDispenserSlotMachineComponent::RollCard(float StakeValue, const UDispenserUpgradePool* Pool,
 	const AShooterCharacter* Player, TArray<const UUpgradeDefinition*>& UsedUpgrades, TArray<int32>& UsedAttachments,
-	FDispenserCard& OutCard) const
+	bool bForceWanted, FDispenserCard& OutCard, bool& bOutWanted) const
 {
 	const UUpgradeManagerComponent* const Upgrades = Player ? Player->GetUpgradeManager() : nullptr;
 	OutCard = FDispenserCard();
+	bOutWanted = false;
+
+	TArray<const UWeaponAttachmentDefinition*> Owned;
+	GatherOwnedAttachments(Player, Owned);
+	TArray<AShooterWeapon*> Guns;
+	if (Player)
+	{
+		for (AShooterWeapon* const Gun : Player->GetOwnedWeapons())
+		{
+			if (Gun && !Gun->IsMeleeWeapon())
+			{
+				Guns.Add(Gun);
+			}
+		}
+	}
+
+	// The rarest attachments that fit under the roll, drawn by weight. Only ones that fit a gun in the
+	// spinner's hands (empty hands: any), wanted ones weighing WantedAttachmentWeight times more. A
+	// family (Mag.Light) only offers a tier above the best of that family the player has; a thing
+	// already owned may carry its own, lower weight. bWantedOnly: the pity reel's draw.
+	const auto DrawAttachment = [&](EUpgradeRarity Rolled, bool bWantedOnly, bool& bOutDrawnWanted) -> int32
+	{
+		bOutDrawnWanted = false;
+		EUpgradeRarity Top = EUpgradeRarity::Common;
+		TArray<int32> Candidates;
+		TArray<float> Weights;
+		TArray<bool> Wanted;
+		for (int32 Index = 0; Index < Pool->Attachments.Num(); ++Index)
+		{
+			const FDispenserAttachmentEntry& Entry = Pool->Attachments[Index];
+			const UWeaponAttachmentDefinition* const Definition = Entry.Attachment;
+			if (!Definition || Definition->Rarity > Rolled || UsedAttachments.Contains(Index))
+			{
+				continue;
+			}
+			if (Guns.Num() > 0 && !SlotMachine::FitsAnyGun(Definition, Guns))
+			{
+				continue;
+			}
+			if (Definition->Family != NAME_None)
+			{
+				bool bHasFamily = false;
+				EUpgradeRarity BestOwned = EUpgradeRarity::Common;
+				for (const UWeaponAttachmentDefinition* const Have : Owned)
+				{
+					if (Have && Have->Family == Definition->Family && (!bHasFamily || Have->Rarity > BestOwned))
+					{
+						BestOwned = Have->Rarity;
+						bHasFamily = true;
+					}
+				}
+				if (bHasFamily && Definition->Rarity <= BestOwned)
+				{
+					continue;
+				}
+			}
+			const bool bWanted = Guns.Num() > 0 && SlotMachine::IsWantedAttachment(Definition, Guns, Owned);
+			if (bWantedOnly && !bWanted)
+			{
+				continue;
+			}
+			float Weight = Entry.bOverrideChanceWhenAlreadyEquipped && Owned.Contains(Definition)
+				? Entry.WeightWhenEquipped : Entry.Weight;
+			if (Weight <= 0.0f)
+			{
+				continue;
+			}
+			if (bWanted)
+			{
+				Weight *= WantedAttachmentWeight;
+			}
+			if (Candidates.Num() == 0 || Definition->Rarity > Top)
+			{
+				Candidates.Reset();
+				Weights.Reset();
+				Wanted.Reset();
+				Top = Definition->Rarity;
+			}
+			if (Definition->Rarity == Top)
+			{
+				Candidates.Add(Index);
+				Weights.Add(Weight);
+				Wanted.Add(bWanted);
+			}
+		}
+		const int32 Drawn = SlotMachine::DrawEntry(Candidates, Weights);
+		const int32 At = Candidates.IndexOfByKey(Drawn);
+		bOutDrawnWanted = Wanted.IsValidIndex(At) && Wanted[At];
+		return Drawn;
+	};
+
+	const auto TakeAttachment = [&](int32 Attachment, bool bWanted)
+	{
+		OutCard.Outcome = EDispenserCardOutcome::Attachment;
+		OutCard.PickupIndex = Attachment;
+		OutCard.Rarity = Pool->Attachments[Attachment].Attachment->Rarity;
+		OutCard.Symbol = SlotMachine::SymbolFirstRarity + static_cast<uint8>(OutCard.Rarity);
+		UsedAttachments.Add(Attachment);
+		bOutWanted = bWanted;
+	};
+
+	const bool bFair = CVarCasinoFair.GetValueOnAnyThread() != 0;
+
+	// The pity reel skips the blank and buff roll, but only when there is something wanted to give:
+	// the guarantee is about the slot, not about the rarity, which stays this reel's own luck.
+	if (bForceWanted && Pool)
+	{
+		const EUpgradeRarity Rolled = RarityForValue(StakeValue * (bFair ? 1.0f : EvaluatePayoutMultiplier(FMath::FRand())));
+		bool bWanted = false;
+		const int32 Attachment = DrawAttachment(Rolled, true, bWanted);
+		if (Attachment != INDEX_NONE)
+		{
+			TakeAttachment(Attachment, true);
+			return;
+		}
+	}
 
 	const float DudChance = FMath::Clamp(SlotMachine::Eval(DudChanceCurve, StakeValue, 0.3f), 0.0f, 1.0f);
 	const float BuffChance = FMath::Clamp(SlotMachine::Eval(BuffChanceCurve, StakeValue, 0.3f), 0.0f, 1.0f - DudChance);
@@ -234,68 +391,13 @@ void UDispenserSlotMachineComponent::RollCard(float StakeValue, const UDispenser
 	// running out of prizes is not the gamble.
 	if (Outcome >= DudChance + BuffChance && Pool)
 	{
-		const bool bFair = CVarCasinoFair.GetValueOnAnyThread() != 0;
 		const EUpgradeRarity Rolled = RarityForValue(StakeValue * (bFair ? 1.0f : EvaluatePayoutMultiplier(FMath::FRand())));
 
 		FUpgradeOfferCard Up;
 		const bool bUpgrade = Upgrades && Upgrades->BuildUpgradeCard(Pool, Rolled, UsedUpgrades, Up);
 
-		// The rarest attachments that fit under the roll, drawn by weight. Any attachment, not only
-		// ones for the guns in hand. A family (Mag.Light) only offers a tier above the best of that
-		// family the player has; a thing already owned may carry its own, lower weight.
-		int32 Attachment = INDEX_NONE;
-		{
-			TArray<const UWeaponAttachmentDefinition*> Owned;
-			GatherOwnedAttachments(Player, Owned);
-
-			EUpgradeRarity Top = EUpgradeRarity::Common;
-			TArray<int32> Candidates;
-			TArray<float> Weights;
-			for (int32 Index = 0; Index < Pool->Attachments.Num(); ++Index)
-			{
-				const FDispenserAttachmentEntry& Entry = Pool->Attachments[Index];
-				const UWeaponAttachmentDefinition* const Definition = Entry.Attachment;
-				if (!Definition || Definition->Rarity > Rolled || UsedAttachments.Contains(Index))
-				{
-					continue;
-				}
-				if (Definition->Family != NAME_None)
-				{
-					bool bHasFamily = false;
-					EUpgradeRarity BestOwned = EUpgradeRarity::Common;
-					for (const UWeaponAttachmentDefinition* const Have : Owned)
-					{
-						if (Have && Have->Family == Definition->Family && (!bHasFamily || Have->Rarity > BestOwned))
-						{
-							BestOwned = Have->Rarity;
-							bHasFamily = true;
-						}
-					}
-					if (bHasFamily && Definition->Rarity <= BestOwned)
-					{
-						continue;
-					}
-				}
-				const float Weight = Entry.bOverrideChanceWhenAlreadyEquipped && Owned.Contains(Definition)
-					? Entry.WeightWhenEquipped : Entry.Weight;
-				if (Weight <= 0.0f)
-				{
-					continue;
-				}
-				if (Candidates.Num() == 0 || Definition->Rarity > Top)
-				{
-					Candidates.Reset();
-					Weights.Reset();
-					Top = Definition->Rarity;
-				}
-				if (Definition->Rarity == Top)
-				{
-					Candidates.Add(Index);
-					Weights.Add(Weight);
-				}
-			}
-			Attachment = SlotMachine::DrawEntry(Candidates, Weights);
-		}
+		bool bWanted = false;
+		const int32 Attachment = DrawAttachment(Rolled, false, bWanted);
 
 		bool bTakeAttachment = Attachment != INDEX_NONE;
 		const EUpgradeRarity AttachmentRarity = bTakeAttachment ? Pool->Attachments[Attachment].Attachment->Rarity : EUpgradeRarity::Common;
@@ -306,11 +408,7 @@ void UDispenserSlotMachineComponent::RollCard(float StakeValue, const UDispenser
 
 		if (bTakeAttachment)
 		{
-			OutCard.Outcome = EDispenserCardOutcome::Attachment;
-			OutCard.PickupIndex = Attachment;
-			OutCard.Rarity = AttachmentRarity;
-			OutCard.Symbol = SlotMachine::SymbolFirstRarity + static_cast<uint8>(OutCard.Rarity);
-			UsedAttachments.Add(Attachment);
+			TakeAttachment(Attachment, bWanted);
 			return;
 		}
 		if (bUpgrade)
@@ -515,15 +613,33 @@ void UDispenserSlotMachineComponent::StartSpin(AShooterCharacter* Donor, float M
 	Next.OpenServerTime = World->GetTimeSeconds() + SpinSeconds;
 	Next.Serial = Spin.Serial + 1;
 
+	// Pity: after PityAfterSpins spins in a row with nothing for an empty slot on a gun in hand, the
+	// first reel that can give one does. Counted per player, on the server only.
+	const TWeakObjectPtr<const APlayerState> SpinnerKey(Donor->GetPlayerState());
+	int32& Dry = SpinsWithoutWanted.FindOrAdd(SpinnerKey);
+	bool bPity = PityAfterSpins > 0 && Dry >= PityAfterSpins;
+	const bool bPityAtStart = bPity;
+	bool bAnyWanted = false;
+
 	TArray<const UUpgradeDefinition*> UsedUpgrades;
 	TArray<int32> UsedAttachments;
 	for (int32 Reel = 0; Reel < CardCount; ++Reel)
 	{
 		FDispenserCard Card;
-		RollCard(StakeValue, Pool, Donor, UsedUpgrades, UsedAttachments, Card);
+		bool bWanted = false;
+		RollCard(StakeValue, Pool, Donor, UsedUpgrades, UsedAttachments, bPity, Card, bWanted);
+		if (bWanted)
+		{
+			bAnyWanted = true;
+			bPity = false;
+		}
 		Next.Cards.Add(Card);
 	}
 	Spin = Next;
+	Dry = bAnyWanted ? 0 : Dry + 1;
+
+	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s: wanted attachment %s, pity %s, dry spins now %d"),
+		*Donor->GetName(), bAnyWanted ? TEXT("yes") : TEXT("no"), bPityAtStart ? TEXT("on") : TEXT("off"), Dry);
 
 	FString Text = FString::Printf(TEXT("%s: %.1f magazines -> stake %.0f"), *WeaponName, Magazines, StakeValue);
 	for (int32 Index = 0; Index < Spin.Cards.Num(); ++Index)

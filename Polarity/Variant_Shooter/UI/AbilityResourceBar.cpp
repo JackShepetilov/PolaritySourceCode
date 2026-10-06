@@ -93,6 +93,7 @@ void UAbilityResourceBar::InitializeFor(AShooterCharacter* InCharacter)
 		Ability->OnAbilitySwitched.AddDynamic(this, &UAbilityResourceBar::HandleAbilitySwitched);
 		Ability->OnCooldownStarted.AddDynamic(this, &UAbilityResourceBar::HandleCooldownStarted);
 		Ability->OnCooldownEnded.AddDynamic(this, &UAbilityResourceBar::HandleCooldownEnded);
+		Ability->OnCooldownAdjusted.AddDynamic(this, &UAbilityResourceBar::HandleCooldownAdjusted);
 	}
 
 	// --- Dash: separate from combat abilities, but rendered in the same resource row. ---
@@ -185,6 +186,7 @@ void UAbilityResourceBar::UnbindAll()
 		BoundAbilityComp->OnAbilitySwitched.RemoveDynamic(this, &UAbilityResourceBar::HandleAbilitySwitched);
 		BoundAbilityComp->OnCooldownStarted.RemoveDynamic(this, &UAbilityResourceBar::HandleCooldownStarted);
 		BoundAbilityComp->OnCooldownEnded.RemoveDynamic(this, &UAbilityResourceBar::HandleCooldownEnded);
+		BoundAbilityComp->OnCooldownAdjusted.RemoveDynamic(this, &UAbilityResourceBar::HandleCooldownAdjusted);
 	}
 	if (BoundUpgradeManager.IsValid())
 	{
@@ -226,6 +228,18 @@ void UAbilityResourceBar::HandleCooldownStarted(float Duration)
 		if (*Found)
 		{
 			(*Found)->SetCooldown(Duration, Duration);
+		}
+	}
+}
+
+void UAbilityResourceBar::HandleCooldownAdjusted(float Remaining, float Total)
+{
+	LastCooldownDuration = Total;
+	if (TObjectPtr<UBarEntryWidget>* Found = Entries.Find(Key_Ability))
+	{
+		if (*Found)
+		{
+			(*Found)->SetCooldown(Remaining, Total);
 		}
 	}
 }

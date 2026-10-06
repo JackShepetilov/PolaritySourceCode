@@ -703,7 +703,10 @@ bool AShooterWeapon_Melee::IsValidMeleeTarget(AActor* HitActor) const
 
 float AShooterWeapon_Melee::CalculateMomentumDamage(AActor* HitActor) const
 {
-	if (MomentumDamagePerSpeed <= 0.0f || !HitActor || !PawnOwner)
+	// Same as the fist: speed toward the target pays through UUpgrade_MeleeMomentum now.
+	// @see UMeleeAttackComponent::CalculateMomentumDamage
+	static constexpr bool bFlatMomentumBonusEnabled = false;
+	if (!bFlatMomentumBonusEnabled || MomentumDamagePerSpeed <= 0.0f || !HitActor || !PawnOwner)
 	{
 		return 0.0f;
 	}

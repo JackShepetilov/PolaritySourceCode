@@ -70,8 +70,9 @@ public:
 	 *  seen by different people: a firing montage plays every shot next to muzzle flash and sound
 	 *  that already carry, while a reload is a rare, long animation the OTHER players have to see
 	 *  to read what this one is doing. Holders with no reload animation of their own fall back to
-	 *  the firing path, which is where this used to go. */
-	virtual void PlayReloadMontage(UAnimMontage* Montage) { PlayFiringMontage(Montage); }
+	 *  the firing path, which is where this used to go. PlayRate is the stock's reload speed; the
+	 *  fallback path ignores it. */
+	virtual void PlayReloadMontage(UAnimMontage* Montage, float PlayRate = 1.0f) { PlayFiringMontage(Montage); }
 
 	/** Applies weapon recoil to the owner */
 	virtual void AddWeaponRecoil(float Recoil) = 0;

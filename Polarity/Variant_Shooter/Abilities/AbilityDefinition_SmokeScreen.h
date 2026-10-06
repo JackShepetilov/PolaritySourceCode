@@ -4,7 +4,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AbilityDefinition_Burst.h"
+#include "AbilityDefinition_Throw.h"
 #include "AbilityDefinition_SmokeScreen.generated.h"
 
 class ASmokeCloud;
@@ -22,12 +22,11 @@ class ASmokeCanisterProjectile;
  * asked the player to commit before it gave them anything. Smoke gives the approach itself, which is
  * what a melee class is short of.
  *
- * Built on the burst archetype, exactly like the Wizard's puddle, so the montages, the spawn socket,
- * the timing and the audio are all inherited and only the throw itself is new. Author the Levels
- * array from the burst base as usual, with NumProjectiles set to one.
+ * Built on the throw archetype: tap throws at once, hold aims with a drawn arc. The montages, the
+ * release moment, the cooldown and the audio are inherited and only the payload is new.
  */
 UCLASS(BlueprintType)
-class POLARITY_API UAbilityDefinition_SmokeScreen : public UAbilityDefinition_Burst
+class POLARITY_API UAbilityDefinition_SmokeScreen : public UAbilityDefinition_Throw
 {
 	GENERATED_BODY()
 
@@ -47,6 +46,9 @@ public:
 	/** How hard the canister falls. The arc is what tells the player it lands short of their aim. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Smoke", meta = (ClampMin = "0.0", ClampMax = "3.0"))
 	float ProjectileGravityScale = 0.5f;
+
+	virtual float GetThrowSpeed() const override { return ProjectileSpeed; }
+	virtual float GetThrowGravityScale() const override { return ProjectileGravityScale; }
 
 	// ==================== The wall ====================
 

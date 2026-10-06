@@ -197,4 +197,16 @@ public:
 	 *  enter, SetRunHUDVisible(true, bAnimated) on exit. bAnimated = fade animation vs instant snap. */
 	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
 	void SetRunHUDVisible(bool bVisible, bool bAnimated);
+
+	// ==================== Damage numbers ====================
+
+	/** A hit this player dealt, sent by the victim's TakeDamage on the server
+	 *  (AShooterNPC::ReportDamageNumber). Unreliable: it is presentation, and a shotgun sends one per
+	 *  pellet. Flags are DamageNumberFlags. */
+	UFUNCTION(Client, Unreliable)
+	void Client_ReportDamageNumber(AActor* Target, float Damage, float ArmorDamage, uint8 Flags);
+
+	/** The same report on the machine that owns this controller: the host's own hits arrive here
+	 *  directly, a client's through Client_ReportDamageNumber. */
+	void ShowDamageNumber(AActor* Target, float Damage, float ArmorDamage, uint8 Flags);
 };

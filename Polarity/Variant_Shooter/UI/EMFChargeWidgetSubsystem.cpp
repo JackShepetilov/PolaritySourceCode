@@ -15,6 +15,8 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 #include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/UI/EnemyBarWidget.h"
+#include "Variant_Shooter/UI/EnemyHudSettings.h"
 
 void UEMFChargeWidgetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -100,6 +102,7 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 		{
 			uint8 CatIndex = static_cast<uint8>(Pair.Value->GetCategory());
 			Pair.Value->EffectiveMinScaleDistance = EffectiveDistances[CatIndex];
+			Pair.Value->TickWidgetState(DeltaTime);
 			Pair.Value->UpdateScreenPosition(PC);
 
 			// What a shot at this target would be worth right now. False for every class whose
@@ -109,6 +112,14 @@ void UEMFChargeWidgetSubsystem::Tick(float DeltaTime)
 			const bool bHasPreview = LocalAbilities
 				&& LocalAbilities->GetPredictedShotDamage(Pair.Value->GetBoundActor(), PredictedDamage);
 			Pair.Value->SetDamagePreview(PredictedDamage, bHasPreview);
+
+			// AUTHOR'S CALL 2026-10-04: grabbing an enemy (and yanking its weapon) is shelved, so an
+			// enemy is never a reticle candidate, for the capture brackets or the lunge ones. Props,
+			// dropped weapons and pickups keep theirs. Only the brackets: the grab itself is untouched.
+			if (Pair.Value->GetCategory() == EChargeWidgetCategory::NPC)
+			{
+				continue;
+			}
 
 			float AngleCos = -1.0f;
 			if (Pair.Value->EvaluateCaptureCandidate(PlayerPawn, CameraLoc, CameraForward, AngleCos))
@@ -263,15 +274,19 @@ void UEMFChargeWidgetSubsystem::RegisterNPC(AShooterNPC* NPC)
 		return;
 	}
 
+	// The enemy bar is a C++ class named in project settings, so it needs nothing from the game mode
+	// and works on a client, where there is no game mode to hand out WidgetClass.
+	const bool bEnemyBar = UEnemyHudSettings::Get()->bUseEnemyBar;
+
 	// Defer if WidgetClass not yet set (level-placed actors may BeginPlay before BP setup)
-	if (!WidgetClass)
+	if (!bEnemyBar && !WidgetClass)
 	{
 		PendingNPCs.AddUnique(NPC);
 		return;
 	}
 
 	// Get a widget from pool
-	UEMFChargeWidget* Widget = GetWidgetFromPool();
+	UEMFChargeWidget* Widget = bEnemyBar ? GetEnemyBarFromPool() : GetWidgetFromPool();
 	if (!Widget)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[EMFChargeWidget] GetWidgetFromPool returned nullptr! WidgetClass=%s"),
@@ -567,7 +582,54 @@ void UEMFChargeWidgetSubsystem::ReturnWidgetToPool(UEMFChargeWidget* Widget)
 
 	Widget->ResetWidget();
 	Widget->SetVisibility(ESlateVisibility::Collapsed);
-	WidgetPool.Add(Widget);
+	if (Widget->IsA<UEnemyBarWidget>())
+	{
+		EnemyBarPool.Add(Widget);
+	}
+	else
+	{
+		WidgetPool.Add(Widget);
+	}
+}
+
+UEMFChargeWidget* UEMFChargeWidgetSubsystem::GetEnemyBarFromPool()
+{
+	if (EnemyBarPool.Num() > 0)
+	{
+		return EnemyBarPool.Pop();
+	}
+
+	APlayerController* PC = GetLocalPlayerController();
+	if (!PC)
+	{
+		return nullptr;
+	}
+
+	UEMFChargeWidget* NewWidget = CreateWidget<UEMFChargeWidget>(PC, UEnemyHudSettings::GetEnemyBarClass());
+	if (NewWidget)
+	{
+		NewWidget->AddToViewport(90);
+		NewWidget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	return NewWidget;
+}
+
+void UEMFChargeWidgetSubsystem::NotifyLocalHit(AActor* Target)
+{
+	if (UEMFChargeWidget* const Widget = FindWidgetForActor(Target))
+	{
+		Widget->NotifyLocalHit();
+	}
+}
+
+UEMFChargeWidget* UEMFChargeWidgetSubsystem::FindWidgetForActor(const AActor* Actor) const
+{
+	if (!Actor)
+	{
+		return nullptr;
+	}
+	const TObjectPtr<UEMFChargeWidget>* const Found = ActiveWidgets.Find(TWeakObjectPtr<AActor>(const_cast<AActor*>(Actor)));
+	return Found ? Found->Get() : nullptr;
 }
 
 void UEMFChargeWidgetSubsystem::CleanupWidgets()
@@ -592,6 +654,15 @@ void UEMFChargeWidgetSubsystem::CleanupWidgets()
 		}
 	}
 	WidgetPool.Empty();
+
+	for (UEMFChargeWidget* Widget : EnemyBarPool)
+	{
+		if (Widget)
+		{
+			Widget->RemoveFromParent();
+		}
+	}
+	EnemyBarPool.Empty();
 
 	// Cleanup the single capture reticle
 	if (ReticleWidget)

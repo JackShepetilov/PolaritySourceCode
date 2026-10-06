@@ -23,7 +23,7 @@ void UAbilityHandler_NitroGate::MakeRoomForOneGate(int32 Limit)
 	}
 }
 
-void UAbilityHandler_NitroGate::OnActivate_Implementation()
+void UAbilityHandler_NitroGate::SpawnThrown(const FVector& Location, const FRotator& Rotation)
 {
 	const UAbilityDefinition_NitroGate* Def = Cast<UAbilityDefinition_NitroGate>(GetDefinition());
 	AShooterCharacter* Caster = GetOwningCharacter();
@@ -33,7 +33,6 @@ void UAbilityHandler_NitroGate::OnActivate_Implementation()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] NitroGate: no gate class set on %s"),
 			Def ? *Def->GetName() : TEXT("<null definition>"));
-		NotifyAbilityCancelled();
 		return;
 	}
 
@@ -41,32 +40,23 @@ void UAbilityHandler_NitroGate::OnActivate_Implementation()
 
 	MakeRoomForOneGate(Stats.MaxGatesInWorld);
 
-	// Thrown from in front of the eyes rather than from the hand socket: the gate is a physical
-	// object with collision on, and starting it inside the caster's own capsule is how a throw ends
-	// up landing at their feet.
-	const FRotator AimRot = Caster->GetBaseAimRotation();
-	const FVector SpawnLoc = Caster->GetPawnViewLocation() + AimRot.Vector() * 60.0f;
-
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	SpawnParams.Owner = Caster;
 	SpawnParams.Instigator = Caster;
 
 	ANitroGate* Gate = World->SpawnActor<ANitroGate>(
-		Def->GateClass, FTransform(AimRot, SpawnLoc, FVector::OneVector), SpawnParams);
+		Def->GateClass, FTransform(Rotation, Location, FVector::OneVector), SpawnParams);
 	if (!Gate)
 	{
-		NotifyAbilityCancelled();
 		return;
 	}
 
-	Gate->LaunchFrom(SpawnLoc, AimRot, Def->ThrowSpeed, Stats.BoostSpeed, Def->PadRadius,
+	Gate->LaunchFrom(Location, Rotation, Def->ThrowSpeed, Stats.BoostSpeed, Def->PadRadius,
 		Def->GateHealth, Def->bAffectsEnemies);
 
 	MyGates.Add(Gate);
 
 	UE_LOG(LogTemp, Warning, TEXT("[ABILITY_DEBUG] NitroGate: %s threw a gate (boost %.0f, %d/%d live)"),
 		*Caster->GetName(), Stats.BoostSpeed, MyGates.Num(), Stats.MaxGatesInWorld);
-
-	NotifyAbilityComplete();
 }

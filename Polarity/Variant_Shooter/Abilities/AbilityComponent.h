@@ -31,6 +31,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityCompleted, UAbilityDefinit
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityCancelled, UAbilityDefinition*, Definition);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityCooldownStarted, float, Duration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAbilityCooldownEnded);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAbilityCooldownAdjusted, float, Remaining, float, Total);
 
 /** One slot as it travels: what is in it and at what level.
  *
@@ -251,6 +252,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ability|Activation")
 	bool IsOnCooldown() const { return CooldownTimeRemaining > 0.0f; }
 
+	/** Length of the cooldown that is running, or of the last one that ran. */
+	UFUNCTION(BlueprintPure, Category = "Ability|Activation")
+	float GetCooldownTotal() const { return CooldownTotal; }
+
+	/** Take Fraction (0..1) of the FULL cooldown off what is left of it. Authority only; does
+	 *  nothing when no cooldown is running. A kill bonus calls this. */
+	UFUNCTION(BlueprintCallable, Category = "Ability|Activation")
+	void ReduceCooldownByFraction(float Fraction);
+
 	// ==================== Events ====================
 
 	UPROPERTY(BlueprintAssignable, Category = "Ability|Events")
@@ -279,6 +289,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Ability|Events")
 	FOnAbilityCooldownEnded OnCooldownEnded;
+
+	/** The running cooldown jumped (a kill bonus cut it). The HUD re-reads its radial from this. */
+	UPROPERTY(BlueprintAssignable, Category = "Ability|Events")
+	FOnAbilityCooldownAdjusted OnCooldownAdjusted;
 
 protected:
 
@@ -313,6 +327,10 @@ protected:
 
 	UPROPERTY(Replicated)
 	float CooldownTimeRemaining = 0.0f;
+
+	/** Full length of the running cooldown. Authority side; the HUD of a remote client does not get
+	 *  cooldown events at all yet (TODO(COOP), same gap as OnCooldownStarted). */
+	float CooldownTotal = 0.0f;
 
 	/** The always-on ability, owner-only for the same reason the slots are: nobody else's screen has
 	 *  any use for it. */

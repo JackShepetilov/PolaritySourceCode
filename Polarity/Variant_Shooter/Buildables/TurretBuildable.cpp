@@ -22,6 +22,8 @@
 #include "Net/UnrealNetwork.h"
 #include "TurretAnimInstance.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/TrackedTankNPC.h"
+#include "Variant_Shooter/Shield/HitZoneComponent.h"
 #include "Variant_Shooter/Feedback/HitFeedbackSet.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
@@ -1085,7 +1087,37 @@ FVector ATurretBuildable::MuzzleLocationOf(int32 ViceIndex) const
 FVector ATurretBuildable::ComputeAimPointFor(int32 ViceIndex, const AActor* Target, float& OutFlightTime) const
 {
 	OutFlightTime = 0.0f;
-	const FVector Point = PolarityAim::ResolveAimPointExact(Target);
+	FVector Point = PolarityAim::ResolveAimPointExact(Target);
+	if (const ATrackedTankNPC* Tank = Cast<ATrackedTankNPC>(Target))
+	{
+		if (const UHitZoneComponent* Zones = Target->FindComponentByClass<UHitZoneComponent>())
+		{
+			const FVector From = MuzzleLocationOf(ViceIndex);
+			const auto TryPart = [this, Target, Zones, &Point, &From](FName Name)
+			{
+				FVector Center;
+				if (Zones->IsZoneBroken(Name) || !Zones->GetZoneWorldCenter(Name, Center)
+					|| !HasLineOfSightTo(From, Target, Center)) { return false; }
+				// The hull itself may hide a part even when the world trace sees no wall.
+				FHitResult Probe;
+				Probe.TraceStart = From;
+				Probe.TraceEnd = Center;
+				Probe.ImpactPoint = Center;
+				if (Zones->ResolveZoneForHit(Probe, this) != Zones->FindZone(Name)) { return false; }
+				Point = Center;
+				return true;
+			};
+			FName FirstTrack = Tank->GetTrackLeftZoneName();
+			FName SecondTrack = Tank->GetTrackRightZoneName();
+			FVector Left, Right;
+			if (Zones->GetZoneWorldCenter(FirstTrack, Left) && Zones->GetZoneWorldCenter(SecondTrack, Right)
+				&& FVector::DistSquared(From, Right) < FVector::DistSquared(From, Left))
+			{
+				Swap(FirstTrack, SecondTrack);
+			}
+			if (!TryPart(Tank->GetOpticsZoneName()) && !TryPart(FirstTrack)) { TryPart(SecondTrack); }
+		}
+	}
 	const AShooterWeapon* const Weapon = GetViceWeapon(ViceIndex);
 	const float Speed = ProjectileSpeedOf(Weapon);
 	if (Speed <= 0.0f)
@@ -1211,7 +1243,13 @@ bool ATurretBuildable::IsEligibleTarget(const APawn* Pawn, float MaxRange, float
 	}
 
 	const FVector Eye = EyeLocation();
-	const FVector Point = PolarityAim::ResolveAimPointExact(Pawn);
+	FVector Point = PolarityAim::ResolveAimPointExact(Pawn);
+	if (Cast<ATrackedTankNPC>(Pawn))
+	{
+		// Acquiring a tank and firing at it must test the same exposed part, including optics above cover.
+		float FlightTime = 0.0f;
+		Point = ComputeAimPointFor(FMath::Max(HeadViceIndex, 0), Pawn, FlightTime);
+	}
 	const float Distance = FVector::Dist(Point, Eye);
 	if (Distance > MaxRange || Distance < 1.0f)
 	{

@@ -10,6 +10,10 @@
 #include "Polarity/Variant_Shooter/ShootableButtonComponent.h"
 #include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "Components/SphereComponent.h"
+#include "Components/AudioComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "GameFramework/Character.h"
@@ -23,6 +27,7 @@
 #include "TimerManager.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraComponent.h"
+#include "TracerSubsystem.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 
@@ -166,6 +171,11 @@ AShooterProjectile::AShooterProjectile()
 void AShooterProjectile::BeginPlay()
 {
 	Super::BeginPlay();
+	// A round stays WorldDynamic: the whole world's collision is set up around that. A body that is
+	// shot through its own hit boxes (the tankette, UHitZoneComponent) moves on a Vehicle capsule,
+	// and that one type is what a round flies through. Nothing else in the game uses Vehicle.
+	CollisionComponent->SetCollisionResponseToChannel(ECC_Vehicle, ECR_Ignore);
+	BaseCollisionRadius = CollisionComponent->GetUnscaledSphereRadius();
 
 	// If this projectile is being spawned for pool, skip normal initialization
 	// InitializeForPool() will be called right after BeginPlay
@@ -185,8 +195,8 @@ void AShooterProjectile::BeginPlay()
 	// Nothing hits everything. Arm the clock that ends a round which hits nothing at all.
 	ArmFlightTimeout();
 
-	// Spawn trail VFX if configured
-	if (TrailFX)
+	// Spawn trail VFX if configured. A free tracer is drawn by UTracerSubsystem instead.
+	if (TrailFX && !bFreeTracer)
 	{
 		TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 			TrailFX,
@@ -286,7 +296,15 @@ void AShooterProjectile::SetShooterMoveIgnore(bool bIgnore)
 void AShooterProjectile::ArmFlightTimeout()
 {
 	UWorld* const World = GetWorld();
-	if (!World || MaxTravelDistance <= 0.0f)
+	if (!World)
+	{
+		return;
+	}
+
+	StartHitRadiusGrowth();
+	ArmWhizBy();
+
+	if (MaxTravelDistance <= 0.0f)
 	{
 		return;
 	}
@@ -307,11 +325,161 @@ void AShooterProjectile::ArmFlightTimeout()
 		&AShooterProjectile::OnDeferredDestruction, Seconds, false);
 }
 
+float AShooterProjectile::EvaluateHitRadius(float MetresFlown) const
+{
+	const TArray<FVector2D>& Keys = HitRadiusOverFlight;
+	if (MetresFlown <= Keys[0].X)
+	{
+		return Keys[0].Y;
+	}
+	for (int32 Index = 1; Index < Keys.Num(); ++Index)
+	{
+		if (MetresFlown <= Keys[Index].X)
+		{
+			const float Span = Keys[Index].X - Keys[Index - 1].X;
+			const float Alpha = Span > KINDA_SMALL_NUMBER ? (MetresFlown - Keys[Index - 1].X) / Span : 1.0f;
+			return FMath::Lerp(Keys[Index - 1].Y, Keys[Index].Y, Alpha);
+		}
+	}
+	return Keys.Last().Y;
+}
+
+void AShooterProjectile::StartHitRadiusGrowth()
+{
+	UWorld* const World = GetWorld();
+	if (!World || !CollisionComponent || HitRadiusOverFlight.IsEmpty())
+	{
+		return;
+	}
+	LaunchLocation = GetActorLocation();
+	CollisionComponent->SetSphereRadius(EvaluateHitRadius(0.0f));
+
+	// A timer rather than the actor tick this class keeps switched off. 50 Hz is finer than the keys
+	// (Apex spaces them a hundred metres apart), and it stops at the last key.
+	World->GetTimerManager().SetTimer(HitRadiusTimer, this, &AShooterProjectile::UpdateHitRadius, 0.02f, true);
+}
+
+void AShooterProjectile::UpdateHitRadius()
+{
+	if (bHit || !CollisionComponent || HitRadiusOverFlight.IsEmpty())
+	{
+		GetWorldTimerManager().ClearTimer(HitRadiusTimer);
+		return;
+	}
+	const float Metres = FVector::Dist(LaunchLocation, GetActorLocation()) / 100.0f;
+	CollisionComponent->SetSphereRadius(EvaluateHitRadius(Metres));
+	if (Metres >= HitRadiusOverFlight.Last().X)
+	{
+		GetWorldTimerManager().ClearTimer(HitRadiusTimer);
+	}
+}
+
+void AShooterProjectile::ArmWhizBy()
+{
+	UWorld* const World = GetWorld();
+	if (!World || !WhizBySound || WhizByMaxDistance <= 0.0f || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+	World->GetTimerManager().ClearTimer(WhizByTimer);
+
+	// Whoever is listening at THIS screen. Every machine has its own copy of the round and asks for
+	// its own player, so nobody's whiz-by travels over the network.
+	const APlayerController* const Listener = CoopPlayers::GetLocalController(World);
+	if (!Listener || !Listener->PlayerCameraManager)
+	{
+		return;
+	}
+	// The shooter hears the gun, not the round.
+	const APawn* const ListenerPawn = Listener->GetPawn();
+	if (ListenerPawn && (ListenerPawn == GetInstigator() || ListenerPawn == GetOwner()))
+	{
+		return;
+	}
+
+	const FVector Velocity = (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
+		? ProjectileMovement->Velocity
+		: GetActorForwardVector() * (ProjectileMovement ? ProjectileMovement->InitialSpeed : 0.0f);
+	const float Speed = Velocity.Size();
+	if (Speed <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	const FVector Dir = Velocity / Speed;
+	const FVector Start = GetActorLocation();
+	const FVector Ear = Listener->PlayerCameraManager->GetCameraLocation();
+
+	// Closest approach of the straight line. A round already past the listener, or passing wide,
+	// says nothing. Gravity bends a bullet by centimetres over the distances this is heard at.
+	const float Along = FVector::DotProduct(Ear - Start, Dir);
+	if (Along <= 0.0f)
+	{
+		return;
+	}
+	WhizByPoint = Start + Dir * Along;
+	if (FVector::Dist(WhizByPoint, Ear) > WhizByMaxDistance)
+	{
+		return;
+	}
+
+	// A line through the listener's own body is a hit, and a hit has its own sound.
+	if (const ACharacter* const ListenerCharacter = Cast<ACharacter>(ListenerPawn))
+	{
+		if (const UCapsuleComponent* const Capsule = ListenerCharacter->GetCapsuleComponent())
+		{
+			const FVector Axis = FVector(0.0f, 0.0f, Capsule->GetScaledCapsuleHalfHeight_WithoutHemisphere());
+			const FVector Centre = Capsule->GetComponentLocation();
+			FVector OnLine, OnAxis;
+			FMath::SegmentDistToSegmentSafe(Start, WhizByPoint + Dir * 200.0f, Centre - Axis, Centre + Axis, OnLine, OnAxis);
+			if (FVector::Dist(OnLine, OnAxis) < Capsule->GetScaledCapsuleRadius())
+			{
+				return;
+			}
+		}
+	}
+
+	// Which way it crosses: the Lyra set is authored one way round and flips with SwapLR.
+	const FVector Right = FRotationMatrix(Listener->PlayerCameraManager->GetCameraRotation()).GetUnitAxis(EAxis::Y);
+	bWhizBySwapLR = FVector::DotProduct(Dir, Right) < 0.0f;
+
+	// Never a zero delay: a zero-rate timer is dropped by the engine without firing.
+	World->GetTimerManager().SetTimer(WhizByTimer, this, &AShooterProjectile::PlayWhizBy,
+		FMath::Max(Along / Speed, 0.001f), false);
+}
+
+void AShooterProjectile::PlayWhizBy()
+{
+	// Landed before it got here (a wall, a body, the listener): no pass, no whiz.
+	if (bHit || bIsInPool || !WhizBySound)
+	{
+		return;
+	}
+	UInitialActiveSoundParams* const Params = NewObject<UInitialActiveSoundParams>();
+	Params->AudioParams.Add(FAudioParameter(TEXT("SwapLR"), bWhizBySwapLR));
+	UGameplayStatics::PlaySoundAtLocation(this, WhizBySound, WhizByPoint, FRotator::ZeroRotator, 1.0f, 1.0f, 0.0f,
+		WhizByAttenuation, WhizByConcurrency, nullptr, Params);
+}
+
+void AShooterProjectile::StopFlightExtras()
+{
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HitRadiusTimer);
+		World->GetTimerManager().ClearTimer(WhizByTimer);
+	}
+	if (CollisionComponent && BaseCollisionRadius >= 0.0f && !HitRadiusOverFlight.IsEmpty())
+	{
+		CollisionComponent->SetSphereRadius(BaseCollisionRadius);
+	}
+}
+
 void AShooterProjectile::EndPlay(EEndPlayReason::Type EndPlayReason)
 {
 	// Before Super, because Super tears the actor down and GetInstigator has to still answer.
 	// Without this the shooter's own MoveIgnoreActors keeps a dead pointer per round fired.
 	SetShooterMoveIgnore(false);
+	StopFlightExtras();
+	EndFreeTracer();
 
 	Super::EndPlay(EndPlayReason);
 
@@ -356,6 +524,7 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 	{
 		TrailComponent->Deactivate();
 	}
+	EndFreeTracer();
 
 	// The round landed somewhere, and that is worth seeing and hearing whether or not it hurt
 	// anything: a projectile weapon with no impact is a gun that shoots at walls in silence. Same
@@ -400,9 +569,17 @@ void AShooterProjectile::NotifyHit(class UPrimitiveComponent* MyComp, AActor* Ot
 
 	if (bExplodeOnHit)
 	{
-		
+		DirectHit = Hit;
+		if ((DirectHit.TraceEnd - DirectHit.TraceStart).IsNearlyZero())
+		{
+			const FVector Flight = ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero()
+				? ProjectileMovement->Velocity.GetSafeNormal() : -Hit.ImpactNormal;
+			DirectHit.TraceStart = Hit.ImpactPoint - Flight * 100.0f;
+			DirectHit.TraceEnd = Hit.ImpactPoint;
+		}
 		// apply explosion damage centered on the projectile
 		ExplosionCheck(GetActorLocation(), Other);
+		DirectHit = FHitResult();
 
 	} else {
 
@@ -467,6 +644,20 @@ void AShooterProjectile::PlayImpactFeedback(const FHitResult& Hit)
 	FHitResult ResolvedHit = Hit;
 	EnsureHitPhysicalMaterial(ResolvedHit);
 
+	// The capsule this round struck carries no bone, and the impact surface depends on one (plate on
+	// the torso, cloth on a limb). Same lookup ApplyDirectHit does for the damage, along the line
+	// the round was flying. @see AShooterWeapon::ResolveHitBone
+	if (ResolvedHit.BoneName.IsNone() && ResolvedHit.GetActor())
+	{
+		FVector Flight = ProjectileMovement ? ProjectileMovement->Velocity.GetSafeNormal() : FVector::ZeroVector;
+		if (Flight.IsNearlyZero())
+		{
+			Flight = GetActorForwardVector();
+		}
+		ResolvedHit.BoneName = Weapon->ResolveHitBone(ResolvedHit.GetActor(),
+			ResolvedHit.ImpactPoint - Flight * 100.0f, ResolvedHit.ImpactPoint + Flight * 250.0f);
+	}
+
 	// Who plays what, and it turns on one question: does every machine have its own copy of this
 	// round?
 	//
@@ -480,7 +671,7 @@ void AShooterProjectile::PlayImpactFeedback(const FHitResult& Hit)
 	if (!GetIsReplicated())
 	{
 		Weapon->SpawnImpactEffectLocally(ResolvedHit.ImpactPoint, ResolvedHit.ImpactNormal,
-			Weapon->ResolveImpactSurface(ResolvedHit));
+			Weapon->ResolveImpactSurface(ResolvedHit), Weapon->ResolveImpactScale(ResolvedHit));
 	}
 	else if (GetNetMode() != NM_Client)
 	{
@@ -534,6 +725,7 @@ void AShooterProjectile::OnCosmeticOverlap(UPrimitiveComponent* OverlappedComp, 
 	{
 		TrailComponent->Deactivate();
 	}
+	EndFreeTracer();
 	SetActorHiddenInGame(true);
 
 	// Same ending a decoration gets when it stops at a wall, rather than a second one written here:
@@ -697,6 +889,10 @@ void AShooterProjectile::ProcessExplosionHit(AActor* HitActor, UPrimitiveCompone
 				BlastHit.Location = ExplosionCenter;
 				BlastHit.ImpactNormal = -ToVictim;
 				BlastHit.Normal = -ToVictim;
+				if (HitActor == DirectHitActor)
+				{
+					BlastHit = DirectHit;
+				}
 			}
 
 			// Through the weapon's funnel, exactly like a direct hit, so a blast finally means the
@@ -897,7 +1093,14 @@ void AShooterProjectile::ApplyDirectHit(AActor* HitActor, UPrimitiveComponent* H
 	// mesh which bone it actually passed through. @see AShooterWeapon::ResolveHitBone.
 	if (Hit.BoneName.IsNone() && SourceWeapon)
 	{
-		const FVector Flight = HitDirection.GetSafeNormal();
+		// The line the round was actually FLYING along, not HitDirection: that one arrives as the
+		// inverted impact normal of the capsule, and on the capsule's top dome (head height) it
+		// points down into the chest, so every round through a head resolved as spine_03.
+		FVector Flight = ProjectileMovement ? ProjectileMovement->Velocity.GetSafeNormal() : FVector::ZeroVector;
+		if (Flight.IsNearlyZero())
+		{
+			Flight = GetActorForwardVector();
+		}
 		Hit.BoneName = SourceWeapon->ResolveHitBone(HitActor,
 			HitLocation - Flight * 100.0f, HitLocation + Flight * 250.0f);
 	}
@@ -1020,8 +1223,11 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 		TrailComponent = nullptr;
 	}
 
-	// Spawn trail VFX if configured
-	if (TrailFX && !TrailComponent)
+	// A fresh trail for every flight. DeactivateToPool destroys the old one: a reused trail component
+	// (Activate(true) on the one from the last flight) drew lines from where the round died last time
+	// to its new muzzle -- the tracers are world-space ribbons. With polarity.projectile.pool 0 the bug
+	// was gone, so it was the reuse, and a new component cannot remember anything.
+	if (TrailFX && !TrailComponent && !bFreeTracer)
 	{
 		TrailComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
 			TrailFX,
@@ -1030,12 +1236,8 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			EAttachLocation::KeepRelativeOffset,
-			false // Keep the component alive; pooled projectiles reactivate it on reuse.
+			false // Destroyed by DeactivateToPool, not by the system finishing.
 		);
-	}
-	else if (IsValid(TrailComponent))
-	{
-		TrailComponent->Activate(true);
 	}
 
 	// Last, because it reads the speed the launch just set.
@@ -1044,6 +1246,9 @@ void AShooterProjectile::ActivateFromPool(const FTransform& SpawnTransform, AAct
 
 void AShooterProjectile::DeactivateToPool()
 {
+	// Before anything moves: the free tracer finishes its run to where the round stopped.
+	EndFreeTracer();
+
 	// First, while GetInstigator still answers: take this round back out of the shooter's own
 	// ignore list. Pooling bounds the leak (the same actors come round again) but it does not
 	// remove it, and a stale entry is a pointer the character walks past on every move.
@@ -1060,17 +1265,19 @@ void AShooterProjectile::DeactivateToPool()
 	ProjectileMovement->Deactivate();
 	ProjectileMovement->Velocity = FVector::ZeroVector;
 
-	// Stop trail VFX
+	// Drop the trail entirely; ActivateFromPool spawns a new one for the next flight.
 	if (IsValid(TrailComponent))
 	{
-		TrailComponent->Deactivate();
+		TrailComponent->DestroyComponent();
 	}
+	TrailComponent = nullptr;
 
 	// Clear timers
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(DestructionTimer);
 	}
+	StopFlightExtras();
 
 	// Clear ignore actors for next use
 	CollisionComponent->ClearMoveIgnoreActors();
@@ -1092,6 +1299,9 @@ void AShooterProjectile::ResetProjectileState()
 
 	// Reset hit flag
 	bHit = false;
+
+	// A grown round shrinks back, and a whiz-by armed for the last flight must not play in this one.
+	StopFlightExtras();
 
 	// THE pooling hazard for the hitbox, and it only exists because decoration and live rounds now
 	// come out of the same pool. SetCosmeticOnly drops the pawn response to Ignore; a round reused
@@ -1133,4 +1343,19 @@ void AShooterProjectile::ReturnToPoolOrDestroy()
 
 	// Not pooled or pool not found - destroy normally
 	Destroy();
+}
+
+void AShooterProjectile::EndFreeTracer()
+{
+	if (!bFreeTracer)
+	{
+		return;
+	}
+	if (UWorld* World = GetWorld())
+	{
+		if (UTracerSubsystem* Tracers = World->GetSubsystem<UTracerSubsystem>())
+		{
+			Tracers->EndTracer(this, GetActorLocation());
+		}
+	}
 }

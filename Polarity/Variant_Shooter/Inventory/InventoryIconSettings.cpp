@@ -65,4 +65,17 @@ void UInventoryIconSettings::GetWeaponSlotTypes(const AShooterWeapon* Weapon, TA
 			OutTypes.Add(Type);
 		}
 	}
+
+	// The order list only orders. A slot the gun has must never vanish because the list misses it:
+	// a config line written as "(A,B,C)" loads as ONE element, and that once left every gun showing
+	// a single slot. Whatever the list did not mention goes at the end, in enum order.
+	const UEnum* const TypeEnum = StaticEnum<EWeaponAttachmentType>();
+	for (int32 Index = 0; TypeEnum && Index < TypeEnum->NumEnums() - 1; ++Index)
+	{
+		const EWeaponAttachmentType Type = static_cast<EWeaponAttachmentType>(TypeEnum->GetValueByIndex(Index));
+		if (Weapon->HasAttachmentSlot(Type) && !OutTypes.Contains(Type))
+		{
+			OutTypes.Add(Type);
+		}
+	}
 }

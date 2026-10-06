@@ -33,8 +33,9 @@ public:
 
 	virtual FName GetCategoryName() const override { return FName("Polarity"); }
 
-	/** Left to right under every weapon. A gun without a slot of some type just skips it. A type
-	 *  missing from here is never shown, even on a gun that has it. */
+	/** Left to right under every weapon. A gun without a slot of some type just skips it. A type the
+	 *  gun has but this list misses still shows, after the listed ones. In DefaultGame.ini one line
+	 *  per element (+AttachmentSlotOrder=Muzzle): "(A,B,C)" on one line loads as a single element. */
 	UPROPERTY(EditAnywhere, config, Category = "Weapon Slots")
 	TArray<EWeaponAttachmentType> AttachmentSlotOrder;
 

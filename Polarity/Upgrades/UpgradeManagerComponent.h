@@ -258,6 +258,9 @@ public:
 	/** Called when owner collects a health pickup while at full HP */
 	void NotifyHealthPickupCollectedAtFullHP();
 
+	/** Called by UMeleeAttackComponent on the authority when a quick melee swing lands on Target. */
+	void NotifyMeleeHitAuthority(AActor* Target);
+
 	/**
 	 * Called by AShooterWeapon when ADS / secondary action is pressed.
 	 * Returns true if an active upgrade handled the input and normal ADS should be blocked.
@@ -283,6 +286,10 @@ public:
 	/** Query all active upgrades for their combined knockback-distance multiplier on a melee target. */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedMeleeKnockbackDistanceMultiplier(AActor* Target) const;
+
+	/** Query all active upgrades for their combined reload speed multiplier. */
+	UFUNCTION(BlueprintPure, Category = "Upgrades")
+	float GetCombinedReloadSpeedMultiplier() const;
 
 	// ==================== Shared Health-Pickup Pool ====================
 	// A counter, incremented when the player collects a health pickup at full HP,

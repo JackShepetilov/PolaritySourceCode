@@ -8,6 +8,7 @@
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Animation/AnimSequenceBase.h"
 #include "AudioDevice.h"
+#include "AudioThread.h"
 #include "Coop/CoopPlayers.h"
 #include "Engine/DataTable.h"
 #include "Sound/SoundBase.h"
@@ -52,6 +53,24 @@
 #include "Camera/CameraComponent.h"
 #include "HAL/IConsoleManager.h"
 #include "TimerManager.h"
+
+// Debug: a player's gun spends nothing. The magazine stays where it is, so there is no reload
+// either. Players only: an NPC's ammo is part of how it fights. F7 on the player toggles it.
+static TAutoConsoleVariable<int32> CVarInfiniteAmmo(
+	TEXT("polarity.debug.infiniteammo"),
+	0,
+	TEXT("1 = player weapons do not spend rounds, cells or energy."),
+	ECVF_Cheat);
+
+namespace
+{
+	/** polarity.debug.infiniteammo, for a weapon in a player's hands. */
+	bool IsShotFreeByCheat(const APawn* Owner)
+	{
+		return CVarInfiniteAmmo.GetValueOnGameThread() != 0 && Owner && Owner->IsPlayerControlled();
+	}
+}
+
 
 // polarity.debug.novfx - �������� ������ �������� ��� �������. ��������� �����, � �� � ���������
 // ���������, ������ ��� ����� ���� ���������� �� ������ ����������; ��������� ����� ������ � �����
@@ -99,7 +118,49 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "EnemyBeamBoltSubsystem.h"
+#include "TracerSubsystem.h"
 #include "VFX/VFXVariantSequenceSubsystem.h"
+#include "Variant_Shooter/Shield/HitZoneComponent.h"
+
+namespace ZoneFeedback
+{
+	struct FRead
+	{
+		bool bDeflected = false;
+		bool bDeadPart = false;
+		FName Zone;
+		bool bBrokenBefore = false;
+	};
+
+	FRead Before(AActor* Target, const FHitResult& Hit, const AActor* Causer, const UClass* DamageType, bool bRadial = false)
+	{
+		FRead Read;
+		if (const UHitZoneComponent* Zones = Target ? Target->FindComponentByClass<UHitZoneComponent>() : nullptr)
+		{
+			const FHitZoneVerdict Verdict = Zones->PreviewHit(Hit,
+				bRadial && (Hit.TraceEnd - Hit.TraceStart).IsNearlyZero() ? nullptr : Causer,
+				UHitZoneComponent::IsHeavyDamageType(DamageType));
+			Read.bDeflected = Verdict.bDeflected;
+			Read.bDeadPart = Verdict.bDeadPart;
+			if (Zones->Zones.IsValidIndex(Verdict.Zone))
+			{
+				Read.Zone = Zones->Zones[Verdict.Zone].Name;
+				Read.bBrokenBefore = Zones->IsZoneBroken(Read.Zone);
+			}
+		}
+		return Read;
+	}
+
+	void Fill(FHitFeedbackContext& Out, const FRead& Read, AActor* Target)
+	{
+		Out.bDeflected = Read.bDeflected;
+		Out.bDeadPart = Read.bDeadPart;
+		if (const UHitZoneComponent* Zones = Target ? Target->FindComponentByClass<UHitZoneComponent>() : nullptr)
+		{
+			Out.bPartBroken = !Read.bBrokenBefore && Zones->IsZoneBroken(Read.Zone);
+		}
+	}
+}
 
 void AShooterWeapon::PlayFireEffectsLocally(bool bLastRound)
 {
@@ -904,6 +965,8 @@ void AShooterWeapon::PlayReloadAudioAtProgress(float Progress)
 	if (ReloadAudioComponent)
 	{
 		const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * FMath::Max(0.0f, Snd->GetDuration());
+		// Pitch is playback rate: the track keeps up with a stock's faster montage.
+		ReloadAudioComponent->SetPitchMultiplier(GetStockReloadSpeed());
 		ReloadAudioComponent->Play(StartTime);
 		// The resume path needs the audio's OWN clock, not a montage fraction: a cue's GetDuration
 		// may not match the audible content, and Play(StartTime) clamps into it invisibly.
@@ -925,6 +988,7 @@ void AShooterWeapon::RestartReloadAudioAtSeconds(float OffsetSeconds)
 	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Snd, GetRootComponent());
 	if (ReloadAudioComponent)
 	{
+		ReloadAudioComponent->SetPitchMultiplier(GetStockReloadSpeed());
 		ReloadAudioComponent->Play(FMath::Max(0.0f, OffsetSeconds));
 		ReloadAudioWorldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 		ReloadAudioStartOffset = FMath::Max(0.0f, OffsetSeconds);
@@ -1145,7 +1209,7 @@ void AShooterWeapon::DiscoverNotifiedReloadSound()
 	if (NotifiedReloadSound && GetWorld())
 	{
 		// The notify fires this many seconds after the montage starts, which is right about now.
-		NotifiedReloadSoundBeginWorldTime = GetWorld()->GetTimeSeconds() + TriggerTime;
+		NotifiedReloadSoundBeginWorldTime = GetWorld()->GetTimeSeconds() + TriggerTime / GetStockReloadSpeed();
 		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio comes from a montage notify (%s at %.2fs) - playback taken over"),
 			*GetName(), *GetNameSafe(NotifiedReloadSound), TriggerTime);
 	}
@@ -1167,20 +1231,172 @@ void AShooterWeapon::StopNotifiedReloadSoundInWorld()
 	{
 		return;
 	}
-	int32 Stopped = 0;
-	for (FActiveSound* Active : AudioDevice->GetActiveSounds())
+	// Raw pointer only as a key to compare against; the audio thread never dereferences it.
+	const USoundBase* const Sound = NotifiedReloadSound.Get();
+
+	// Ours = owned by this weapon or its holder, or an ownerless one-shot playing right here. Another
+	// player reloading the same gun is neither, so their sound keeps playing.
+	const uint32 WeaponID = GetUniqueID();
+	const uint32 HolderID = GetOwner() ? GetOwner()->GetUniqueID() : 0;
+	const FVector Here = GetActorLocation();
+	const FString WeaponName = GetName();
+	const FString SoundName = GetNameSafe(NotifiedReloadSound);
+
+	// The active sound list belongs to the audio thread; reading it from the game thread trips
+	// check(IsInAudioThread()) in FAudioDevice::GetActiveSounds.
+	FAudioThread::RunCommandOnAudioThread([AudioDevice, Sound, WeaponID, HolderID, Here, WeaponName, SoundName]()
 	{
-		if (Active && Active->GetSound() == NotifiedReloadSound)
+		// Collect first: StopActiveSound edits the list being iterated.
+		TArray<FActiveSound*> ToStop;
+		for (FActiveSound* const Active : AudioDevice->GetActiveSounds())
+		{
+			if (!Active || Active->GetSound() != Sound)
+			{
+				continue;
+			}
+			const uint32 SoundOwner = Active->GetOwnerID();
+			const bool bOurs = SoundOwner != 0
+				? (SoundOwner == WeaponID || SoundOwner == HolderID)
+				: (!Active->bLocationDefined
+					|| FVector::DistSquared(Active->Transform.GetLocation(), Here) < FMath::Square(300.0f));
+			if (bOurs)
+			{
+				ToStop.Add(Active);
+			}
+		}
+		for (FActiveSound* const Active : ToStop)
 		{
 			AudioDevice->StopActiveSound(Active);
-			++Stopped;
+		}
+		if (ToStop.Num() > 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: stopped %d world sound(s) of %s at stow"),
+				*WeaponName, ToStop.Num(), *SoundName);
+		}
+	});
+}
+
+void AShooterWeapon::BeginReloadAudioPitch(EWeaponReloadStage Stage, float Duration)
+{
+	ReloadAudioPitch = GetStockReloadSpeed();
+	ReloadPitchSounds.Reset();
+	ReloadAudioPitchUntil = -1.0f;
+
+	// No stock, nothing to retune: the sounds play exactly as they always have.
+	if (FMath::IsNearlyEqual(ReloadAudioPitch, 1.0f) || !GetWorld())
+	{
+		return;
+	}
+
+	// Every sound this stage's animations carry, not only the first one: the long track is the
+	// one that matters, but a stage may hold several (mag out, mag in, bolt) and all of them
+	// belong to the same faster reload.
+	auto AddSound = [this](USoundBase* Snd)
+	{
+		if (Snd)
+		{
+			ReloadPitchSounds.AddUnique(Snd);
+		}
+	};
+	auto ScanList = [&AddSound](const TArray<FAnimNotifyEvent>& List)
+	{
+		for (const FAnimNotifyEvent& Event : List)
+		{
+			AddSound(FindSoundOnNotify(Event.Notify));
+			AddSound(FindSoundOnNotify(Event.NotifyStateClass.Get()));
+		}
+	};
+	auto ScanAnim = [&ScanList](const UAnimationAsset* Anim)
+	{
+		const UAnimSequenceBase* const Seq = Cast<UAnimSequenceBase>(Anim);
+		if (!Seq)
+		{
+			return;
+		}
+		ScanList(Seq->Notifies);
+		// The pack's montages keep their notifies on the sections' sequences.
+		if (const UAnimMontage* const AsMontage = Cast<UAnimMontage>(Seq))
+		{
+			for (const FCompositeSection& Section : AsMontage->CompositeSections)
+			{
+				if (const UAnimSequenceBase* const Linked = Section.GetLinkedSequence())
+				{
+					ScanList(Linked->Notifies);
+				}
+			}
+		}
+	};
+	ScanAnim(GetArmsMontageForStage(Stage));
+	ScanAnim(GetReloadWeaponAnimation(Stage));
+	ScanAnim(GetReloadWeaponAnimation(Stage, true));
+	ScanAnim(GetThirdPersonReloadMontage(Stage));
+	AddSound(NotifiedReloadSound);
+	AddSound(ReloadSound);
+
+	if (ReloadPitchSounds.IsEmpty())
+	{
+		return;
+	}
+
+	// A sound keeps its pitch once set, so the window only has to cover the moments new ones can
+	// start: the stage itself, plus a little for a notify on its very last frame.
+	ReloadAudioPitchUntil = GetWorld()->GetTimeSeconds() + FMath::Max(Duration, 0.0f) + 0.25f;
+
+	UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio pitch %.2f for %d sound(s), %.2fs"),
+		*GetName(), ReloadAudioPitch, ReloadPitchSounds.Num(), Duration);
+}
+
+void AShooterWeapon::ApplyReloadAudioPitch()
+{
+	UWorld* const World = GetWorld();
+	FAudioDevice* const AudioDevice = World ? World->GetAudioDeviceRaw() : nullptr;
+	if (!AudioDevice)
+	{
+		return;
+	}
+
+	// Raw pointers only as keys to compare against; the audio thread never dereferences them.
+	TArray<const USoundBase*> Sounds;
+	for (const TWeakObjectPtr<USoundBase>& Weak : ReloadPitchSounds)
+	{
+		if (const USoundBase* const Snd = Weak.Get())
+		{
+			Sounds.Add(Snd);
 		}
 	}
-	if (Stopped > 0)
+	if (Sounds.IsEmpty())
 	{
-		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: stopped %d world sound(s) of %s at stow"),
-			*GetName(), Stopped, *GetNameSafe(NotifiedReloadSound));
+		return;
 	}
+
+	// Ours = owned by this weapon or by whoever holds it (a notify that follows the mesh), or, for a
+	// fire-and-forget notify with no owner, playing right here. Another player reloading the same
+	// gun across the room is neither, so that sound is left alone.
+	const uint32 WeaponID = GetUniqueID();
+	const uint32 HolderID = GetOwner() ? GetOwner()->GetUniqueID() : 0;
+	const FVector Here = GetActorLocation();
+	const float Pitch = ReloadAudioPitch;
+
+	// The active sound list belongs to the audio thread; touching it from here is a race.
+	FAudioThread::RunCommandOnAudioThread([AudioDevice, Sounds = MoveTemp(Sounds), WeaponID, HolderID, Here, Pitch]()
+	{
+		for (FActiveSound* const Active : AudioDevice->GetActiveSounds())
+		{
+			if (!Active || !Sounds.Contains(Active->GetSound()))
+			{
+				continue;
+			}
+			const uint32 SoundOwner = Active->GetOwnerID();
+			const bool bOurs = SoundOwner != 0
+				? (SoundOwner == WeaponID || SoundOwner == HolderID)
+				: (!Active->bLocationDefined
+					|| FVector::DistSquared(Active->Transform.GetLocation(), Here) < FMath::Square(300.0f));
+			if (bOurs && !FMath::IsNearlyEqual(Active->GetPitch(), Pitch))
+			{
+				Active->SetPitch(Pitch);
+			}
+		}
+	});
 }
 
 UAnimMontage* AShooterWeapon::GetArmsMontageForStage(EWeaponReloadStage Stage) const
@@ -1249,7 +1465,7 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 				BlendArgs.BlendTime = ReloadResumeBlendDuration;
 				BlendArgs.BlendOption = ReloadResumeBlendOption;
 				BlendArgs.CustomCurve = ReloadResumeBlendCurve;
-				Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, 1.0f, EMontagePlayReturnType::MontageLength, StartTime, false);
+				Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, GetStockReloadSpeed(), EMontagePlayReturnType::MontageLength, StartTime, false);
 			}
 		}
 		else
@@ -1266,6 +1482,7 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 			if (SingleNode)
 			{
 				SingleNode->SetPosition(StartTime, false);
+				SingleNode->SetPlayRate(GetStockReloadSpeed());
 				SingleNode->SetPlaying(true);
 			}
 		}
@@ -1275,9 +1492,14 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 {
 	// Stage fallbacks stay within each perspective. The FP montage still owns gameplay timing.
-	PlayWeaponMeshAnimation(FirstPersonMesh, GetReloadWeaponAnimation(Stage));
+	// A stock speeds the whole stage up, gun parts and third person included.
+	const float ReloadSpeed = GetStockReloadSpeed();
+	UAnimationAsset* const WeaponAnimFP = GetReloadWeaponAnimation(Stage);
+	PlayWeaponMeshAnimation(FirstPersonMesh, WeaponAnimFP,
+		WeaponAnimFP ? WeaponAnimFP->GetPlayLength() / ReloadSpeed : 0.0f);
 	const UAnimMontage* FirstPersonReload = GetArmsMontageForStage(Stage);
-	const float Duration = FirstPersonReload ? FirstPersonReload->GetPlayLength() : ReloadTime;
+	const float Duration = (FirstPersonReload ? FirstPersonReload->GetPlayLength() : ReloadTime) / ReloadSpeed;
+	BeginReloadAudioPitch(Stage, Duration);
 
 	// The per round stages crossfade into each other; a magazine reload keeps its montage's own blend.
 	const bool bShellStage = Stage == EWeaponReloadStage::ShellStart || Stage == EWeaponReloadStage::ShellLoop
@@ -1359,7 +1581,7 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 
 	if (ArmsMontage && WeaponOwner)
 	{
-		WeaponOwner->PlayReloadMontage(ArmsMontage);
+		WeaponOwner->PlayReloadMontage(ArmsMontage, GetStockReloadSpeed());
 	}
 
 	// The gun's own moving parts, locally first so the reloading player waits for nothing, then to
@@ -1386,6 +1608,12 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 }
 
 float AShooterWeapon::GetActiveReloadTime() const
+{
+	// Every answer below is the stock-free length; the stock divides it.
+	return GetBaseReloadTime() / GetStockReloadSpeed();
+}
+
+float AShooterWeapon::GetBaseReloadTime() const
 {
 	// UsesSecondaryReload asks "is there a round in the chamber", and on a per round weapon the
 	// secondary slot holds the LOOP instead, so that question does not apply and its override must
@@ -1655,7 +1883,7 @@ float AShooterWeapon::PredictDamageAgainst(AActor* Target) const
 	// The shield gate IS applied, unlike an earlier version of this: the readout answers "what will
 	// this shot do to that enemy", and a finisher weapon against an intact shield does nothing at
 	// all with its own damage. Saying otherwise would be a lie the player then has to unlearn.
-	if (bRequiresBrokenShieldToDamage && !IsTargetShieldDown(Target))
+	if (IsShieldGateBlocking(Target))
 	{
 		Total = 0.0f;
 	}
@@ -1743,7 +1971,10 @@ float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, c
 			// tells the server a hit landed at all, and the server has its own reason to care about
 			// one that the weapon cannot pay for: the shield-piercing half of a class passive. The
 			// server re-checks the gate itself, so nothing is granted by reporting.
-			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass, this);
+			// The bone rides along: the server decides from it whether the hit landed on armour.
+			const FName HitBone = DamageEvent.IsOfType(FPointDamageEvent::ClassID)
+				? static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName : NAME_None;
+			OwnerCharacter->DealDamage(HitActor, FinalDamage, DamageEvent.DamageTypeClass, this, HitBone);
 
 			// Report the requested damage so local hit feedback still fires immediately. Kill
 			// feedback will not, because the client cannot know yet: it learns the outcome from
@@ -1767,7 +1998,30 @@ float AShooterWeapon::ApplyDamageToTarget(AActor* HitActor, float FinalDamage, c
 
 bool AShooterWeapon::IsShieldGateBlocking(AActor* HitActor) const
 {
+	// AUTHOR'S CALL 2026-10-03: armour is just armour, it takes any damage. The gate predates the
+	// pool - it withheld a finisher's damage until ionization had stripped the shield - and with
+	// ionization off for armoured targets it would leave such a weapon doing nothing to them at all.
+	// It still applies to the field-less charge carriers it was written for.
+	if (UShieldFieldStatics::GetShieldField(HitActor))
+	{
+		return false;
+	}
+
 	return bRequiresBrokenShieldToDamage && !IsTargetShieldDown(HitActor);
+}
+
+bool AShooterWeapon::IsShieldDownForHit(AActor* Target, FName HitBone) const
+{
+	if (IsTargetShieldDown(Target))
+	{
+		return true;
+	}
+
+	// The shield holds, but this bone is not under it (a limb): for this one hit there is no shield.
+	// Same answer AShooterNPC::AbsorbDamageWithShieldField gives on the server, so what the shooter
+	// hears and sees agrees with where the damage went.
+	const UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target);
+	return TargetShield && !TargetShield->CoversBone(HitBone);
 }
 
 float AShooterWeapon::ApplyPassivePierceDamage(AActor* HitActor)
@@ -3085,6 +3339,19 @@ void AShooterWeapon::Tick(float DeltaTime)
 
 	UpdateSpread(DeltaTime);
 
+	// A stock's faster reload: new reload sounds get its pitch as they start.
+	if (ReloadAudioPitchUntil > 0.0f && GetWorld())
+	{
+		if (GetWorld()->GetTimeSeconds() <= ReloadAudioPitchUntil)
+		{
+			ApplyReloadAudioPitch();
+		}
+		else
+		{
+			ReloadAudioPitchUntil = -1.0f;
+		}
+	}
+
 	// The third person weapon is not steered from here any more. It used to have its world rotation
 	// rebuilt from GetBaseAimRotation every frame, because the character's body faced its movement
 	// direction and the gun in its hand therefore pointed anywhere but at the target. That was
@@ -3223,7 +3490,8 @@ float AShooterWeapon::GetCurrentSpreadDegrees() const
 		AdsFactor = FMath::Lerp(1.0f, SpreadConfig.AdsMultiplier, ADSAlpha);
 	}
 
-	return FMath::Clamp(Total * AdsFactor, 0.0f, SpreadConfig.MaxSpreadDegrees);
+	// The stock tightens the hip cone only; its factor is already faded to 1 by the ADS alpha.
+	return FMath::Clamp(Total * AdsFactor * GetStockHipSpreadFactor(), 0.0f, SpreadConfig.MaxSpreadDegrees);
 }
 
 void AShooterWeapon::OnOwnerDestroyed(AActor* DestroyedActor)
@@ -3670,6 +3938,37 @@ AShooterProjectile* AShooterWeapon::SpawnProjectileAtTransform(const FTransform&
 	if (Projectile)
 	{
 		Projectile->SetSourceWeapon(this);
+	}
+
+	// The tracer. Drawn by UTracerSubsystem for rounds with bFreeTracer: it comes out of the barrel the
+	// player sees, runs behind the round near the gun, catches up, and finishes its run to the impact.
+	//
+	// Own shot: on the shooter's own screen the round leaves the physical muzzle, which first-person
+	// rendering squeezes almost onto the eye, so a trail drawn from it lies along the line of sight and
+	// reads as a dot. Apex fakes the origin out of the visible muzzle (projectile_adjust_to_gun_barrel);
+	// so do we, with the offset passed here. Everyone else (NPCs, remote players, the host's copy of a
+	// client's real round) is drawn from the round itself.
+	if (Projectile)
+	{
+		// A seen muzzle further than this from the round is not a muzzle but a bad camera read.
+		static constexpr float MaxSeenMuzzleOffsetCm = 100.0f;
+
+		FVector SeenMuzzleOffset = FVector::ZeroVector;
+		if (PawnOwner && PawnOwner->IsLocallyControlled() && PawnOwner->IsPlayerControlled())
+		{
+			SeenMuzzleOffset = GetFirstPersonMuzzleRenderLocation() - ProjectileTransform.GetLocation();
+			if (SeenMuzzleOffset.Size() > MaxSeenMuzzleOffsetCm)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[TRACER_DEBUG] %s: seen muzzle %.0f cm from the round, ignored"),
+					*GetNameSafe(Projectile), SeenMuzzleOffset.Size());
+				SeenMuzzleOffset = FVector::ZeroVector;
+			}
+		}
+
+		if (UTracerSubsystem* Tracers = GetWorld()->GetSubsystem<UTracerSubsystem>())
+		{
+			Tracers->StartTracer(Projectile, SeenMuzzleOffset);
+		}
 	}
 
 	// Everyone else's copy of this shot.
@@ -4298,13 +4597,13 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 		// cell, and the cells were holding a spare one beyond the loaded rounds. An endless reserve has
 		// nothing to take. Only the energy reserve is counted apart from the magazine.
 		bShotFromReserve = false;
-		if (UsesEnergyReserve())
+		if (UsesEnergyReserve() && !IsShotFreeByCheat(PawnOwner))
 		{
 			DrawEnergyReserve(1);
 			RefreshOwnerAmmoHUD();
 		}
 	}
-	else
+	else if (!IsShotFreeByCheat(PawnOwner))
 	{
 		--CurrentBullets;
 	}
@@ -4712,10 +5011,12 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 
 		// The shield as it stood when the bullet arrived, read before anything touches the target.
 		// @see ApplyHitscanDamage.
-		const bool bShieldDownBefore = IsTargetShieldDown(BestTarget);
+		const bool bShieldDownBefore = IsShieldDownForHit(BestTarget, BestHit.BoneName);
+		const ZoneFeedback::FRead ZoneBefore = ZoneFeedback::Before(BestTarget, BestHit, this, HitscanDamageType);
 
-		// Apply damage
-		FDamageEvent DamageEvent;
+		// Apply damage. A point event, so the bone reaches the armour coverage check on the victim.
+		FPointDamageEvent DamageEvent;
+		DamageEvent.HitInfo = BestHit;
 		if (HitscanDamageType)
 		{
 			DamageEvent.DamageTypeClass = HitscanDamageType;
@@ -4768,9 +5069,9 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		// Apply ionization (add positive charge to target). HitComponent gates the NPC-shield rule.
 		const bool bIonized = ApplyHitscanIonization(BestTarget, BestHit.GetComponent());
 
-		if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
+		if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore || ZoneBefore.bDeflected || ZoneBefore.bDeadPart))
 		{
-			const bool bShieldDownAfter = IsTargetShieldDown(BestTarget);
+			const bool bShieldDownAfter = IsShieldDownForHit(BestTarget, BestHit.BoneName);
 
 			FHitFeedbackContext Feedback;
 			Feedback.HitLocation = BestHitLocation;
@@ -4783,6 +5084,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 			Feedback.bZeroDamage = (ActualDamage <= 0.0f);
 			Feedback.HitActor = BestTarget;
 			Feedback.FeedbackSet = FeedbackSet;
+			ZoneFeedback::Fill(Feedback, ZoneBefore, BestTarget);
 
 			WeaponOwner->OnWeaponHitFeedback(Feedback);
 		}
@@ -4986,7 +5288,9 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	// is what the feedback has to describe. Compared against the same reading taken after damage and
 	// ionization have run, it also identifies the single shot that took the shield down -- which is
 	// the one event in a firefight that tells the player their job just changed.
-	const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
+	const bool bShieldDownBefore = IsShieldDownForHit(HitActor, Hit.BoneName);
+	const ZoneFeedback::FRead ZoneBefore = ZoneFeedback::Before(HitActor, Hit, this, OverrideDamageType ? OverrideDamageType : HitscanDamageType,
+		OverrideDamageEvent && OverrideDamageEvent->IsOfType(FRadialDamageEvent::ClassID));
 
 	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	// Wave falloff and beam energy were folded into BaseDamage and ImpulseForce by the caller: they
@@ -4999,12 +5303,13 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	const float FinalDamage = BaseDamage * HeadshotMult * ExtraDamageMultiplier;
 
-	UE_LOG(LogTemp, Verbose, TEXT("[HIT] %s: Base=%.1f x HS=%.1f x Extra=%.2f = %.1f to %s"),
-		*GetName(), BaseDamage, HeadshotMult, ExtraDamageMultiplier, FinalDamage, *HitActor->GetName());
+	UE_LOG(LogTemp, Verbose, TEXT("[HIT] %s: Base=%.1f x HS=%.1f x Extra=%.2f = %.1f to %s bone=%s"),
+		*GetName(), BaseDamage, HeadshotMult, ExtraDamageMultiplier, FinalDamage, *HitActor->GetName(), *Hit.BoneName.ToString());
 
 
 	// A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
-	FDamageEvent PointDamageEvent;
+	FPointDamageEvent PointDamageEvent;
+	PointDamageEvent.HitInfo = Hit;
 	// A projectile carries its own damage type (fire, explosion) and it must survive the trip through
 	// a funnel whose default was written for bullets.
 	if (const TSubclassOf<UDamageType> DamageType = OverrideDamageType ? OverrideDamageType : HitscanDamageType)
@@ -5092,9 +5397,9 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	// a shield taken down, or the ionizer's zero-damage charge transfer. Landing on a shield counts
 	// on its own: a held shield absorbs the damage entirely, so a weapon that neither hurt nor
 	// charged would otherwise hit a shield in total silence.
-	if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
+	if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore || ZoneBefore.bDeflected || ZoneBefore.bDeadPart))
 	{
-		const bool bShieldDownAfter = IsTargetShieldDown(HitActor);
+		const bool bShieldDownAfter = IsShieldDownForHit(HitActor, Hit.BoneName);
 
 		FHitFeedbackContext Feedback;
 		Feedback.HitLocation = Hit.ImpactPoint;
@@ -5107,6 +5412,7 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 		Feedback.bZeroDamage = (ActualDamage <= 0.0f);
 		Feedback.HitActor = HitActor;
 		Feedback.FeedbackSet = FeedbackSet;
+		ZoneFeedback::Fill(Feedback, ZoneBefore, HitActor);
 
 		// Who is standing where the confirmation has to be heard.
 		//
@@ -5570,14 +5876,16 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			// radius, so the cone path's area multiplier would be 1.0 anyway.
 			const float FinalDamage = HitscanDamage * RemainingEnergy * HeadshotMult * HeatMult * ZFactorMult * TagMult * UpgradeMult;
 
-			FDamageEvent DamageEvent;
+			FPointDamageEvent DamageEvent;
+			DamageEvent.HitInfo = PawnHit;
 			if (HitscanDamageType)
 			{
 				DamageEvent.DamageTypeClass = HitscanDamageType;
 			}
 
 			// The shield as it stood when the bullet arrived. @see ApplyHitscanDamage.
-			const bool bShieldDownBefore = IsTargetShieldDown(HitActor);
+			const bool bShieldDownBefore = IsShieldDownForHit(HitActor, PawnHit.BoneName);
+			const ZoneFeedback::FRead ZoneBefore = ZoneFeedback::Before(HitActor, PawnHit, this, HitscanDamageType);
 
 			const float ActualDamage = ApplyDamageToTarget(HitActor, FinalDamage, DamageEvent);
 			const bool bKilled = IsActorDeadAfterDamage(HitActor);
@@ -5617,9 +5925,9 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 			// Ionization (charge transfer); HitComponent gates the NPC riot-shield rule
 			const bool bIonized = ApplyHitscanIonization(HitActor, PawnHit.GetComponent());
 
-			if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore))
+			if (WeaponOwner && (ActualDamage > 0.0f || bIonized || !bShieldDownBefore || ZoneBefore.bDeflected || ZoneBefore.bDeadPart))
 			{
-				const bool bShieldDownAfter = IsTargetShieldDown(HitActor);
+				const bool bShieldDownAfter = IsShieldDownForHit(HitActor, PawnHit.BoneName);
 
 				FHitFeedbackContext Feedback;
 				Feedback.HitLocation = PawnHitLocation;
@@ -5632,6 +5940,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 				Feedback.bZeroDamage = (ActualDamage <= 0.0f);
 				Feedback.HitActor = HitActor;
 				Feedback.FeedbackSet = FeedbackSet;
+				ZoneFeedback::Fill(Feedback, ZoneBefore, HitActor);
 
 				WeaponOwner->OnWeaponHitFeedback(Feedback);
 			}
@@ -5900,7 +6209,7 @@ void AShooterWeapon::BeginPerRoundReload()
 	ShellStage = EWeaponReloadStage::ShellStart;
 	PlayReloadStage(ShellStage);
 
-	const float OpeningTime = ReloadMontage ? ReloadMontage->GetPlayLength() : 0.0f;
+	const float OpeningTime = (ReloadMontage ? ReloadMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
 
 	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: per round reload opening, %d/%d rounds, %.2fs"),
 		*GetName(), CurrentBullets, MagazineSize, OpeningTime);
@@ -5945,7 +6254,7 @@ void AShooterWeapon::AdvancePerRoundReload()
 	PlayReloadStage(ShellStage);
 
 	const UAnimMontage* const LoopMontage = SecondaryReloadMontage ? SecondaryReloadMontage : ReloadMontage;
-	const float LoopTime = LoopMontage ? LoopMontage->GetPlayLength() : 0.0f;
+	const float LoopTime = (LoopMontage ? LoopMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
 
 	GetWorld()->GetTimerManager().SetTimer(
 		ReloadTimer, this, &AShooterWeapon::AdvancePerRoundReload, FMath::Max(0.01f, LoopTime), false);
@@ -5955,7 +6264,7 @@ void AShooterWeapon::EndPerRoundReload()
 {
 	ShellStage = EWeaponReloadStage::ShellEnd;
 
-	const float ClosingTime = ReloadEndMontage ? ReloadEndMontage->GetPlayLength() : 0.0f;
+	const float ClosingTime = (ReloadEndMontage ? ReloadEndMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
 
 	// No closing animation is a legitimate setup, and then the reload is simply over. Going through
 	// FinishReload either way keeps the "gun is usable again" moment in one place.
@@ -6050,7 +6359,7 @@ void AShooterWeapon::SpendPooledRound()
 	// Server only. On a listen server the host's own Fire() reaches here directly; a remote
 	// client's shot reaches the server through AShooterCharacter::Server_ReportWeaponFired, which
 	// calls this for the same reason the ability passives are notified there.
-	if (!HasAuthority())
+	if (!HasAuthority() || IsShotFreeByCheat(PawnOwner))
 	{
 		return;
 	}
@@ -6192,13 +6501,15 @@ void AShooterWeapon::SuspendReloadForHolster()
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	if (ReloadAudioComponent && ReloadAudioComponent->IsPlaying() && ReloadAudioWorldStartTime >= 0.0f)
 	{
-		SuspendedReloadSoundTime = ReloadAudioStartOffset + FMath::Max(0.0f, Now - ReloadAudioWorldStartTime);
+		// The track runs at its pitch, so a second of world time is Pitch seconds of track.
+		SuspendedReloadSoundTime = ReloadAudioStartOffset
+			+ FMath::Max(0.0f, Now - ReloadAudioWorldStartTime) * GetStockReloadSpeed();
 	}
 	else if (NotifiedReloadSound && NotifiedReloadSoundBeginWorldTime >= 0.0f)
 	{
 		// The sound was spawned by the montage notify and is not our component yet: its position is
 		// the wall clock since the notify fired.
-		SuspendedReloadSoundTime = FMath::Max(0.0f, Now - NotifiedReloadSoundBeginWorldTime);
+		SuspendedReloadSoundTime = FMath::Max(0.0f, Now - NotifiedReloadSoundBeginWorldTime) * GetStockReloadSpeed();
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload suspended at arms %.2f, audio %.2fs (%s)"),
@@ -6229,6 +6540,16 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 	bReloadResumePending = false;
 	bIsReloading = true;
 	bReloadCommitted = false;
+
+	// The notifies still ahead in the resumed montage start their sounds at the stock's pitch too.
+	// The sound list is the one this stage collected when it began.
+	ReloadAudioPitch = GetStockReloadSpeed();
+	if (!FMath::IsNearlyEqual(ReloadAudioPitch, 1.0f) && !ReloadPitchSounds.IsEmpty() && GetWorld())
+	{
+		ReloadAudioPitchUntil = GetWorld()->GetTimeSeconds()
+			+ GetActiveReloadTime() * (1.0f - SuspendedReloadProgress) + 0.25f;
+	}
+
 	// Resume both independent skeletons at their recorded positions.  Starting the stage normally
 	// would restart the weapon mesh at zero and replay its audio, which is visibly out of sync.
 	if (UAnimMontage* Montage = GetActiveReloadMontage())
@@ -6247,7 +6568,7 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 					BlendArgs.BlendTime = ReloadResumeBlendDuration;
 					BlendArgs.BlendOption = ReloadResumeBlendOption;
 					BlendArgs.CustomCurve = ReloadResumeBlendCurve;
-					Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, 1.0f,
+					Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, GetStockReloadSpeed(),
 						EMontagePlayReturnType::MontageLength, SuspendedReloadProgress * Montage->GetPlayLength(), false);
 				}
 			}
@@ -6318,13 +6639,15 @@ void AShooterWeapon::CommitReloadFromNotify()
 
 float AShooterWeapon::GetReloadProgress() const
 {
-	if (!bIsReloading || ReloadTime <= 0.0f)
+	// Against the length the timer was actually set to, which a stock shortens.
+	const float Length = GetActiveReloadTime();
+	if (!bIsReloading || Length <= 0.0f)
 	{
 		return 0.0f;
 	}
 
 	const float Remaining = GetWorld()->GetTimerManager().GetTimerRemaining(ReloadTimer);
-	return FMath::Clamp(1.0f - (Remaining / ReloadTime), 0.0f, 1.0f);
+	return FMath::Clamp(1.0f - (Remaining / Length), 0.0f, 1.0f);
 }
 
 void AShooterWeapon::SetBulletCount(int32 NewCount)
@@ -6675,7 +6998,7 @@ float AShooterWeapon::ApplyIonizationStep(float CurrentCharge, float Cap, float 
 
 bool AShooterWeapon::ShouldWithholdDamageForShield(AActor* Target) const
 {
-	return bRequiresBrokenShieldToDamage && !IsTargetShieldDown(Target);
+	return IsShieldGateBlocking(Target);
 }
 
 bool AShooterWeapon::ApplyHitscanIonization(AActor* Target, UPrimitiveComponent* HitComponent)
@@ -6748,10 +7071,14 @@ bool AShooterWeapon::ApplyIonizationToTarget(AActor* Target, UPrimitiveComponent
 	// the field (AShooterNPC::TakeDamage), one rule that covers the team's gunfire, the beam and
 	// this shot, instead of a redirect per ionization path.
 	// @see UShieldFieldStatics::IsShieldUp
-	if (UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target))
+	//
+	// AUTHOR'S CALL 2026-10-03 (Docs/Damage_Model_Rework_Plan_2026-10-03.md §2.4): the armour takes
+	// damage and nothing else. Ionization used to strip the pool on top of the bullet's own damage,
+	// so a 25-point round took 50 off: a body shot and a headshot both ended at "armour gone, health
+	// untouched" and read as the same hit. An armoured target is not ionized at all.
+	if (UShieldFieldStatics::GetShieldField(Target))
 	{
-		TargetShield->ApplyIonization(ChargePerHit, FMath::Abs(ChargePerHit), PawnOwner);
-		return true;
+		return false;
 	}
 
 	// Everyone else keeps the charge paths that predate the field, read in the same order
@@ -7182,7 +7509,15 @@ EPhysicalSurface AShooterWeapon::ResolveImpactSurface(const FHitResult& Hit) con
 		{
 			if (HitNPC->UsesImpactSurfaceOverride())
 			{
-				Surface = HitNPC->GetImpactSurface(IsTargetShieldDown(HitActor));
+				Surface = HitNPC->GetImpactSurface(IsShieldDownForHit(HitActor, Hit.BoneName), Hit.BoneName);
+			}
+		}
+		if (const UHitZoneComponent* Zones = HitActor->FindComponentByClass<UHitZoneComponent>())
+		{
+			const EPhysicalSurface ZoneSurface = Zones->PreviewHit(Hit, this, false).Surface;
+			if (ZoneSurface != SurfaceType_Default)
+			{
+				return ZoneSurface;
 			}
 		}
 	}
@@ -7190,29 +7525,62 @@ EPhysicalSurface AShooterWeapon::ResolveImpactSurface(const FHitResult& Hit) con
 	return Surface;
 }
 
+float AShooterWeapon::ResolveImpactScale(const FHitResult& Hit) const
+{
+	// The round this was tuned on: 25 damage draws the effect at its authored size. Square root, so
+	// a round four times as strong is twice as big and not four times; clamped so a pellet still
+	// reads and a sniper headshot does not fill the screen.
+	static constexpr float ReferenceDamage = 25.0f;
+	static constexpr float MinScale = 0.7f;
+	static constexpr float MaxScale = 2.0f;
+
+	float Damage = GetShotDamage();
+	if (Hit.BoneName == FName("head") || Hit.BoneName == FName("Head"))
+	{
+		Damage *= FMath::Max(GetShotHeadshotMultiplier(), 1.0f);
+	}
+
+	if (Damage <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	return FMath::Clamp(FMath::Sqrt(Damage / ReferenceDamage), MinScale, MaxScale);
+}
+
+namespace
+{
+	/** The scale as it travels: hundredths in a byte, 0.01 .. 2.55. One cosmetic byte per bullet. */
+	uint8 PackImpactScale(float Scale)
+	{
+		return static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Scale * 100.0f), 1, 255));
+	}
+}
+
 void AShooterWeapon::SpawnImpactEffect(const FHitResult& Hit)
 {
 	const EPhysicalSurface Surface = ResolveImpactSurface(Hit);
+	const float ImpactScale = ResolveImpactScale(Hit);
 
 	// Here first, so the shooter sees their own bullet land with no round trip, then everyone else.
 	// Identical split to the muzzle flash and the tracer above.
-	SpawnImpactEffectLocally(Hit.ImpactPoint, Hit.ImpactNormal, Surface);
+	SpawnImpactEffectLocally(Hit.ImpactPoint, Hit.ImpactNormal, Surface, ImpactScale);
 
 	if (HasAuthority())
 	{
-		Multicast_PlayImpactEffect(Hit.ImpactPoint, Hit.ImpactNormal, static_cast<uint8>(Surface));
+		Multicast_PlayImpactEffect(Hit.ImpactPoint, Hit.ImpactNormal, static_cast<uint8>(Surface), PackImpactScale(ImpactScale));
 	}
 	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
 	{
 		// A client's shot only reaches the server as damage, and a shot that hit a wall has no
 		// damage to report -- so the impact needs its own way upstream, like the muzzle flash does.
 		OwnerCharacter->Server_ReportImpactEffect(this, Hit.ImpactPoint, Hit.ImpactNormal,
-			static_cast<uint8>(Surface));
+			static_cast<uint8>(Surface), PackImpactScale(ImpactScale));
 	}
 }
 
 void AShooterWeapon::Multicast_PlayImpactEffect_Implementation(FVector_NetQuantize100 Location,
-	FVector_NetQuantizeNormal Normal, uint8 SurfaceByte)
+	FVector_NetQuantizeNormal Normal, uint8 SurfaceByte, uint8 ScaleByte)
 {
 	// The shooter already played it the instant the trace came back.
 	const bool bIsShooter = PawnOwner && PawnOwner->IsLocallyControlled();
@@ -7221,10 +7589,10 @@ void AShooterWeapon::Multicast_PlayImpactEffect_Implementation(FVector_NetQuanti
 		return;
 	}
 
-	SpawnImpactEffectLocally(Location, Normal, static_cast<EPhysicalSurface>(SurfaceByte));
+	SpawnImpactEffectLocally(Location, Normal, static_cast<EPhysicalSurface>(SurfaceByte), ScaleByte / 100.0f);
 }
 
-void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface)
+void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface, float ImpactScale)
 {
 	// ���������� �������� ��������. � ��� �� ����������� ����� ��������� � �������� ���� ������� �
 	// �������, � �������� �� ���������� �� ������ ��� ������ ����������.
@@ -7265,12 +7633,15 @@ void AShooterWeapon::SpawnImpactEffectLocally(const FVector& Location, const FVe
 			FVector::OneVector,
 			true,
 			false,
-			ENCPoolMethod::None
+			// Pooled: an impact is the most frequently spawned effect in the game, and a fresh
+			// component per bullet is the expensive part of it on a low-end machine.
+			ENCPoolMethod::AutoRelease
 		);
 
 		if (ImpactComp)
 		{
 			ImpactComp->SetColorParameter(FName("ImpactColor"), BeamColor);
+			ImpactComp->SetFloatParameter(FName("ImpactScale"), ImpactScale);
 
 			if (bUseWaveVisualization)
 			{

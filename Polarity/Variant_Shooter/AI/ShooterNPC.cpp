@@ -35,6 +35,8 @@
 #include "EnemyCombatProfile.h"
 #include "EMF_FieldComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
+#include "Variant_Shooter/Shield/HitZoneComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
@@ -44,6 +46,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
 #include "../UI/DamageNumbersSubsystem.h"
+#include "Variant_Shooter/ShooterPlayerController.h"
 #include "../UI/EMFChargeWidgetSubsystem.h"
 #include "Curves/CurveFloat.h"
 #include "NiagaraFunctionLibrary.h"
@@ -405,6 +408,12 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 
 void AShooterNPC::BeginPlay()
 {
+	// Full health, for the bar's denominator on every machine. @see ReplicatedMaxHP
+	if (HasAuthority())
+	{
+		ReplicatedMaxHP = CurrentHP;
+	}
+
 	// Equipment from the class profile, before Super: the weapon is spawned during BeginPlay from
 	// WeaponClass, so an override applied afterwards would arm this NPC with the blueprint's weapon
 	// and then quietly disagree with its own profile about what it is carrying.
@@ -420,6 +429,13 @@ void AShooterNPC::BeginPlay()
 			if (UEMFVelocityModifier* const Modifier = FindComponentByClass<UEMFVelocityModifier>())
 			{
 				Modifier->MaxBaseCharge = CombatProfile->ShieldCharge;
+			}
+
+			// The same number sizes the shield field, when this enemy's Blueprint carries one. Before
+			// Super::BeginPlay on purpose: the field fills itself to MaxShield in its own BeginPlay.
+			if (UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(this))
+			{
+				Shield->SetMaxShield(CombatProfile->ShieldCharge);
 			}
 		}
 	}
@@ -638,7 +654,9 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	// The siege march runs off the controller's resolved target, which the StateTree cannot see:
 	// the tree only reacts to its own perception events, so the march must be driven from here.
-	TickSiegeMarch(DeltaTime);
+	const ATrackedTankNPC* const Tank = Cast<ATrackedTankNPC>(this);
+	const bool bTankRamming = Tank && Tank->IsRamming();
+	if (!bTankRamming) { TickSiegeMarch(DeltaTime); }
 
 	// Lit in the face by a tactical light: backs off firing blind, then hides. Outranks the turret
 	// corner game and the siege march for as long as it runs (both yield to it below).
@@ -646,7 +664,7 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	// A turret under the hat overrides everything the NPC was doing, the march included: it plays
 	// the corner until the turret is gone.
-	TickTurretCover(DeltaTime);
+	if (!bTankRamming) { TickTurretCover(DeltaTime); }
 
 	// [BENCH] State over the head, redrawn every frame: what this NPC is doing and why it is or is
 	// not shooting, in words, so the bench can be read by eye without the log.
@@ -1967,6 +1985,26 @@ namespace DazzleOwnership
 	}
 }
 
+bool AShooterNPC::IsFireLocked() const
+{
+	const UWorld* const World = GetWorld();
+	return World && FireLockEndTime > World->GetTimeSeconds();
+}
+
+void AShooterNPC::ApplyFireLock(float Duration)
+{
+	const UWorld* const World = GetWorld();
+	if (!HasAuthority() || !World || Duration <= 0.0f || bIsDead)
+	{
+		return;
+	}
+
+	FireLockEndTime = FMath::Max(FireLockEndTime, World->GetTimeSeconds() + Duration);
+	StopShooting();
+
+	UE_LOG(LogTemp, Log, TEXT("[SHOOT_DEBUG] %s: disarmed for %.1fs"), *GetName(), Duration);
+}
+
 bool AShooterNPC::IsDazzled() const
 {
 	const UWorld* const World = GetWorld();
@@ -2475,6 +2513,119 @@ void AShooterNPC::Landed(const FHitResult& Hit)
 		}));
 }
 
+float AShooterNPC::AbsorbDamageWithShieldField(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	// The Wizard's opened window means "damage ignores the field": the caller that must not be
+	// absorbed simply does not reach AbsorbDamage. @see UShieldFieldComponent::AbsorbDamage
+	if (!HasAuthority() || bShieldBypassActive || Damage <= 0.0f)
+	{
+		return Damage;
+	}
+
+	UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(this);
+	if (!Shield)
+	{
+		return Damage;
+	}
+
+	UPrimitiveComponent* HitComponent = nullptr;
+	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+	{
+		const FHitResult& HitInfo = static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo;
+		HitComponent = HitInfo.GetComponent();
+
+		// A bone the armour does not cover (a limb): the hit goes past it, straight to health.
+		if (!Shield->CoversBone(HitInfo.BoneName))
+		{
+			return Damage;
+		}
+	}
+
+	AActor* const Attacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
+	return Shield->AbsorbDamage(Damage, Attacker, HitComponent);
+}
+
+void AShooterNPC::ReportDamageNumber(float Damage, float HealthDamage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	if (!HasAuthority() || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	// Who dealt it. The instigating controller when it is a player's (a gun, a client's reported
+	// hit). Otherwise up the causer's owners: a projectile belongs to a weapon, a weapon to a pawn
+	// or to a turret, a turret to a player controller.
+	APlayerController* PC = Cast<APlayerController>(EventInstigator);
+	const AActor* Link = DamageCauser;
+	for (int32 Depth = 0; !PC && Link && Depth < 6; ++Depth, Link = Link->GetOwner())
+	{
+		if (const APlayerController* const AsController = Cast<APlayerController>(Link))
+		{
+			PC = const_cast<APlayerController*>(AsController);
+		}
+		else if (const APawn* const AsPawn = Cast<APawn>(Link))
+		{
+			PC = Cast<APlayerController>(AsPawn->GetController());
+		}
+		else if (const APawn* const ByInstigator = Link->GetInstigator())
+		{
+			PC = Cast<APlayerController>(ByInstigator->GetController());
+		}
+	}
+	AShooterPlayerController* const ShooterPC = Cast<AShooterPlayerController>(PC);
+	if (!ShooterPC)
+	{
+		// An enemy's own fire, a prop, the world: nobody to show a number to.
+		return;
+	}
+
+	// Direct when the player's own pawn is the causer or on its owner chain. A hit that reached the
+	// controller some other way (the turret the player built) is the player's, but at a remove.
+	bool bDirect = (EventInstigator == ShooterPC && !DamageCauser);
+	if (const APawn* const PlayerPawn = ShooterPC->GetPawn())
+	{
+		for (const AActor* Step = DamageCauser; Step && !bDirect; Step = Step->GetOwner())
+		{
+			bDirect = (Step == PlayerPawn) || (Step->GetInstigator() == PlayerPawn);
+		}
+	}
+
+	const float ArmorDamage = FMath::Max(Damage - HealthDamage, 0.0f);
+	const UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(this);
+
+	uint8 Flags = 0;
+	if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+	{
+		// The same test the weapons use for the headshot multiplier.
+		const FName Bone = static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName;
+		if (Bone == FName("head") || Bone == FName("Head"))
+		{
+			Flags |= DamageNumberFlags::Headshot;
+		}
+	}
+	if (bIsDead || CurrentHP <= 0.0f)
+	{
+		Flags |= DamageNumberFlags::Killed;
+	}
+	if (ArmorDamage > 0.0f && Shield && Shield->IsBroken())
+	{
+		Flags |= DamageNumberFlags::ArmorBroken;
+	}
+	if (!bDirect)
+	{
+		Flags |= DamageNumberFlags::Remote;
+	}
+
+	if (ShooterPC->IsLocalController())
+	{
+		ShooterPC->ShowDamageNumber(this, Damage, ArmorDamage, Flags);
+	}
+	else
+	{
+		ShooterPC->Client_ReportDamageNumber(this, Damage, ArmorDamage, Flags);
+	}
+}
+
 float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
 	// ignore if already dead
@@ -2524,8 +2675,25 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		}
 	}
 
-	// Reduce HP
-	CurrentHP -= Damage;
+	// Where on the body it landed, for an enemy that has hit zones (a tank's plate, tracks, sights):
+	// the zone may refuse the hit (light round on heavy plate), scale it, or keep it in its own pool.
+	// A refused hit counts as no hit at all below. @see UHitZoneComponent
+	float BodyDamage = Damage;
+	if (UHitZoneComponent* const Zones = FindComponentByClass<UHitZoneComponent>())
+	{
+		const FHitZoneOutcome Zone = Zones->ProcessHit(Damage, DamageEvent, EventInstigator, DamageCauser);
+		if (Zone.bBlocked || (Zone.BodyDamage <= 0.0f && !Zone.bPoolHit))
+		{
+			Damage = 0.0f;
+		}
+		BodyDamage = Zone.BodyDamage;
+	}
+
+	// Reduce HP: the shield field takes the hit first, what it could not hold goes on to health.
+	// Everything below still reads the full Damage (numbers, berserk, threat): the hit landed whole.
+	const float HealthDamage = BodyDamage > 0.0f
+		? AbsorbDamageWithShieldField(BodyDamage, DamageEvent, EventInstigator, DamageCauser) : 0.0f;
+	CurrentHP -= HealthDamage;
 
 	// Whoever caused this gets it banked toward their berserk payout.
 	//
@@ -2602,13 +2770,25 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		// only real damage plays the flinch reaction.
 		if (Damage > 0.0f)
 		{
-			PlayHitReaction(DamageDirection);
+			const bool bHeadHit = DamageEvent.IsOfType(FPointDamageEvent::ClassID)
+				&& (static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName == FName("head")
+					|| static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName == FName("Head"));
+			PlayHitReaction(DamageDirection, Damage, HealthDamage, bHeadHit);
 		}
-		StartHitFlash();
+		// The white flash says "this one reached the body". A hit the armour took whole has the
+		// armour's own impact effect to say so, and a flash on top of it only hid that effect.
+		if (HealthDamage > 0.0f)
+		{
+			StartHitFlash();
+		}
 
 		// Retaliation only on real damage — a 0-damage hit (e.g. the ionizer pistol)
 		// must not provoke the NPC into shooting back.
-		if (Damage > 0.0f)
+		//
+		// And only with a controller: retaliation is a decision, and a body nothing possesses (a
+		// target on the feedback bench, AutoPossessAI off) has nobody to make it. Without this it
+		// aimed and fired back all the same, straight out of this function.
+		if (Damage > 0.0f && GetController())
 		{
 			// Retaliation: get immediate permission to shoot back
 			if (bUseCoordinator)
@@ -2683,6 +2863,8 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// Use a consistent location slightly above NPC center for reliable screen positioning
 	// This ensures damage numbers always appear near the NPC regardless of where the hit landed
 	FVector HitLocation = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);  // Above center
+
+	ReportDamageNumber(Damage, HealthDamage, DamageEvent, EventInstigator, DamageCauser);
 
 	OnDamageTaken.Broadcast(this, Damage, DamageEvent.DamageTypeClass, HitLocation, DamageCauser);
 
@@ -3120,6 +3302,12 @@ void AShooterNPC::Die()
 	// And the half only the authority may: the destruction timer, the controller, the weapon. A
 	// client must not touch any of it — the server owns this actor's lifetime and the removal
 	// replicates down on its own.
+	if (const float WreckSeconds = GetWreckSeconds(); WreckSeconds > 0.0f)
+	{
+		// A wreck stands where it died, mesh and all, until the timer takes it away.
+		DeactivateForDeath(WreckSeconds, /*bHideMesh=*/ false);
+		return;
+	}
 	switch (ReplicatedDeathMode)
 	{
 	case EDeathMode::Ragdoll:
@@ -3136,6 +3324,7 @@ void AShooterNPC::Die()
 
 void AShooterNPC::RestoreBodyAfterDeath()
 {
+	if (UHitZoneComponent* Zones = FindComponentByClass<UHitZoneComponent>()) { Zones->SetZoneCollisionEnabled(true); }
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
 		// 1. Stop ragdoll physics
@@ -3249,13 +3438,14 @@ void AShooterNPC::PlayDeathVisuals()
 	// The body stops being an obstacle and stops walking about, everywhere. On the authority
 	// DeactivateForDeath repeats this and more; here it is what a client is allowed to do on its own.
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (UHitZoneComponent* Zones = FindComponentByClass<UHitZoneComponent>()) { Zones->SetZoneCollisionEnabled(false); }
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
 	{
 		MoveComp->StopMovementImmediately();
 		MoveComp->DisableMovement();
 	}
 
-	if (ReplicatedDeathMode != EDeathMode::Ragdoll)
+	if (ReplicatedDeathMode != EDeathMode::Ragdoll && GetWreckSeconds() <= 0.0f)
 	{
 		GetMesh()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		GetMesh()->SetVisibility(false);
@@ -3561,6 +3751,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, ReplicatedDeathMode);
 	DOREPLIFETIME(AShooterNPC, bIsDead);
 	DOREPLIFETIME(AShooterNPC, CurrentHP);
+	DOREPLIFETIME(AShooterNPC, ReplicatedMaxHP);
 	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
 	DOREPLIFETIME(AShooterNPC, bDistracted);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
@@ -3730,6 +3921,13 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	// Reset HP from class defaults
 	const AShooterNPC* CDO = GetClass()->GetDefaultObject<AShooterNPC>();
 	CurrentHP = CDO->CurrentHP;
+	ReplicatedMaxHP = CurrentHP;
+
+	// A recycled body comes back with a whole shield, not the last life's damage.
+	if (UShieldFieldComponent* const Shield = UShieldFieldStatics::GetShieldField(this))
+	{
+		Shield->ResetForReuse();
+	}
 
 	// --- Combat state ---
 	bIsShooting = false;
@@ -4161,6 +4359,7 @@ void AShooterNPC::EnableRagdollDeath(const FDeathModeConfig& Config)
 
 void AShooterNPC::DeactivateForDeath(float DestructionDelay, bool bHideMesh)
 {
+	if (UHitZoneComponent* Zones = FindComponentByClass<UHitZoneComponent>()) { Zones->SetZoneCollisionEnabled(false); }
 	// Disable capsule collision (always — even ragdoll disables capsule, mesh handles it)
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
@@ -4296,6 +4495,13 @@ void AShooterNPC::TryStartShooting()
 		return;
 	}
 
+	if (IsFireLocked())
+	{
+		ReportShootGate(40, TEXT("BLOCKED disarmed by a melee hit"));
+		StopShooting();
+		return;
+	}
+
 	// Don't try if we don't want to shoot anymore or target is invalid
 	if (!bWantsToShoot || !CurrentAimTarget.IsValid())
 	{
@@ -4323,6 +4529,19 @@ void AShooterNPC::TryStartShooting()
 		ReportShootGate(3, TEXT("BLOCKED perception delay"));
 		GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
 			&AShooterNPC::TryStartShooting, 0.1f, false);
+		return;
+	}
+
+	// The body itself says not now (a tank with blinded sights). Keeps the target, asks again.
+	if (IsTriggerBlockedBySelf())
+	{
+		ReportShootGate(11, TEXT("BLOCKED own state (blinded sights)"));
+		if (Weapon)
+		{
+			Weapon->StopFiring();
+		}
+		GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+			&AShooterNPC::TryStartShooting, 0.25f, false);
 		return;
 	}
 
@@ -4528,6 +4747,15 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 		return false;
 	}
 
+	// A cloaked player is asked the same way, and for the same reason. @see IsHiddenFromAI
+	if (const APolarityCharacter* const Body = Cast<APolarityCharacter>(Target))
+	{
+		if (Body->IsHiddenFromAI())
+		{
+			return false;
+		}
+	}
+
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(Target);
@@ -4582,53 +4810,126 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 	return !bHit;
 }
 
-void AShooterNPC::PlayHitReaction(const FVector& DamageDirection)
+void AShooterNPC::PlayHitReaction(const FVector& DamageDirection, float Damage, float HealthDamage, bool bHeadHit)
 {
-	// Skip hit reaction when stunned — prevents interrupting stun montage
-	if (bStunnedByExplosion)
+	if (bStunnedByExplosion || !HasAuthority())
 	{
 		return;
 	}
 
-	// Check cooldown
-	float CurrentTime = GetWorld()->GetTimeSeconds();
-	if (CurrentTime - LastHitReactionTime < HitReactionCooldown)
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	const float SinceLast = CurrentTime - LastHitReactionTime;
+
+	// DamageDirection is the way the hit was TRAVELLING, attacker to victim, so where it came from
+	// is the opposite. The old code compared the travel direction with the forward vector and read
+	// the sign the wrong way round: a round in the face picked the "back" montage.
+	const FVector From = -DamageDirection;
+	const float FromFront = FVector::DotProduct(GetActorForwardVector(), From);
+	const float FromRight = FVector::DotProduct(GetActorRightVector(), From);
+	const bool bFromBack = FromFront < -0.5f;
+	const bool bFromSide = !bFromBack && FMath::Abs(FromRight) > 0.7f;
+
+	// What the hit did decides how hard the flinch is. @see HitReactionsLight
+	const bool bReachedHealth = HealthDamage > 0.0f;
+	const bool bHeavy = bReachedHealth && (bHeadHit || Damage >= HitReactionHeavyDamage);
+
+	// SUSTAINED FIRE. A flinch restarted on every round of a burst never gets past its first
+	// frames: the body vibrates at the start pose and reads as a glitch, not as being hit. So a new
+	// flinch of the same strength or weaker has to wait out HitReactionCooldown, long enough for the
+	// one playing to pass its peak; under automatic fire that gives a flinch every few rounds, each
+	// a different one. A STRONGER flinch does not wait (beyond a hair, for two pellets of one shot):
+	// the round that breaks the armour, or the headshot, must show the moment it lands.
+	// The strength of the flinch in progress is read off which pool its montage sits in, so no
+	// extra state has to be kept in step.
+	static constexpr float StrongerFlinchMinGap = 0.08f;
+	const int32 NewStrength = bHeavy ? 2 : (bReachedHealth ? 1 : 0);
+	int32 LastStrength = 0;
+	if (const UAnimMontage* const Last = LastHitReactionMontage.Get())
+	{
+		const auto Holds = [Last](const TArray<TObjectPtr<UAnimMontage>>& Source) { return Source.Contains(Last); };
+		LastStrength = Holds(HitReactionsHeavy) ? 2 : ((Holds(HitReactionsMedium) || Holds(HitReactionsBack)) ? 1 : 0);
+	}
+	const float RequiredGap = (NewStrength > LastStrength) ? StrongerFlinchMinGap : HitReactionCooldown;
+	if (SinceLast < RequiredGap)
 	{
 		return;
 	}
 
-	// Determine if hit from front or back
-	FVector ForwardVector = GetActorForwardVector();
-	float DotProduct = FVector::DotProduct(ForwardVector, DamageDirection);
-
-	// Select appropriate montage
-	UAnimMontage* MontageToPlay = nullptr;
-	if (DotProduct > 0.0f)
+	TArray<UAnimMontage*> Pool;
+	const auto Take = [&Pool](const TArray<TObjectPtr<UAnimMontage>>& Source)
 	{
-		// Hit from front (damage coming towards us)
-		MontageToPlay = HitReactionFrontMontage;
-	}
-	else
-	{
-		// Hit from behind
-		MontageToPlay = HitReactionBackMontage;
-	}
-
-	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s PlayHitReaction (FLINCH): montage=%s (%s), bIsInKnockback=%d, bIsKnockbackInterpolating=%d"),
-		*GetName(), MontageToPlay ? *MontageToPlay->GetName() : TEXT("NULL"),
-		DotProduct > 0.0f ? TEXT("front") : TEXT("back"),
-		bIsInKnockback, bIsKnockbackInterpolating);
-
-	// Play the montage on third person mesh
-	if (MontageToPlay)
-	{
-		if (USkeletalMeshComponent* TPMesh = GetMesh())
+		for (UAnimMontage* const Montage : Source)
 		{
-			if (UAnimInstance* AnimInstance = TPMesh->GetAnimInstance())
+			if (Montage)
 			{
-				AnimInstance->Montage_Play(MontageToPlay);
-				LastHitReactionTime = CurrentTime;
+				Pool.Add(Montage);
 			}
+		}
+	};
+
+	if (bFromBack)
+	{
+		Take(HitReactionsBack);
+	}
+	if (Pool.Num() == 0 && bHeavy)
+	{
+		Take(HitReactionsHeavy);
+	}
+	if (Pool.Num() == 0 && bFromSide)
+	{
+		Take(FromRight > 0.0f ? HitReactionsRight : HitReactionsLeft);
+	}
+	if (Pool.Num() == 0 && bReachedHealth)
+	{
+		Take(HitReactionsMedium);
+	}
+	if (Pool.Num() == 0)
+	{
+		// A light hit from the front, or the fallback for everything above: the light pool, and the
+		// side flinches with it, which read fine from the front and keep a burst from repeating.
+		Take(HitReactionsLight);
+		Take(HitReactionsLeft);
+		Take(HitReactionsRight);
+	}
+	if (Pool.Num() == 0)
+	{
+		// No pools on this Blueprint: the two legacy montages, front and back the right way round.
+		if (UAnimMontage* const Legacy = (bFromBack ? HitReactionBackMontage : HitReactionFrontMontage).Get())
+		{
+			Pool.Add(Legacy);
+		}
+	}
+	if (Pool.Num() == 0)
+	{
+		return;
+	}
+
+	if (Pool.Num() > 1)
+	{
+		Pool.Remove(LastHitReactionMontage.Get());
+	}
+	UAnimMontage* const MontageToPlay = Pool[FMath::RandRange(0, Pool.Num() - 1)];
+
+	UE_LOG(LogTemp, Verbose, TEXT("[KNOCKBACK_DEBUG] %s PlayHitReaction (FLINCH): montage=%s front=%.2f right=%.2f health=%.1f heavy=%d"),
+		*GetName(), *MontageToPlay->GetName(), FromFront, FromRight, HealthDamage, bHeavy ? 1 : 0);
+
+	LastHitReactionTime = CurrentTime;
+	LastHitReactionMontage = MontageToPlay;
+	Multicast_PlayHitReaction(MontageToPlay);
+}
+
+void AShooterNPC::Multicast_PlayHitReaction_Implementation(UAnimMontage* Montage)
+{
+	if (!Montage || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	if (USkeletalMeshComponent* const TPMesh = GetMesh())
+	{
+		if (UAnimInstance* const AnimInstance = TPMesh->GetAnimInstance())
+		{
+			AnimInstance->Montage_Play(Montage);
 		}
 	}
 }

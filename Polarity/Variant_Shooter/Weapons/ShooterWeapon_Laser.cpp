@@ -379,10 +379,11 @@ void AShooterWeapon_Laser::ApplyIonization(AActor* Target, UPrimitiveComponent* 
 	// Enemies: one door, same as every other weapon. The beam's per-second rate becomes the same
 	// per-second strip the field understands, and bElectrifyNegative keeps choosing the polarity.
 	// (The charge paths below are for targets without a field: props, dropped weapons, raw carriers.)
-	if (UShieldFieldComponent* const TargetShield = UShieldFieldStatics::GetShieldField(Target))
+	//
+	// AUTHOR'S CALL 2026-10-03: the armour takes damage and nothing else, so an armoured target is
+	// not ionized at all. @see AShooterWeapon::ApplyIonizationToTarget
+	if (UShieldFieldStatics::GetShieldField(Target))
 	{
-		const float SignedStep = IonizationChargePerSecond * DeltaTime * (bElectrifyNegative ? -1.0f : 1.0f);
-		TargetShield->ApplyIonization(SignedStep, FMath::Abs(SignedStep), GetOwner());
 		return;
 	}
 

@@ -54,14 +54,24 @@ public:
 	/** Unbind from current target and deactivate */
 	void Unbind();
 
-	/** Reset for pool reuse */
-	void ResetWidget();
+	/** Reset for pool reuse. Virtual so a subclass can drop its own animation state with it. */
+	virtual void ResetWidget();
 
 	/**
 	 * Update screen position based on target world location.
 	 * Called every frame by EMFChargeWidgetSubsystem::Tick.
 	 */
 	void UpdateScreenPosition(APlayerController* PC);
+
+	/** Per-frame state for subclasses, called by the subsystem for every active widget whether it is
+	 *  on screen or not (a hidden widget gets no NativeTick). Nothing here in the base. */
+	virtual void TickWidgetState(float DeltaTime) {}
+
+	/** The player at this screen just hit the bound target: keep the widget up for
+	 *  ShowAfterHitSeconds even with the crosshair elsewhere. */
+	void NotifyLocalHit();
+
+
 
 	/** Get this widget's category for clutter reduction */
 	EChargeWidgetCategory GetCategory() const;
@@ -303,6 +313,17 @@ public:
 	float EffectiveMinScaleDistance = 3000.0f;
 
 protected:
+	/** How long the widget stays up after the local player's hit, past the screen-centre focus.
+	 *  0 in the base (props and weapons keep the focus rule alone); the enemy bar sets it. */
+	float ShowAfterHitSeconds = 0.0f;
+
+	/** World time of the local player's last hit on the target; negative = never. */
+	double LastLocalHitTime = -1.0;
+
+	/** The bound enemy's full health: its replicated maximum when it has one, the bind-time health
+	 *  otherwise. */
+	float ResolveMaxHP() const;
+
 	/** The NPC this widget is tracking (mutually exclusive with BoundProp) */
 	TWeakObjectPtr<AShooterNPC> BoundNPC;
 
@@ -395,6 +416,12 @@ private:
 	void UpdateShieldState(bool bAllowBreakEffects);
 
 	void PlayShieldBreakSound() const;
+
+	/** Enemy targets only: write the two bars straight from the truth, shield field on top and
+	 *  health under it. Found by name in the Blueprint (Shield_PB, HP_PB), so the layout stays the
+	 *  author's. Called AFTER the Blueprint events on purpose: the graph still feeds Shield_PB from
+	 *  the charge meter, and this has the last word. An enemy with no field hides the shield bar. */
+	void RefreshEnemyBars();
 
 	UFUNCTION()
 	void OnNPCStunStart(AShooterNPC* StunnedNPC, float Duration);

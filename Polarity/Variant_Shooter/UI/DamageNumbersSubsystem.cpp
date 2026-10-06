@@ -12,6 +12,10 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
 #include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/UI/DamageSumLayerWidget.h"
+#include "Variant_Shooter/UI/EMFChargeWidgetSubsystem.h"
+#include "Variant_Shooter/UI/EnemyHudSettings.h"
+#include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 
 void UDamageNumbersSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -23,6 +27,11 @@ void UDamageNumbersSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 void UDamageNumbersSubsystem::Deinitialize()
 {
 	CleanupWidgets();
+	if (SumLayer)
+	{
+		SumLayer->RemoveFromParent();
+		SumLayer = nullptr;
+	}
 	Super::Deinitialize();
 }
 
@@ -139,6 +148,14 @@ void UDamageNumbersSubsystem::SpawnDamageNumberFromType(const FVector& WorldLoca
 void UDamageNumbersSubsystem::RegisterNPC(AShooterNPC* NPC)
 {
 	if (!NPC)
+	{
+		return;
+	}
+
+	// With the enemy bar on, numbers come from the victim's own report (ReportDamageNumber), which
+	// reaches clients. OnDamageTaken fires on the server only, so listening to it as well would give
+	// the host every hit twice.
+	if (UEnemyHudSettings::Get()->bUseEnemyBar)
 	{
 		return;
 	}
@@ -481,4 +498,70 @@ void UDamageNumbersSubsystem::FinalizeBatch(const FDamageBatchKey& Key)
 	// Just remove from map - the widget will finish its animation naturally
 	// and return to pool via the OnFinished delegate
 	ActiveBatches.Remove(Key);
+}
+
+// ==================== Damage sum ====================
+
+UDamageSumLayerWidget* UDamageNumbersSubsystem::GetOrCreateSumLayer()
+{
+	if (SumLayer)
+	{
+		return SumLayer;
+	}
+
+	APlayerController* const PC = GetLocalPlayerController();
+	if (!PC)
+	{
+		return nullptr;
+	}
+
+	SumLayer = CreateWidget<UDamageSumLayerWidget>(PC, UEnemyHudSettings::GetDamageSumLayerClass());
+	if (SumLayer)
+	{
+		// Over the enemy bars (90), under the old per-hit numbers (100).
+		SumLayer->AddToViewport(95);
+	}
+	return SumLayer;
+}
+
+void UDamageNumbersSubsystem::ReportDamageNumber(AActor* Target, float Damage, float ArmorDamage, uint8 Flags)
+{
+	if (!bEnabled || !Target || Damage <= 0.0f)
+	{
+		return;
+	}
+
+	FDamageNumberReport Report;
+	Report.Target = Target;
+	Report.Damage = Damage;
+	Report.ArmorDamage = ArmorDamage;
+	Report.bHeadshot = (Flags & DamageNumberFlags::Headshot) != 0;
+	Report.bKilled = (Flags & DamageNumberFlags::Killed) != 0;
+	Report.bArmorBroken = (Flags & DamageNumberFlags::ArmorBroken) != 0;
+	Report.bRemote = (Flags & DamageNumberFlags::Remote) != 0;
+
+	// The tier is read here, not sent: the pool size is replicated and the colour is this machine's
+	// palette anyway.
+	if (const UShieldFieldComponent* const Field = UShieldFieldStatics::GetShieldField(Target))
+	{
+		Report.ArmorTier = UEnemyHudSettings::ArmorTierFromMax(Field->GetMaxShield());
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[DMGNUM_DEBUG] %s dmg=%.1f armor=%.1f head=%d kill=%d break=%d remote=%d"),
+		*Target->GetName(), Damage, ArmorDamage, Report.bHeadshot, Report.bKilled, Report.bArmorBroken, Report.bRemote);
+
+	if (UDamageSumLayerWidget* const Layer = GetOrCreateSumLayer())
+	{
+		Layer->AddReport(Report);
+	}
+
+	// The player's own hit keeps the enemy's bar up for a while wherever the crosshair goes. A
+	// turret's hit does not: the bar would pop up over enemies the player is not fighting.
+	if (!Report.bRemote)
+	{
+		if (UEMFChargeWidgetSubsystem* const Bars = GetWorld()->GetSubsystem<UEMFChargeWidgetSubsystem>())
+		{
+			Bars->NotifyLocalHit(Target);
+		}
+	}
 }

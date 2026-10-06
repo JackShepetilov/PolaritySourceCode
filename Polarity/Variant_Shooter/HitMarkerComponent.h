@@ -28,7 +28,9 @@ enum class EHitMarkerType : uint8
 	HeadshotKill,	// Headshot that killed
 	ShieldHit,		// Landed on a shield that is still holding
 	ShieldBreak,	// This hit is the one that took the shield down
-	Remote			// Landed by the player's turret, not by the gun in their hands
+	Remote,			// Landed by the player's turret, not by the gun in their hands
+	Deflected,		// Bounced off heavy plate: no damage
+	DeadPart		// Landed on a part that is already destroyed
 };
 
 /**
@@ -133,6 +135,14 @@ struct FHitMarkerSettings
 	 *  from across the room, not the shot they just took. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
 	FLinearColor RemoteHitColor = FLinearColor(0.75f, 0.75f, 0.75f, 0.8f);
+
+	/** Colour for a shot that bounced off heavy plate (did nothing). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor DeflectedHitColor = FLinearColor(1.0f, 0.75f, 0.2f, 0.9f);
+
+	/** Colour for a shot on a part that is already destroyed (did nothing). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual")
+	FLinearColor DeadPartHitColor = FLinearColor(0.35f, 0.35f, 0.35f, 0.8f);
 
 	/** Size of the turret's marker as a fraction of an own hit's. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visual", meta = (ClampMin = "0.1", ClampMax = "2.0"))

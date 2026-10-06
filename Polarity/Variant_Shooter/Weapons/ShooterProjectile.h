@@ -13,6 +13,9 @@ class UPrimitiveComponent;
 class UNiagaraSystem;
 class UNiagaraComponent;
 class AShooterWeapon;
+class USoundBase;
+class USoundAttenuation;
+class USoundConcurrency;
 
 /**
  * Whether this round ionizes, and whose number decides it.
@@ -299,9 +302,75 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Projectile|VFX")
 	TObjectPtr<UNiagaraSystem> TrailFX;
 
-	/** Active trail component (spawned on BeginPlay) */
+	/** Active trail component (spawned on BeginPlay). Unused with bFreeTracer. */
 	UPROPERTY()
 	TObjectPtr<UNiagaraComponent> TrailComponent;
+
+	// ==================== Tracer (free trail, UTracerSubsystem) ====================
+
+	/** Draw TrailFX as a free tracer instead of attaching it to the round: it comes out of the barrel
+	 *  the player sees, runs behind the round near the gun and catches up, and after a hit carries on
+	 *  to the impact. On for the bullets; rockets and other rounds with an attached trail leave it off.
+	 *  @see UTracerSubsystem */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer")
+	bool bFreeTracer = false;
+
+	/** The most the tracer head may run behind the round, in time. The speed cap below can cut it:
+	 *  the effective value per class is logged once as [TRACER_DEBUG]. */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer", meta = (EditCondition = "bFreeTracer", ClampMin = 0, Units = "s"))
+	float TracerMaxLag = 0.06f;
+
+	/** Where the tracer head has caught the round up and from there on shows it exactly. */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer", meta = (EditCondition = "bFreeTracer", ClampMin = 0, Units = "cm"))
+	float TracerCatchUpDistance = 6000.0f;
+
+	/** How fast the head may go while catching up, in round speeds. A big lag over a short catch-up
+	 *  distance needs a fast sprint at the end; this caps it (and with it the lag). */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer", meta = (EditCondition = "bFreeTracer", ClampMin = 1))
+	float TracerMaxCatchUpSpeedRatio = 4.0f;
+
+	/** Own shot: the tracer starts at the barrel the player sees and slides onto the round's path over
+	 *  this much of its travel. Apex: projectile_muzzleOffsetFirstPersonDecayDist 1000 units (25.4 m). */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer", meta = (EditCondition = "bFreeTracer", ClampMin = 0, Units = "cm"))
+	float TracerBarrelConvergeDistance = 2540.0f;
+
+	/** ...or within this time, whichever comes first. Apex: projectile_muzzleOffsetFirstPersonDecayMaxTime 0.3. */
+	UPROPERTY(EditDefaultsOnly, Category = "Projectile|Tracer", meta = (EditCondition = "bFreeTracer", ClampMin = 0, Units = "s"))
+	float TracerBarrelConvergeMaxTime = 0.3f;
+
+	friend class UTracerSubsystem;
+
+	// ==================== Hit Size ====================
+
+	/** The hit sphere's radius over the flight, Apex style (their bolt_hitsize_grow keys): X = metres
+	 *  flown, Y = radius in cm, straight lines between keys, the last key held. Empty = the collision
+	 *  sphere keeps the radius set on it. Apex keys it by time, with the distance in a comment beside
+	 *  each key; distance here, so a slowed round (the freezer) does not grow early. Apex grows only
+	 *  marksman and sniper rounds, and only by centimetres: a long shot forgives a little, a rifle
+	 *  round stays a point. */
+	UPROPERTY(EditAnywhere, Category = "Projectile|Hit Size")
+	TArray<FVector2D> HitRadiusOverFlight;
+
+	// ==================== Whiz-by ====================
+
+	/** Played where this round passes closest to the local player, when it passes near and misses.
+	 *  Never for the player who fired it. Every machine plays its own from its own copy of the round,
+	 *  so it costs no network. A MetaSound with a bool input SwapLR gets it set by which side the
+	 *  round crosses (the Lyra whiz-by set). */
+	UPROPERTY(EditAnywhere, Category = "Projectile|Whiz By")
+	TObjectPtr<USoundBase> WhizBySound;
+
+	/** None = the sound's own. */
+	UPROPERTY(EditAnywhere, Category = "Projectile|Whiz By")
+	TObjectPtr<USoundAttenuation> WhizByAttenuation;
+
+	/** None = the sound's own. */
+	UPROPERTY(EditAnywhere, Category = "Projectile|Whiz By")
+	TObjectPtr<USoundConcurrency> WhizByConcurrency;
+
+	/** How close the round's line must pass the listener. Apex: 500 units for a pilot = 12.7 m. */
+	UPROPERTY(EditAnywhere, Category = "Projectile|Whiz By", meta = (ClampMin = 0, Units = "cm"))
+	float WhizByMaxDistance = 1270.0f;
 
 public:
 
@@ -399,6 +468,9 @@ public:
 	 * Reads the speed it is ACTUALLY flying at, not the class default, and must therefore be called
 	 * after whatever set that speed. Launch paths that override it (AShieldBypassProjectile::LaunchAt)
 	 * call this again; the timer handle is shared, so re-arming replaces rather than stacks.
+	 *
+	 * Everything else that depends on the launch speed is armed here too (whiz-by, hit size), so
+	 * every launch path gets them by calling this one function.
 	 */
 	void ArmFlightTimeout();
 
@@ -524,4 +596,36 @@ protected:
 
 	/** Return this projectile to pool (or destroy if not pooled) */
 	void ReturnToPoolOrDestroy();
+
+private:
+
+	/** Tell UTracerSubsystem this round stopped here, so its free tracer finishes its run to this point. */
+	void EndFreeTracer();
+
+	/** The radius the Blueprint set, so a pooled round shrinks back after a grown flight. */
+	float BaseCollisionRadius = -1.0f;
+
+	/** Where the flight started, for HitRadiusOverFlight. */
+	FVector LaunchLocation = FVector::ZeroVector;
+
+	FTimerHandle HitRadiusTimer;
+	FTimerHandle WhizByTimer;
+
+	/** Where the whiz-by plays, worked out at launch, and which way the round crosses the listener. */
+	FVector WhizByPoint = FVector::ZeroVector;
+	bool bWhizBySwapLR = false;
+
+	/** Radius from HitRadiusOverFlight after this many metres. */
+	float EvaluateHitRadius(float MetresFlown) const;
+
+	void StartHitRadiusGrowth();
+	void UpdateHitRadius();
+
+	/** The straight line from launch: does it pass the local listener inside WhizByMaxDistance, and
+	 *  when. One timer, no tick; a round that lands first never plays it. */
+	void ArmWhizBy();
+	void PlayWhizBy();
+
+	/** Both timers above, and the radius back to the Blueprint's. Pool reuse and the end of a flight. */
+	void StopFlightExtras();
 };

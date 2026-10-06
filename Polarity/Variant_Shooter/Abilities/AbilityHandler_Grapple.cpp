@@ -29,27 +29,6 @@ void UAbilityHandler_Grapple::OnActivate_Implementation()
 		return;
 	}
 
-	// A press with the brackets on a dropped weapon fetches it instead of swinging. The owning client
-	// says which drop (it is the one that drew the brackets); the claim is checked here with a little
-	// slack, because the client measured its distance a round trip ago.
-	if (Def->bCanFetchWeapons)
-	{
-		static constexpr float FetchClaimMarginCm = 300.0f;
-		AActor* Claim = Caster->ConsumeGrappleFetchClaim();
-		if (Claim && IsFetchable(Caster, Claim, Def, FetchClaimMarginCm))
-		{
-			StartFetch(Claim);
-			return;
-		}
-		if (Claim)
-		{
-			// Falls through to an ordinary throw: the player pressed the button, and a hook that
-			// went nowhere at all would read as a dropped input.
-			UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s claimed %s, but it is taken or out of reach - throwing normally"),
-				*Caster->GetName(), *Claim->GetName());
-		}
-	}
-
 	const FGrappleLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
 
 	// Anchored on world geometry, so it traces visibility rather than pawns: a hook that grabbed an
@@ -160,26 +139,18 @@ void UAbilityHandler_Grapple::OnButtonReleased_Implementation()
 
 void UAbilityHandler_Grapple::OnCancelRequested_Implementation()
 {
-	if (bFetchInFlight)
-	{
-		AbortFetch();
-		return;
-	}
 	ReleaseLine(true);
 }
 
 void UAbilityHandler_Grapple::OnUnequip_Implementation()
 {
-	if (bFetchInFlight)
-	{
-		AbortFetch();
-		return;
-	}
 	// A line left attached to a character that no longer has the ability would pull forever.
 	ReleaseLine(true);
 }
 
 // ==================== Fetch ====================
+// Only the two rules live here now. The fetch itself is the character's, on its own key, so that it
+// works whatever ability is equipped. @see AShooterCharacter::Server_FetchItem
 
 bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const AActor* Target,
 	const UAbilityDefinition_Grapple* Def, float ExtraRadius)
@@ -280,110 +251,6 @@ AActor* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster
 	}
 
 	return nullptr;
-}
-
-void UAbilityHandler_Grapple::StartFetch(AActor* Drop)
-{
-	UAbilityDefinition_Grapple* Def = Cast<UAbilityDefinition_Grapple>(GetDefinition());
-	AShooterCharacter* Caster = GetOwningCharacter();
-	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
-	if (!Def || !Caster || !World || !Drop)
-	{
-		NotifyAbilityCancelled();
-		return;
-	}
-
-	PendingFetch = Drop;
-	bFetchInFlight = true;
-
-	FVector Start, End;
-	Caster->GetAimRay(1.0f, Start, End);
-	FVector Anchor, Extent;
-	Drop->GetActorBounds(true, Anchor, Extent);
-
-	// The same flight speed as any throw, so a fetch reads as the same hook.
-	const FGrappleLevelStats Stats = Def->GetStatsAtLevel(GetCurrentLevel());
-	const float TravelTime = FVector::Dist(Start, Anchor) / FMath::Max(Stats.HookTravelSpeed, 1.0f);
-
-	// bCanAttach false: nobody swings. The drop rides the line back instead. @see UpdateGrappleVisual
-	Caster->Multicast_PlayGrappleThrow(Anchor, TravelTime, false, Def, Drop);
-
-	// Both hands go on the line, exactly as for a swing. The new gun is drawn when it arrives.
-	// @see ADroppedRangedWeapon::CompletePull
-	Caster->BeginWeaponFetchStow(Def);
-
-	UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s threw at %s, %.0f cm, travel %.2fs"),
-		*Caster->GetName(), *Drop->GetName(), FVector::Dist(Caster->GetActorLocation(), Drop->GetActorLocation()),
-		TravelTime);
-
-	if (TravelTime > 0.0f)
-	{
-		World->GetTimerManager().SetTimer(FetchTravelTimer, this, &UAbilityHandler_Grapple::FinishFetch,
-			TravelTime, false);
-	}
-	else
-	{
-		FinishFetch();
-	}
-}
-
-void UAbilityHandler_Grapple::FinishFetch()
-{
-	if (!bFetchInFlight)
-	{
-		return;
-	}
-	bFetchInFlight = false;
-
-	AActor* Drop = PendingFetch.Get();
-	PendingFetch.Reset();
-	AShooterCharacter* Caster = GetOwningCharacter();
-
-	// No radius test here, on purpose: the hook already reached it, and walking away while it flew
-	// should not snap the line. Only "somebody else got there first" is a refusal, and the item's
-	// own pull gate answers that.
-	IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Drop);
-	if (Fetchable && Caster && Fetchable->BeginGrappleFetchPull(Caster))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s hooked %s, pulling it in"), *Caster->GetName(), *Drop->GetName());
-		// A weapon gives the hands back itself; anything else is watched until it has arrived.
-		if (!Fetchable->FinishesFetchItself())
-		{
-			Caster->WatchGrappleFetch(Drop);
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[GRAPPLE_FETCH] %s's hook arrived, but %s is gone or already taken"),
-			*GetNameSafe(Caster), *GetNameSafe(Drop));
-
-		// Nothing is coming back, so the weapon that was put away comes back out.
-		if (Caster)
-		{
-			Caster->FinishWeaponFetch(false);
-		}
-	}
-
-	// Cancelled rather than completed: completing is what starts the cooldown, and a fetch must not
-	// cost one. The hook is free again the moment it has let go of the weapon.
-	NotifyAbilityCancelled();
-}
-
-void UAbilityHandler_Grapple::AbortFetch()
-{
-	bFetchInFlight = false;
-	PendingFetch.Reset();
-
-	if (AShooterCharacter* Caster = GetOwningCharacter())
-	{
-		if (UWorld* World = Caster->GetWorld())
-		{
-			World->GetTimerManager().ClearTimer(FetchTravelTimer);
-		}
-		Caster->FinishWeaponFetch(false);
-	}
-
-	NotifyAbilityCancelled();
 }
 
 void UAbilityHandler_Grapple::ReleaseLine(bool bCancelled)

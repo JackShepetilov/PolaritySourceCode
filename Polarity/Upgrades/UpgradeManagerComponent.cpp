@@ -1086,6 +1086,32 @@ float UUpgradeManagerComponent::GetCombinedMeleeDamageMultiplier(AActor* Target)
 	return Combined;
 }
 
+void UUpgradeManagerComponent::NotifyMeleeHitAuthority(AActor* Target)
+{
+	for (auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->OnMeleeHitAuthority(Target);
+		}
+	}
+}
+
+float UUpgradeManagerComponent::GetCombinedReloadSpeedMultiplier() const
+{
+	float Combined = 1.0f;
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Combined *= Pair.Value->GetReloadSpeedMultiplier();
+		}
+	}
+
+	return Combined;
+}
+
 float UUpgradeManagerComponent::GetCombinedMeleeKnockbackDistanceMultiplier(AActor* Target) const
 {
 	float Combined = 1.0f;

@@ -10,8 +10,35 @@
 #include "DamageNumbersSubsystem.generated.h"
 
 class UDamageNumberWidget;
+class UDamageSumLayerWidget;
 class UCanvasPanel;
 class AShooterNPC;
+
+/** Bits of the damage-number report that travels from the victim's TakeDamage to the shooter. */
+namespace DamageNumberFlags
+{
+	constexpr uint8 Headshot = 1 << 0;
+	constexpr uint8 Killed = 1 << 1;
+	constexpr uint8 ArmorBroken = 1 << 2;
+	/** Landed by something the player owns but is not holding: their turret. */
+	constexpr uint8 Remote = 1 << 3;
+}
+
+/** One hit, as the player who dealt it gets to see it. Decided on the server, where the split
+ *  between armour and health and the kill are certain. */
+struct FDamageNumberReport
+{
+	TWeakObjectPtr<AActor> Target;
+	float Damage = 0.0f;
+	/** The part of Damage the armour took. */
+	float ArmorDamage = 0.0f;
+	/** Armour tier of the target, for the colour. Read on the receiving machine. */
+	int32 ArmorTier = 0;
+	bool bHeadshot = false;
+	bool bKilled = false;
+	bool bArmorBroken = false;
+	bool bRemote = false;
+};
 
 /**
  * Key for identifying unique damage batches (per NPC + per category)
@@ -165,6 +192,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Damage Numbers")
 	void SpawnDamageNumberFromType(const FVector& WorldLocation, float Damage, TSubclassOf<UDamageType> DamageTypeClass);
 
+	/**
+	 * A hit this machine's player dealt, as reported by the victim (AShooterNPC::ReportDamageNumber,
+	 * through AShooterPlayerController::Client_ReportDamageNumber on a client). Adds to that enemy's
+	 * running sum beside its bar, and keeps the bar up for the after-hit window.
+	 *
+	 * This is the path for UEnemyHudSettings::bUseEnemyBar. The old per-hit numbers, fed from
+	 * OnDamageTaken, only ever ran on the server and never reached a client.
+	 */
+	void ReportDamageNumber(AActor* Target, float Damage, float ArmorDamage, uint8 Flags);
+
 	// ==================== Settings ====================
 
 	/** Damage number settings */
@@ -235,6 +272,12 @@ public:
 	/** Canvas panel to add widgets to (created at runtime) */
 	UPROPERTY()
 	TObjectPtr<UCanvasPanel> CanvasPanel;
+
+	/** The full-screen layer that draws every enemy's damage sum. Created on the first report. */
+	UPROPERTY()
+	TObjectPtr<UDamageSumLayerWidget> SumLayer;
+
+	UDamageSumLayerWidget* GetOrCreateSumLayer();
 
 	/** Get a widget from the pool (or create new if pool empty) */
 	UDamageNumberWidget* GetWidgetFromPool();

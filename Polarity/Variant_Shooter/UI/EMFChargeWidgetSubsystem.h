@@ -153,6 +153,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "EMF Charge Widget")
 	void UnregisterRiotShieldPickup(ARiotShieldPickup* Pickup);
 
+	// ==================== Enemy bar ====================
+
+	/** The player at this screen just hit Target: its bar stays up for the after-hit window. */
+	void NotifyLocalHit(AActor* Target);
+
+	/** The widget bound to Actor, if it has one. */
+	UEMFChargeWidget* FindWidgetForActor(const AActor* Actor) const;
+
 	// ==================== Settings ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings")
@@ -190,6 +198,13 @@ protected:
 
 	UEMFChargeWidget* GetWidgetFromPool();
 	void ReturnWidgetToPool(UEMFChargeWidget* Widget);
+
+	/** Enemy bars (UEnemyBarWidget) are pooled apart from the charge indicators: the two are
+	 *  different classes and a pooled widget must come back as the class it was made as. */
+	UPROPERTY()
+	TArray<TObjectPtr<UEMFChargeWidget>> EnemyBarPool;
+
+	UEMFChargeWidget* GetEnemyBarFromPool();
 	void CleanupWidgets();
 	void ProcessPendingRegistrations();
 

@@ -376,6 +376,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	UInputAction* AbilityAction;
 
+	/** Throw the hook at the bracketed item and bring it back. Its own key, so it works whatever
+	 *  ability is equipped. @see FetchDefinition */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	UInputAction* FetchAction;
+
 	/** Open and close the inventory overlay. A toggle rather than a hold, because the screen is
 	 *  read and acted on, not glanced at: the corner already answers the glance. */
 	UPROPERTY(EditAnywhere, Category = "Input")
@@ -1468,7 +1473,7 @@ public:
 	 *  it to the server otherwise, so a client's shot actually lands instead of only killing its
 	 *  own local copy of the target. Every weapon owned by a player must go through here. */
 	void DealDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
-		AShooterWeapon* Weapon);
+		AShooterWeapon* Weapon, FName HitBone = NAME_None);
 
 	/** Client to server half of DealDamage. Reliable: dropping a hit loses a kill.
 	 *
@@ -1479,7 +1484,7 @@ public:
 	 *  and why. */
 	UFUNCTION(Server, Reliable)
 	void Server_ReportDamage(AActor* HitActor, float Damage, TSubclassOf<UDamageType> DamageTypeClass,
-		AShooterWeapon* Weapon);
+		AShooterWeapon* Weapon, FName HitBone);
 
 	/** The same road for a punch. Melee needs its own because Server_ReportDamage is keyed on a
 	 *  weapon the character owns, and a fist is not a weapon — every melee report would have been
@@ -1500,6 +1505,51 @@ public:
 	 *  and its own upgrade multipliers. Reliable: a dropped shove is a hit that visibly did nothing. */
 	UFUNCTION(Server, Reliable)
 	void Server_ReportMeleeKnockback(AActor* Target, FVector Direction, float Distance, float Duration);
+
+	// ==================== Melee upgrades: cloak and kick recoil ====================
+
+	/** True while the melee cloak is on: no AI sees this player, and the hands stay empty. */
+	UFUNCTION(BlueprintPure, Category = "Melee|Cloak")
+	bool IsCloaked() const { return bCloaked; }
+
+	virtual bool IsHiddenFromAI() const override { return bCloaked; }
+
+	/** Turn the cloak on for Duration, or off. Authority only. */
+	void SetCloaked(bool bNewCloaked, float Duration = 0.0f);
+
+	/** The swinger's machine asks for the cloak its melee upgrade earned with a landed hit. The
+	 *  server grants it only if this character owns that upgrade, and takes the duration from its
+	 *  own copy of the upgrade's data. */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestMeleeCloak();
+
+	/** Owning machine asks to drop the cloak early (it drew a weapon, or swung again). */
+	UFUNCTION(Server, Reliable)
+	void Server_EndMeleeCloak();
+
+	/** The swing that is running ends with empty hands instead of drawing the weapon back.
+	 *  No-op outside a swing. */
+	void KeepHandsEmptyAfterMelee();
+
+	/** The swinger kicked itself back off a target. Applied locally at once by the caller; this
+	 *  moves the authority's copy so the two agree. */
+	UFUNCTION(Server, Reliable)
+	void Server_ApplyMeleeRecoil(FVector LaunchVelocity);
+
+	/** For Blueprint to dress the cloak (material, sound). Runs on every machine. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Melee|Cloak", meta = (DisplayName = "On Cloak Changed"))
+	void BP_OnCloakChanged(bool bNowCloaked);
+
+protected:
+	UPROPERTY(ReplicatedUsing = OnRep_Cloaked)
+	bool bCloaked = false;
+
+	UFUNCTION()
+	void OnRep_Cloaked();
+
+	FTimerHandle CloakTimer;
+
+public:
 
 	/** "You just got hit, launch yourself." Sent by the server to the owning client of the character
 	 *  being shoved, and applied there inside that client's own prediction.
@@ -1543,7 +1593,7 @@ public:
 	 *  miss carries no damage to ride upstream with. */
 	UFUNCTION(Server, Unreliable)
 	void Server_ReportImpactEffect(AShooterWeapon* Weapon, FVector_NetQuantize100 Location,
-		FVector_NetQuantizeNormal Normal, uint8 SurfaceByte);
+		FVector_NetQuantizeNormal Normal, uint8 SurfaceByte, uint8 ScaleByte);
 
 	// ==================== Coop screen ====================
 	// The HUD itself is built by UHudRegistry on the owning controller's LocalPlayer; the character
@@ -1580,7 +1630,7 @@ public:
 	 *  An inventory pickup can be taken IN PART, leaving the rest lying in the world. A client cannot
 	 *  work out whether that happened without the server's copy of the grid, so it never tries: it
 	 *  asks, and watches the result replicate. (Dropped weapons are not taken this way any more: the
-	 *  grapple fetches them. @see Server_SetGrappleFetchTarget)
+	 *  grapple fetches them. @see Server_FetchItem)
 	 *
 	 *  Carries the client's own reach for the same reason as every other capture RPC here: range is
 	 *  a product of the puller's charge, and a player's charge does not replicate. */
@@ -2481,7 +2531,7 @@ public:
 
 	/** Plays the reload montage: first person locally, third person on every machine, so the other
 	 *  players see this character reload instead of just standing there. */
-	virtual void PlayReloadMontage(UAnimMontage* Montage) override;
+	virtual void PlayReloadMontage(UAnimMontage* Montage, float PlayRate = 1.0f) override;
 
 	/** Applies weapon recoil to the owner */
 	virtual void AddWeaponRecoil(float Recoil) override;
@@ -2659,14 +2709,19 @@ public:
 	/** The fetchable the brackets are on right now. Owning client only; null everywhere else. */
 	AActor* GetGrappleFetchTarget() const { return GrappleFetchTarget.Get(); }
 
-	/** Tell the authority which fetchable was bracketed when the ability key went down. Sent
-	 *  immediately before the activation and on the same actor channel, so it arrives first. Null is
-	 *  sent too, so a press that bracketed nothing cannot fetch the target of an older press. */
-	UFUNCTION(Server, Reliable)
-	void Server_SetGrappleFetchTarget(AActor* FetchTarget);
+	/** The hook every player carries for fetching items, whatever ability they have equipped. It
+	 *  supplies the reach, the aim angle, the hook speed, the cable and the loot card. Pulling
+	 *  YOURSELF with a hook is a separate thing: the grapple ability. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grapple|Fetch")
+	TObjectPtr<class UAbilityDefinition_Grapple> FetchDefinition;
 
-	/** Hand the handler the fetchable the client claimed, and forget it: one claim, one throw. */
-	AActor* ConsumeGrappleFetchClaim();
+	/** Owning client asks to fetch the item its brackets are on. The server checks the claim with a
+	 *  little slack, because the client measured its distance a round trip ago, and does the throw. */
+	UFUNCTION(Server, Reliable)
+	void Server_FetchItem(AActor* FetchTarget);
+
+	/** Authority: drop a fetch whose hook is still in the air (downed, died). */
+	void AbortItemFetch();
 
 	/** A hooked item that does not end the fetch itself (anything but a weapon): draw the stowed
 	 *  weapon back once it has arrived or gone. Authority. */
@@ -2725,13 +2780,33 @@ protected:
 	void BeginAbilityAiming();
 	void EndAbilityAiming();
 
+	/** Owning client: true while the ability key is down on a thrown ability, and when it went down.
+	 *  Local for the same reason the aim target above is: the arc is pure feedback, and a round trip
+	 *  between the mouse and the line reads as input lag. @see UAbilityHandler_Throw::DrawAimPreview */
+	bool bThrowAimHeld = false;
+	float ThrowAimPressTime = 0.0f;
+
+	/** Draw the throw arc while the key is held past the ability's preview delay. Once a frame. */
+	void UpdateThrowAiming();
+
 	/** Owning client: the fetchable the brackets are on. @see GetGrappleFetchTarget */
 	UPROPERTY()
 	TWeakObjectPtr<AActor> GrappleFetchTarget;
 
-	/** Authority: the fetchable the client claimed with its last press. @see ConsumeGrappleFetchClaim */
-	UPROPERTY()
-	TWeakObjectPtr<AActor> GrappleFetchClaim;
+	/** Authority: the fetchable the hook is flying at. Weak: another player may take it first. */
+	TWeakObjectPtr<AActor> PendingItemFetch;
+
+	/** Authority: true between the fetch throw and the hook reaching the item. Separate from
+	 *  PendingItemFetch because the item can be destroyed mid-flight and the hands still come back. */
+	bool bItemFetchInFlight = false;
+	FTimerHandle ItemFetchTravelTimer;
+
+	/** Authority: the hook flies at the item, and the item then flies back on its own pull. */
+	void StartItemFetch(AActor* Drop);
+	void FinishItemFetch();
+
+	/** Called on the fetch key press. */
+	void DoFetchPressed();
 
 	/** Authority: the hooked item WatchGrappleFetch is waiting on, and its poll. */
 	TWeakObjectPtr<AActor> WatchedFetch;

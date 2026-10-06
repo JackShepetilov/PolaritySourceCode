@@ -82,7 +82,8 @@ void UHitMarkerComponent::RegisterHitFeedback(const FHitFeedbackContext& Context
 	// HUD wants the second, because the electric marker is what tells the player the meter moved.
 	// Deriving the visual from the audio cue would have silently retired that marker.
 	EHitMarkerType HitType = CueToMarkerType(Cue);
-	if (Context.bZeroDamage && !Context.bKilled && !Context.bShieldBroken)
+	if (Context.bZeroDamage && !Context.bKilled && !Context.bShieldBroken
+		&& !Context.bDeflected && !Context.bDeadPart && !Context.bPartBroken)
 	{
 		HitType = EHitMarkerType::Ionized;
 	}
@@ -300,6 +301,12 @@ FLinearColor UHitMarkerComponent::GetHitMarkerColor() const
 	case EHitMarkerType::Remote:
 		return Settings.RemoteHitColor;
 
+	case EHitMarkerType::Deflected:
+		return Settings.DeflectedHitColor;
+
+	case EHitMarkerType::DeadPart:
+		return Settings.DeadPartHitColor;
+
 	case EHitMarkerType::Normal:
 	default:
 		return Settings.NormalHitColor;
@@ -352,6 +359,8 @@ EHitMarkerType UHitMarkerComponent::CueToMarkerType(EHitFeedbackCue Cue)
 	case EHitFeedbackCue::Headshot:		return EHitMarkerType::Headshot;
 	case EHitFeedbackCue::HitShield:	return EHitMarkerType::ShieldHit;
 	case EHitFeedbackCue::ZeroDamage:	return EHitMarkerType::Ionized;
+	case EHitFeedbackCue::Deflected:	return EHitMarkerType::Deflected;
+	case EHitFeedbackCue::DeadPart:		return EHitMarkerType::Deflected;
 	case EHitFeedbackCue::HitFlesh:
 	default:							return EHitMarkerType::Normal;
 	}
@@ -455,6 +464,12 @@ void UHitMarkerComponent::PlayHitSound(EHitMarkerType HitType)
 		Volume = Settings.IonizedHitSoundVolume;
 		break;
 
+	// No fallback: the ordinary hit sound would tell the player this did damage, which is the one
+	// thing these two must never say. Their sounds come from the weapon's feedback set.
+	case EHitMarkerType::Deflected:
+	case EHitMarkerType::DeadPart:
+		return;
+
 	// A shield hit with no set to distinguish it falls back on the ordinary hit sound rather than
 	// on silence: the difference between shield and flesh is the set's job, not this fallback's.
 	case EHitMarkerType::ShieldHit:
@@ -544,7 +559,9 @@ void UHitMarkerComponent::ApplyCameraEffects(EHitMarkerType HitType)
 		break;
 
 	case EHitMarkerType::Ionized:
-		// Confirmation only: charge transfer deals no damage and should not punch the camera.
+	case EHitMarkerType::Deflected:
+	case EHitMarkerType::DeadPart:
+		// Confirmation only: these hits did no damage and should not punch the camera.
 		PunchIntensity = 0.0f;
 		break;
 

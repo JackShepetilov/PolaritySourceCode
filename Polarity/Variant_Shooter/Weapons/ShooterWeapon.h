@@ -1080,9 +1080,10 @@ protected:
 	// mounted at the origin sits inside the gun, which reads as a broken mesh rather than as a
 	// missing socket and costs a session to work out.
 
-	/** Where each kind of attachment goes on this weapon's meshes. A type that is absent falls back
-	 *  to ScopeMountSocketName for the optic (it is the same rail) and to nothing for the rest,
-	 *  which refuses the mount and says so in the log.
+	/** Where each kind of attachment goes on this weapon's meshes. A type that is absent here is
+	 *  NOT a slot on this gun, even if AttachmentSlots lists it: removing the entry is how a gun
+	 *  says "no muzzle" (a built-in suppressor) or "no stock" (a pistol) [author, 2026-10-01].
+	 *  The optic alone falls back to ScopeMountSocketName (it is the same rail).
 	 *
 	 *  Third person uses the same names with a "_TP" suffix when the artist authored one, the same
 	 *  rule PickThirdPersonSocket uses for the grip; without a _TP variant both meshes use the same
@@ -1495,6 +1496,28 @@ protected:
 	/** World time that notify's sound began: montage start plus its trigger time. */
 	float NotifiedReloadSoundBeginWorldTime = -1.0f;
 
+	// ---------- Reload audio at the stock's speed ----------
+	// A pack reload is one long track ("..._Reload_Tac_Full") started by a montage notify. A stock
+	// plays the montage faster, and the only way to make a track keep up is pitch (playback rate).
+	// The notify's sound is not ours, so it is retuned on the audio thread, every frame of the
+	// window below, by matching the active sounds against what the reload animations carry. Runs
+	// on every machine: observers hear the same reload as the reloader. ApplyReloadAudioPitch.
+
+	/** Pitch (= playback rate) for this reload's sounds. 1 when there is no stock. */
+	float ReloadAudioPitch = 1.0f;
+
+	/** World time until which new reload sounds are still being retuned. */
+	float ReloadAudioPitchUntil = -1.0f;
+
+	/** Every sound the current stage's reload animations play, plus the adopted and shared ones. */
+	TArray<TWeakObjectPtr<USoundBase>> ReloadPitchSounds;
+
+	/** Open the retune window for a stage that plays for Duration seconds. */
+	void BeginReloadAudioPitch(EWeaponReloadStage Stage, float Duration);
+
+	/** Retune this weapon's live reload sounds to ReloadAudioPitch. Tick, inside the window. */
+	void ApplyReloadAudioPitch();
+
 	FTimerHandle ReloadTimer;
 
 	/** The magazine is full and the weapon can shoot again. Resumes automatic fire if the trigger
@@ -1618,6 +1641,11 @@ protected:
 	 *  having no shield. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Hitscan")
 	bool IsTargetShieldDown(AActor* Target) const;
+
+	/** IsTargetShieldDown for ONE hit: also true when the shield holds but does not cover the bone
+	 *  that was hit (UShieldFieldComponent::CoveredBones). Feedback and the impact surface ask this;
+	 *  the finisher gate keeps asking about the whole target. */
+	bool IsShieldDownForHit(AActor* Target, FName HitBone) const;
 
 
 	// ==================== State ====================
@@ -1822,9 +1850,13 @@ public:
 	float GetReloadTime() const { return ReloadTime; }
 
 	/** Seconds the reload that would start now will take. Prefers an explicit override, then the
-	 *  length of the montage that will actually play, and only then the legacy ReloadTime. */
+	 *  length of the montage that will actually play, and only then the legacy ReloadTime. Already
+	 *  divided by the stock's reload speed. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetActiveReloadTime() const;
+
+	/** GetActiveReloadTime without the stock. */
+	float GetBaseReloadTime() const;
 
 	/** The montage this weapon plays while reloading, if it has one. The PRIMARY one: callers that
 	 *  need whichever is actually running want GetActiveReloadMontage instead. */
@@ -1880,13 +1912,29 @@ public:
 	 *  unfilled duration means "as authored" rather than "instant". */
 	static float GetSwitchPlayRate(const UAnimMontage* Montage, float Duration);
 
-	/** Play rate for this weapon's holster half. @see GetSwitchPlayRate */
+	/** Play rate for this weapon's holster half, times the stock's swap speed. @see GetSwitchPlayRate */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
-	float GetHolsterPlayRate() const { return GetSwitchPlayRate(HolsterMontage, HolsterDuration); }
+	float GetHolsterPlayRate() const { return GetSwitchPlayRate(HolsterMontage, HolsterDuration) * GetStockSwapSpeed(); }
 
-	/** Play rate for this weapon's draw half. @see GetSwitchPlayRate */
+	/** Play rate for this weapon's draw half, times the stock's swap speed. @see GetSwitchPlayRate */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
-	float GetDrawPlayRate() const { return GetSwitchPlayRate(DrawMontage, DrawDuration); }
+	float GetDrawPlayRate() const { return GetSwitchPlayRate(DrawMontage, DrawDuration) * GetStockSwapSpeed(); }
+
+	// ==================== Stock ====================
+	// Docs/Stock_Attachment_Plan_2026-10-01.md. Read live off the installed stock; 1 without one.
+	// ShooterWeapon_Stock.cpp.
+
+	/** Speed multiplier on draw and holster. */
+	float GetStockSwapSpeed() const;
+
+	/** Speed multiplier on the ADS alpha. */
+	float GetStockADSSpeed() const;
+
+	/** Speed multiplier on every reload montage and timer. */
+	float GetStockReloadSpeed() const;
+
+	/** Hip spread multiplier, already faded to 1 by the owner's ADS alpha. */
+	float GetStockHipSpreadFactor() const;
 
 	/** Wall-clock length of the holster half, after the play rate. 0 when there is no montage. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
@@ -2200,7 +2248,13 @@ public:
 	 *  because only the shooter can decide it -- IsTargetShieldDown is read at the instant of the
 	 *  hit, and an observer re-deriving it a round trip later would answer differently and show a
 	 *  shield spark where the shooter saw blood. */
-	void SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface);
+	void SpawnImpactEffectLocally(const FVector& Location, const FVector& Normal, EPhysicalSurface Surface, float ImpactScale = 1.0f);
+
+	/** How big this hit's impact effect should be, 1 = an ordinary round. Grows with the damage the
+	 *  shot carries (headshot multiplier included), so a heavy hit throws a bigger burst without a
+	 *  second asset. Handed to the effect as the user parameter "ImpactScale"; a system that has
+	 *  no such parameter simply ignores it. Resolved by the shooter, like the surface. */
+	float ResolveImpactScale(const FHitResult& Hit) const;
 
 	/** Which surface a hit should sound and look like: the physical material, unless the target is
 	 *  an NPC that answers for its own shield-versus-body surface. */
@@ -2255,7 +2309,7 @@ public:
 	 *  target's shield was up at the moment of the hit and only the shooter was there for it.
 	 *  Unreliable and quantized: this is one cosmetic event per bullet. */
 	UFUNCTION(NetMulticast, Unreliable)
-	void Multicast_PlayImpactEffect(FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte);
+	void Multicast_PlayImpactEffect(FVector_NetQuantize100 Location, FVector_NetQuantizeNormal Normal, uint8 SurfaceByte, uint8 ScaleByte);
 
 	/**
 	 * The round leaving the barrel, for every machine that is not already drawing one.
@@ -2931,9 +2985,16 @@ public:
 	 *  device's beam starts from. */
 	UStaticMeshComponent* GetAttachmentMeshComponent(EWeaponAttachmentType InType, bool bFirstPerson) const;
 
-	/** True when this gun has a slot of that type. @see AttachmentSlots */
+	/** True when this gun has a slot of that type: listed in AttachmentSlots AND given a socket in
+	 *  AttachmentSockets (the optic may use ScopeMountSocketName). Removing either one removes the
+	 *  slot, from the screen and from InstallAttachment alike. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
-	bool HasAttachmentSlot(EWeaponAttachmentType InType) const { return AttachmentSlots.Contains(InType); }
+	bool HasAttachmentSlot(EWeaponAttachmentType InType) const
+	{
+		return AttachmentSlots.Contains(InType)
+			&& (AttachmentSockets.Contains(InType)
+				|| (InType == EWeaponAttachmentType::Optic && !ScopeMountSocketName.IsNone()));
+	}
 
 	/** Everything mounted, in the order it was mounted. That order is what decides which ones are
 	 *  free and which ones cost a cell, so it is deliberately not sorted. */

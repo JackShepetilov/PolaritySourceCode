@@ -107,6 +107,19 @@ protected:
 	virtual void OnHealthPickupCollectedAtFullHP() {}
 
 	/**
+	 * A quick melee swing of the owner's landed on Target, on the AUTHORITY. Fires for the host's own
+	 * swings and for a client's reported ones alike, which is why effects on the enemy that only the
+	 * server may apply (a disarm) hang here and not on the swinger's own OnMeleeHit delegate.
+	 */
+	virtual void OnMeleeHitAuthority(AActor* Target) {}
+
+	/**
+	 * Multiplier on the owner's reload speed right now. 1 = no change, 2 = twice as fast.
+	 * Asked by the weapon every time it needs the rate, so it must be a cheap read.
+	 */
+	virtual float GetReloadSpeedMultiplier() const { return 1.0f; }
+
+	/**
 	 * Called when the currently equipped weapon receives ADS / secondary input.
 	 * Return true if this upgrade handled the input and normal ADS should be blocked.
 	 */

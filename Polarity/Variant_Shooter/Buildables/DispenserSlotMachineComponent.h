@@ -167,6 +167,19 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slot Machine|Rarity", meta = (ClampMin = "0.0"))
 	float LegendaryValue = 240.0f;
 
+	// The spinner's intent is read off what they hold: an attachment is only offered if it fits one
+	// of the guns in their hands, and one for an empty slot on such a gun is "wanted".
+
+	/** A wanted attachment (fits a gun in hand whose slot of that type is empty, and none in the bag
+	 *  would fill it) weighs this many times its pool weight. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slot Machine|Intent", meta = (ClampMin = "1.0"))
+	float WantedAttachmentWeight = 3.0f;
+
+	/** Spins in a row without a wanted attachment, after which the next spin's first reel is one for
+	 *  certain (a prize reel, at no more than the rarity it rolled). 0 = never forced. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slot Machine|Intent", meta = (ClampMin = "0"))
+	int32 PityAfterSpins = 3;
+
 	/** Reels, boxes, cards. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slot Machine", meta = (ClampMin = "1", ClampMax = "5"))
 	int32 CardCount = 3;
@@ -330,9 +343,11 @@ public:
 	EUpgradeRarity RarityForValue(float Value) const;
 
 	/** One reel for Player at this stake. What it offers goes into the Used lists, so an offer shows
-	 *  an upgrade or an attachment once. Server. */
+	 *  an upgrade or an attachment once. bForceWanted: the pity reel, a wanted attachment if the pool
+	 *  has one under the rolled rarity. bOutWanted: the card is a wanted attachment. Server. */
 	void RollCard(float StakeValue, const UDispenserUpgradePool* Pool, const AShooterCharacter* Player,
-		TArray<const UUpgradeDefinition*>& UsedUpgrades, TArray<int32>& UsedAttachments, FDispenserCard& OutCard) const;
+		TArray<const UUpgradeDefinition*>& UsedUpgrades, TArray<int32>& UsedAttachments, bool bForceWanted,
+		FDispenserCard& OutCard, bool& bOutWanted) const;
 
 	/** Worst first: a blank, then a buff, then upgrades and attachments by rarity. */
 	static int32 RankOf(const FDispenserCard& Card);
@@ -403,6 +418,9 @@ private:
 
 	/** Server: the items lying in the open boxes. */
 	TArray<TWeakObjectPtr<ADispenserCardPickup>> Items;
+
+	/** Server: spins in a row each player has had without a wanted attachment. @see PityAfterSpins */
+	TMap<TWeakObjectPtr<const APlayerState>, int32> SpinsWithoutWanted;
 
 	FTimerHandle PhaseTimer;
 

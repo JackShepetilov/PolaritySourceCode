@@ -2291,6 +2291,16 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	// different question, and the answer is never "whoever swung".
 	if (OwnerCharacter->HasAuthority())
 	{
+		// The host's own swing. A client's reaches the same hook through its reported shove.
+		// @see UUpgradeComponent::OnMeleeHitAuthority, AShooterCharacter::Server_ReportMeleeKnockback
+		if (const AShooterCharacter* const Swinger = Cast<AShooterCharacter>(OwnerCharacter))
+		{
+			if (UUpgradeManagerComponent* const SwingerUpgrades = Swinger->GetUpgradeManager())
+			{
+				SwingerUpgrades->NotifyMeleeHitAuthority(HitActor);
+			}
+		}
+
 		ApplyKnockbackOnAuthority(HitActor, KnockbackDirection, DistanceToSend, KnockbackDuration, PlayerCenter);
 		return;
 	}
@@ -2377,7 +2387,11 @@ float UMeleeAttackComponent::GetMaxReportedKnockbackDistance() const
 
 float UMeleeAttackComponent::CalculateMomentumDamage(AActor* HitActor) const
 {
-	if (Settings.MomentumDamagePerSpeed <= 0.0f || !HitActor)
+	// The flat momentum bonus is no longer part of the base swing: damage for speed toward the target
+	// is an upgrade now, a multiplier on the base hit (UUpgrade_MeleeMomentum). Kept reachable behind
+	// its own setting being zero rather than deleted, so the numbers on existing assets still load.
+	static constexpr bool bFlatMomentumBonusEnabled = false;
+	if (!bFlatMomentumBonusEnabled || Settings.MomentumDamagePerSpeed <= 0.0f || !HitActor)
 	{
 		return 0.0f;
 	}

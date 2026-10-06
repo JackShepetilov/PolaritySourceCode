@@ -42,7 +42,8 @@ public:
 	 *  looking at from inside the fetch radius, or null.
 	 *
 	 *  Static and public because the brackets have to run the SAME rule on the owning client that
-	 *  the claim is checked against here, or the brackets promise a fetch the throw then refuses.
+	 *  the server checks the claim against, or the brackets promise a fetch the throw then refuses.
+	 *  Def is whichever grapple definition the fetch uses; it need not be an equipped ability.
 	 *  Cheap enough for a frame: one pass over the registered fetchables, one trace for the winner. */
 	static AActor* FindFetchTarget(const class AShooterCharacter* Caster,
 		const class UAbilityDefinition_Grapple* Def);
@@ -53,25 +54,6 @@ public:
 		const class UAbilityDefinition_Grapple* Def, float ExtraRadius = 0.0f);
 
 protected:
-	/** Throw at a fetchable instead of the world. The hook flies, bites it, and it then flies back
-	 *  to the caster on its own pull. Never swings, never costs the cooldown. */
-	void StartFetch(AActor* Target);
-
-	/** The fetch hook has reached the drop: start its pull toward the caster and end the ability. */
-	void FinishFetch();
-
-	/** Called for any cancel while a fetch hook is still in the air. */
-	void AbortFetch();
-
-	/** The fetchable the hook is flying at. Weak: another player may take it first. */
-	TWeakObjectPtr<AActor> PendingFetch;
-
-	/** True between a fetch throw and the hook reaching the drop. Separate from PendingFetch because
-	 *  the drop can be destroyed mid-flight and the ability still has to be ended. */
-	bool bFetchInFlight = false;
-
-	FTimerHandle FetchTravelTimer;
-
 	/** The hook has arrived: attach the line and start pulling. */
 	void AttachLine();
 
