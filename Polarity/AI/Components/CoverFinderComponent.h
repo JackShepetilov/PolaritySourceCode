@@ -82,6 +82,22 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI|Cover")
 	bool RequestCover(AActor* Target);
 
+	/** Lean the NEXT search toward a point: a bound forward or round the flank, where the question is
+	 *  "the best corner over there" and not "the best corner". Every metre a candidate lies from Point
+	 *  costs WeightPerMetre of rank (one unit of rank is one hostile seeing the spot), and candidates
+	 *  within MinMoveDistance of the owner are skipped, so the answer is a move and not the corner it
+	 *  already stands at. Used up by one search; a search that finds nothing leaves the current
+	 *  corner as it was. */
+	void SetSearchBias(const FVector& Point, float WeightPerMetre, float MinMoveDistance, float MinTargetDistance = -1.0f);
+
+	/** Has the one this corner was taken against walked round it: its wall no longer stands between
+	 *  the two. The one reason to leave a corner at once, whatever else is true of it. */
+	UFUNCTION(BlueprintPure, Category = "AI|Cover")
+	bool IsFlanked() const;
+
+	/** Take the bias back: the search it was set for did not start. */
+	void ClearSearchBias() { bHasSearchBias = false; }
+
 	/** True while an EQS request is outstanding. */
 	UFUNCTION(BlueprintPure, Category = "AI|Cover")
 	bool IsSearching() const { return bSearchInFlight; }
@@ -156,9 +172,54 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MinPeekDistance = 800.0f;
 
-	/** Never hide further than this. Matches the coordinator's MaxEngagementDistance. */
+	/** Never hide further than this from the target. It was 2500, and that was the reason so many
+	 *  soldiers "stood in the open": the sides of a bench fight start 28 to 37 m apart, so until
+	 *  somebody had walked inside 25 m EVERY corner on the field was refused, the one a soldier
+	 *  stood behind included (recorded 2026-10-11: an outpost's garrison at its own windows, 60
+	 *  candidates a search, none admitted, "NO COVER, shooting from the open"). Now past the sight
+	 *  radius (35 m): a soldier that can see somebody can take cover from him. One told to hold a
+	 *  ground has no distance limits at all, near or far. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
-	float MaxPeekDistance = 2500.0f;
+	float MaxPeekDistance = 4000.0f;
+
+	/** How near another soldier's corner one that holds a ground may take its own (cm). The usual
+	 *  radius (the coordinator's CoverBlockRadius, 5 m) keeps soldiers off each other's corners in
+	 *  the field; in a yard 20 m across two taken corners closed half of one wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0", Units = "cm"))
+	float HoldClaimRadius = 180.0f;
+
+	/** Cover is something solid to stand behind: a spot counts only when a wall stands within this
+	 *  distance of it on the side of the target (cm). Without it a patch of open floor that some far
+	 *  wall happens to hide is "cover", and an enemy stands in the middle of nowhere believing it has
+	 *  a corner. The usual rule in shipped cover systems (a cover point is a point against geometry,
+	 *  valid against a threat while that geometry lies between the two). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "30.0"))
+	float MaxCoverWallDistance = 200.0f;
+
+	/** The query hands back a grid of floor, and almost none of a grid lies against a wall. So each
+	 *  point looks this far toward the target for something solid and, finding it, becomes the spot
+	 *  right behind it (cm). A point with nothing solid within this distance is open ground and is
+	 *  dropped. This is what makes the candidates cover POINTS: places against geometry, found from
+	 *  the geometry, the way a baked cover system has them, without the bake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
+	float CoverSnapDistance = 500.0f;
+
+	/** How far behind the wall the snapped spot stands (cm). The capsule radius plus a hand. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "30.0"))
+	float CoverStandOff = 75.0f;
+
+	/** A corner is for shooting from: its peek point should look at where the enemy has been seen, not
+	 *  only at the one enemy this search was asked about, who will have stepped aside by the time the
+	 *  NPC gets there. Rank taken off a corner whose peek sees every place the side knows an enemy at
+	 *  (UFactionContactMemory); one that sees none of them gets nothing. One unit of rank is one
+	 *  hostile seeing the hide end, so at 1.5 a corner that controls the area beats one that hides a
+	 *  little better and looks at a wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
+	float ControlWeight = 1.5f;
+
+	/** How many corners that passed the probe are compared before one is taken. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "1"))
+	int32 MaxCornersToCompare = 4;
 
 	/** How many of the cheapest candidates get the peek probe. Exposure is a handful of traces per
 	 *  candidate; the probe is another handful, so it runs only on the ones that already won on
@@ -247,6 +308,10 @@ private:
 	 *  capsule and its movement component's crouched height. */
 	void GetBodySampleHeights(bool bCrouched, float& OutChest, float& OutHead, float& OutSideReach) const;
 
+	/** Is there a wall within MaxCoverWallDistance of Point in the direction Toward, at the chest of
+	 *  a standing (or crouched) body there. */
+	bool HasSolidCoverToward(const FVector& Point, const FVector& Toward, bool bCrouched, const FCollisionQueryParams& Params) const;
+
 	/** For low cover: can a standing muzzle at the hide spot itself see the target over the wall. */
 	bool CanShootOverFrom(const FVector& HideLocation, const FCollisionQueryParams& Params) const;
 
@@ -306,6 +371,15 @@ private:
 	/** Set while this component holds a claim, so ReleaseCover can be called unconditionally from
 	 *  every exit path without the coordinator seeing spurious releases. */
 	bool bHoldsClaim = false;
+
+	/** @see SetSearchBias */
+	bool bHasSearchBias = false;
+	FVector SearchBiasPoint = FVector::ZeroVector;
+	float SearchBiasWeightPerMetre = 0.0f;
+	float SearchBiasMinMove = 0.0f;
+
+	/** Replaces MinPeekDistance for the biased search when zero or above: an assault closes further. */
+	float SearchBiasMinTargetDistance = -1.0f;
 
 	/** Non-pawn threats whose sight counts against exposure, see SetExtraObservers. */
 	TArray<TWeakObjectPtr<AActor>> ExtraObservers;

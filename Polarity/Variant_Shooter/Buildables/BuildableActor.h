@@ -146,6 +146,12 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Dispenser")
 	bool AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeapon* Weapon);
 
+	/** A fed gun buys shop credit at the pool's fixed rate [author, 2026-10-07]. Off: it is the stake
+	 *  of a slot machine spin, the way the dispenser worked until then (kept for the machines that
+	 *  will stand out on the map). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Buildable|Dispenser")
+	bool bFeedBuysShopCredit = true;
+
 	UFUNCTION(BlueprintPure, Category = "Dispenser")
 	UDispenserSlotMachineComponent* GetSlotMachine() const { return SlotMachine; }
 

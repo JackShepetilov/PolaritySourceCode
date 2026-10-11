@@ -11,6 +11,15 @@
 #include "Polarity/Upgrades/UpgradeManagerComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "HAL/IConsoleManager.h"
+
+// Recorded 2026-10-11 on the bench: in two outpost fights the player took 235 and 220 damage on 200
+// health and won both, on +89 and +52, +52, +51 picked up off the dead in the middle of the fight.
+// The switch is for trying a fight without that, before the pickup itself is reworked.
+static TAutoConsoleVariable<int32> CVarLootHealDrops(
+	TEXT("polarity.loot.healdrops"),
+	1,
+	TEXT("0 - the dead drop no health pickups (everything else in their loot still drops). 1 - as authored."));
 
 bool FLootDropContext::Passes(ELootKillCondition Condition) const
 {
@@ -109,6 +118,11 @@ void ULootDropComponent::SpawnEntry(UWorld* World, const FLootDropEntry& Entry, 
 	}
 
 	UClass* Class = Entry.PickupClass;
+
+	if (CVarLootHealDrops.GetValueOnGameThread() == 0 && Class->IsChildOf(AHealthPickup::StaticClass()))
+	{
+		return;
+	}
 
 	// Pickups that fly out of the kill and land around it.
 	if (Class->IsChildOf(AHealthPickup::StaticClass()) || Class->IsChildOf(AMetalPickup::StaticClass()))

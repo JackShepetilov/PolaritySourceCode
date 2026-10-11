@@ -2,6 +2,7 @@
 
 
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/SquadSpawn/Squad.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
 #include "Net/UnrealNetwork.h"
 #include "AI/Coordination/ThreatComponent.h"
@@ -26,6 +27,8 @@
 #include "ShooterAIController.h"
 #include "Components/StateTreeAIComponent.h"
 #include "Coop/CoopPlayers.h"
+#include "AI/BodySamples.h"
+#include "Variant_Shooter/Bench/FightRecorder.h"
 #include "../../AI/Components/AIAccuracyComponent.h"
 #include "../../AI/Coordination/AICombatCoordinator.h"
 #include "Variant_Shooter/Weapons/DroppedMeleeWeapon.h"
@@ -349,6 +352,38 @@ namespace
 /** One delegate for the whole class. @see FOnAnyNPCDeath. */
 FOnAnyNPCDeath AShooterNPC::OnAnyNPCDeath;
 
+namespace
+{
+	/** Where to shoot a target, given what the round can reach.
+	 *
+	 *  PolarityAim::ResolveAimPoint answers with the middle of the body. Across a wall 1.2 m high that
+	 *  is a point behind the wall, so two soldiers either side of low cover stood looking at each
+	 *  other and neither fired: the gate that asks whether the muzzle is against cover traced at the
+	 *  waist and said yes for ever [author, 2026-10-11]. When the round cannot reach the middle and
+	 *  can reach the head, the head is the aim point. */
+	FVector ResolveReachableAimPoint(const AShooterWeapon* Weapon, const AActor* Target)
+	{
+		const FVector Middle = PolarityAim::ResolveAimPoint(Target);
+		if (!Weapon || !Target || Weapon->CanShotReach(Middle))
+		{
+			return Middle;
+		}
+
+		// Whatever of the body the round can reach: the head over a low wall, or the camera a player
+		// is looking out of. @see BodySamples
+		BodySamples::FPoints Points;
+		BodySamples::Get(Target, Points);
+		for (const FVector& Point : Points)
+		{
+			if (Weapon->CanShotReach(Point))
+			{
+				return Point;
+			}
+		}
+		return Middle;
+	}
+}
+
 AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -368,6 +403,8 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	// Same number this class carried before the field moved up, so every enemy blueprint keeps the
 	// team it already had.
 	TeamByte = 1;
+
+	CombatTask = ESquadTask::Advance;
 
 	// Create EMF components for charge-based interactions
 	FieldComponent = CreateDefaultSubobject<UEMF_FieldComponent>(TEXT("FieldComponent"));
@@ -696,8 +733,10 @@ void AShooterNPC::Tick(float DeltaTime)
 		const bool bSuppressed = AccuracyComponent && AccuracyComponent->IsSuppressed();
 		const bool bSuppFire = AccuracyComponent && AccuracyComponent->IsFiringSuppressive();
 		const FString Label = FString::Printf(
-			TEXT("%s  [%s]  HP %.0f\ncover: %s%s\ntarget: %s\n%s%s%s\nmag %d/%d%s%s"),
+			TEXT("%s  [%s]  HP %.0f\n>> %s%s\ncover: %s%s\ntarget: %s\n%s%s%s\nmag %d/%d%s%s"),
 			*GetName(), Weapon ? *Weapon->GetClass()->GetName() : TEXT("no weapon"), CurrentHP,
+			*TacticNote.ToString(),
+			AccuracyComponent && AccuracyComponent->IsPinFire() ? TEXT("  [PIN: shoots near, not at]") : TEXT(""),
 			*Cover, SiegeMarchTarget.IsValid() ? TEXT("   march: core") : TEXT(""),
 			*GetNameSafe(CurrentAimTarget.Get()),
 			Gate ? *Gate->Text : TEXT("(never tried to shoot)"),
@@ -2694,6 +2733,30 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	const float HealthDamage = BodyDamage > 0.0f
 		? AbsorbDamageWithShieldField(BodyDamage, DamageEvent, EventInstigator, DamageCauser) : 0.0f;
 	CurrentHP -= HealthDamage;
+	UFightRecorderSubsystem::NoteDamage(this, EventInstigator, DamageCauser, Damage, CurrentHP);
+
+	// What it was hit for lately. @see GetRecentDamage
+	if (const UWorld* const DamageWorld = GetWorld())
+	{
+		const float DamageNow = DamageWorld->GetTimeSeconds();
+		if (DamageNow - RecentDamageStart > RecentDamageWindow)
+		{
+			RecentDamageStart = DamageNow;
+			RecentDamageSum = 0.0f;
+		}
+		RecentDamageSum += Damage;
+
+		// Every hit taken, with what it was doing, into the record of the fight: the analysis sets
+		// each one against the reaction that followed or did not [author, 2026-10-12]. "sum" is what
+		// the duck rule reads (GetRecentDamage against FSTTask_ShooterPeek::DuckDamageThreshold).
+		// Straight to the recorder, not through SayTactic: that drops a repeat and would change the
+		// word the soldier is on.
+		const UCharacterMovementComponent* const HurtMove = GetCharacterMovement();
+		UFightRecorderSubsystem::NoteTactic(this, FName(*FString::Printf(
+			TEXT("HURT: dmg=%.0f sum=%.0f hp=%.0f crouch=%d reload=%d speed=%.0f doing=%s"),
+			Damage, RecentDamageSum, CurrentHP, HurtMove && HurtMove->IsCrouching() ? 1 : 0, bIsReloadingWeapon ? 1 : 0,
+			GetVelocity().Size2D(), *TacticNote.ToString())));
+	}
 
 	// Whoever caused this gets it banked toward their berserk payout.
 	//
@@ -2877,6 +2940,19 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// ThreatPerDamagePoint has been set, so this changes nothing until somebody decides it should.
 	if (HasAuthority() && Damage > 0.0f)
 	{
+		// Being shot is news for the whole side: where the shot came from goes into the faction's
+		// contact memory, and the ones with nobody to fight walk to it (the sense task's last-contact
+		// rule). Before this a squad heard nothing while one of its own was being killed in the next
+		// room [author, 2026-10-11].
+		if (AActor* const Source = PolarityTeams::ResolveDamageSource(DamageCauser, EventInstigator))
+		{
+			AShooterAIController* const ShooterController = Cast<AShooterAIController>(GetController());
+			if (ShooterController && PolarityTeams::AreHostile(this, Source))
+			{
+				ShooterController->BroadcastContactAt(Source, Source->GetActorLocation(), /*bSeenNow*/ true);
+			}
+		}
+
 		if (APawn* CauserPawn = Cast<APawn>(DamageCauser))
 		{
 			if (UThreatComponent* Threat = CauserPawn->FindComponentByClass<UThreatComponent>())
@@ -3051,7 +3127,7 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 		// Ask the target where it should be shot at. The two offsets this used to apply described a
 		// standing human and were handed to everything, which is why a drone got shot at below its
 		// own body and never took a round.
-		AimTarget = PolarityAim::ResolveAimPoint(CurrentAimTarget.Get());
+		AimTarget = ResolveReachableAimPoint(Weapon, CurrentAimTarget.Get());
 
 		// Use AccuracyComponent for spread calculation
 		if (AccuracyComponent)
@@ -3215,6 +3291,7 @@ void AShooterNPC::Die()
 
 	// raise the dead flag
 	bIsDead = true;
+	UFightRecorderSubsystem::NoteDeath(this, LastKillingDamageCauser);
 
 	if (NPCBench::IsOn())
 	{
@@ -4600,7 +4677,7 @@ void AShooterNPC::TryStartShooting()
 	{
 		static constexpr float MuzzleCoverCheckDistance = 250.0f;
 		const FVector Muzzle = Weapon->GetMuzzleWorldLocation();
-		const FVector ToAim = PolarityAim::ResolveAimPoint(CurrentAimTarget.Get()) - Muzzle;
+		const FVector ToAim = ResolveReachableAimPoint(Weapon, CurrentAimTarget.Get()) - Muzzle;
 		const float AimDistance = ToAim.Size();
 		// Stop short of the target itself, so a target standing inside the check is not its own wall.
 		const float Check = FMath::Min(MuzzleCoverCheckDistance, AimDistance - 60.0f);
@@ -4613,10 +4690,40 @@ void AShooterNPC::TryStartShooting()
 		}
 	}
 
+	// The gun says: hold on the target first. @see AShooterWeapon::AIAimHoldSeconds
+	// Not reset by StopShooting: the peek task closes and reopens the request every tick while the
+	// trigger is not down, and a hold cleared there would start over each time and never end.
+	if (Weapon && Weapon->AIAimHoldSeconds > 0.0f)
+	{
+		const float HoldNow = GetWorld()->GetTimeSeconds();
+		if (AimHoldUntil < 0.0f || HoldNow - AimHoldLastAsked > 0.6f)
+		{
+			AimHoldUntil = HoldNow + Weapon->AIAimHoldSeconds;
+			Weapon->Multicast_AIAimHold(true, Weapon->AIAimHoldSeconds);
+			SayTactic(TEXT("AIMING: holding on the target before the shot"));
+		}
+		AimHoldLastAsked = HoldNow;
+		if (HoldNow < AimHoldUntil)
+		{
+			ReportShootGate(12, TEXT("BLOCKED aim hold (the gun's telegraph)"));
+			GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+				&AShooterNPC::TryStartShooting, 0.05f, false);
+			return;
+		}
+	}
+
 	// Request attack permission from coordinator (always ask, don't cache)
 	if (RequestAttackPermission())
 	{
 		ReportShootGate(0, TEXT("FIRING"));
+		if (AimHoldUntil >= 0.0f)
+		{
+			AimHoldUntil = -1.0f;
+			if (Weapon)
+			{
+				Weapon->Multicast_AIAimHold(false, 0.0f);
+			}
+		}
 		// Got permission - start shooting!
 		StopPermissionRetryTimer();
 		CurrentBurstShots = 0;
@@ -4731,6 +4838,104 @@ bool AShooterNPC::IsInPerceptionDelay() const
 	return (GetWorld()->GetTimeSeconds() - TargetAcquiredTime) < PerceptionDelay;
 }
 
+void AShooterNPC::SayTactic(FName Note)
+{
+	if (TacticNote == Note)
+	{
+		return;
+	}
+	TacticNote = Note;
+	UFightRecorderSubsystem::NoteTactic(this, Note);
+
+	UE_LOG(LogTemp, Log, TEXT("[TACTIC] %s: %s"), *GetName(), *Note.ToString());
+}
+
+void AShooterNPC::SetCombatTask(ESquadTask NewTask)
+{
+	if (CombatTask == NewTask)
+	{
+		return;
+	}
+	CombatTask = NewTask;
+
+	UE_LOG(LogTemp, Log, TEXT("[TACTIC] %s squad task: %s"), *GetName(),
+		NewTask == ESquadTask::Hold ? TEXT("HOLD") : (NewTask == ESquadTask::Withdraw ? TEXT("WITHDRAW") : TEXT("ADVANCE")));
+}
+
+float AShooterNPC::GetRecentDamage() const
+{
+	const UWorld* const World = GetWorld();
+	return World && World->GetTimeSeconds() - RecentDamageStart <= RecentDamageWindow ? RecentDamageSum : 0.0f;
+}
+
+void AShooterNPC::SetHoldArea(const FVector& Centre, float Radius)
+{
+	HoldCentre = Centre;
+	HoldRadius = FMath::Max(0.0f, Radius);
+	UE_LOG(LogTemp, Log, TEXT("[TACTIC] %s holds %.0f cm around %s"), *GetName(), HoldRadius, *HoldCentre.ToCompactString());
+}
+
+void AShooterNPC::SetWideHoldArea(const FVector& Centre, float Radius)
+{
+	WideHoldCentre = Centre;
+	WideHoldRadius = FMath::Max(0.0f, Radius);
+}
+
+void AShooterNPC::WidenHoldArea()
+{
+	if (CanWidenHoldArea())
+	{
+		SetHoldArea(WideHoldCentre, WideHoldRadius);
+		WideHoldRadius = 0.0f;
+	}
+}
+
+bool AShooterNPC::IsInsideHoldArea(const FVector& Point) const
+{
+	return HoldRadius <= 0.0f || FVector::DistSquared2D(Point, HoldCentre) <= FMath::Square(HoldRadius);
+}
+
+FVector AShooterNPC::GetHoldPointToward(const FVector& Toward, float SideOffset) const
+{
+	if (HoldRadius <= 0.0f)
+	{
+		return Toward;
+	}
+
+	const FVector Out = (Toward - HoldCentre).GetSafeNormal2D();
+	const FVector Side = FVector::CrossProduct(FVector::UpVector, Out);
+	const float Reach = FMath::Min(HoldRadius * 0.75f, FVector::Dist2D(Toward, HoldCentre));
+	FVector Point = HoldCentre + Out * Reach + Side * SideOffset;
+
+	// The side step may have carried it past the edge.
+	const FVector FromCentre = Point - HoldCentre;
+	if (FromCentre.SizeSquared2D() > FMath::Square(HoldRadius * 0.9f))
+	{
+		Point = HoldCentre + FromCentre.GetSafeNormal2D() * HoldRadius * 0.9f;
+	}
+	Point.Z = GetActorLocation().Z;
+	return Point;
+}
+
+void AShooterNPC::NotifyLastStandBegan()
+{
+	LastStandStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	SayTactic(TEXT("CORNERED"));
+}
+
+bool AShooterNPC::CanRetakeCover() const
+{
+	const UWorld* const World = GetWorld();
+	if (!World || LastStandStartTime < 0.0f || World->GetTimeSeconds() - LastStandStartTime < LastStandMinSeconds)
+	{
+		return false;
+	}
+
+	const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(this);
+	const APawn* const Nearest = Coordinator ? Coordinator->FindNearestHostile(const_cast<AShooterNPC*>(this)) : nullptr;
+	return !Nearest || FVector::Dist2D(Nearest->GetActorLocation(), GetActorLocation()) > LastStandRetakeCoverDistance;
+}
+
 bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 {
 	if (!Target || !GetWorld())
@@ -4791,7 +4996,18 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 			}
 			return Weapon->CanShotReach(From + ToCentre / Distance * (Distance - Skin));
 		}
-		return Weapon->CanShotReach(Target->GetActorLocation());
+		// The waist, the head, or the camera a player looks out of: a target standing behind a wall
+		// 1.2 m high is a target, and so is one that can see over it. @see BodySamples
+		BodySamples::FPoints Points;
+		BodySamples::Get(Target, Points);
+		for (const FVector& Point : Points)
+		{
+			if (Weapon->CanShotReach(Point))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	FHitResult HitResult;
@@ -6933,6 +7149,7 @@ void AShooterNPC::OnWeaponShotFired()
 	// bIsShooting is already false still went somewhere, and the report counts rounds, not intent.
 	++NPCBench::ShotsThisWindow.FindOrAdd(this);
 	NPCBench::LastBusyTime.Add(this, GetWorld()->GetTimeSeconds());
+	UFightRecorderSubsystem::NoteShot(this, CurrentAimTarget.Get(), AccuracyComponent && AccuracyComponent->IsPinFire());
 	if (NPCBench::IsOn())
 	{
 		AActor* const Target = CurrentAimTarget.Get();
@@ -6984,7 +7201,10 @@ void AShooterNPC::OnWeaponShotFired()
 
 	// Check if burst complete. A dazzled soldier does not pause between bursts: it holds the trigger
 	// down at the glare until it is behind cover.
-	if (CurrentBurstShots >= BurstShotCount && DazzlePhase != EDazzlePhase::Retreating)
+	// The gun's own numbers when it has them. @see AShooterWeapon::AIBurstShotCount
+	const int32 ShotsThisPull = (Weapon && Weapon->AIBurstShotCount > 0) ? Weapon->AIBurstShotCount : BurstShotCount;
+	const float PauseAfterPull = (Weapon && Weapon->AIBurstCooldown >= 0.0f) ? Weapon->AIBurstCooldown : BurstCooldown;
+	if (CurrentBurstShots >= ShotsThisPull && DazzlePhase != EDazzlePhase::Retreating && !bDumpMagazine)
 	{
 		// Stop shooting and enter cooldown
 		if (Weapon)
@@ -7001,7 +7221,7 @@ void AShooterNPC::OnWeaponShotFired()
 			BurstCooldownTimer,
 			this,
 			&AShooterNPC::OnBurstCooldownEnd,
-			BurstCooldown,
+			PauseAfterPull,
 			false
 		);
 	}
@@ -7028,7 +7248,16 @@ void AShooterNPC::OnBurstCooldownEnd()
 // Whether an NPC reloads at all is a property of its WEAPON, not of the NPC: a weapon with
 // bUseReload off refills itself the instant it runs out, so it never empties and none of this runs.
 
-bool AShooterNPC::TryBeginReload()
+float AShooterNPC::GetMagazineFraction() const
+{
+	if (!Weapon || !Weapon->UsesReload() || Weapon->GetMagazineSize() <= 0)
+	{
+		return 1.0f;
+	}
+	return static_cast<float>(Weapon->GetBulletCount()) / static_cast<float>(Weapon->GetMagazineSize());
+}
+
+bool AShooterNPC::TryBeginReload(bool bTactical)
 {
 	if (!bReloadWhenEmpty || bIsReloadingWeapon || bIsDead)
 	{
@@ -7037,7 +7266,8 @@ bool AShooterNPC::TryBeginReload()
 
 	// Nothing to reload: no weapon, a weapon that never runs out, one that gets thrown away when it
 	// runs dry instead of reloaded (yanked weapons), or one that still has rounds left.
-	if (!Weapon || !Weapon->UsesReload() || Weapon->GetBulletCount() > 0 || !Weapon->CanReload())
+	// A tactical reload is the same reload asked for early: rounds left do not refuse it.
+	if (!Weapon || !Weapon->UsesReload() || (!bTactical && Weapon->GetBulletCount() > 0) || !Weapon->CanReload())
 	{
 		return false;
 	}

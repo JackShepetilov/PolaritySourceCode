@@ -45,7 +45,18 @@ void UInventoryComponent::BeginPlay()
 		// Every cell open from the start [author, 2026-09-29], even where a blueprint still carries
 		// an older, smaller StartingSlotCount.
 		SetSlotCount(FMath::Max(StartingSlotCount, MaxSlotCount));
-		SetFreeAttachmentSlots(StartingFreeAttachmentSlots);
+		// Not through SetFreeAttachmentSlots: it clamps to a blueprint's older ceiling.
+		FreeAttachmentSlots = AllMountsFree;
+
+		// What the soldier starts with [author, 2026-10-11].
+		if (StartingMedkits > 0)
+		{
+			FInventoryItem Medkits;
+			Medkits.Kind = EInventorySlotKind::Medkit;
+			Medkits.Count = StartingMedkits;
+			Medkits.StackMax = GetMedkitStackSize();
+			TryAdd(Medkits);
+		}
 	}
 }
 
@@ -114,6 +125,55 @@ int32 UInventoryComponent::ConsumeAmmo(int32 Count)
 		Slot.Count -= Taken;
 		Remaining -= Taken;
 
+		if (Slot.Count <= 0)
+		{
+			Slot = FInventorySlot();
+		}
+	}
+
+	const int32 Consumed = Count - Remaining;
+	if (Consumed > 0)
+	{
+		OnInventoryChanged.Broadcast();
+	}
+	return Consumed;
+}
+
+int32 UInventoryComponent::GetMedkitCount() const
+{
+	int32 Total = 0;
+	for (const FInventorySlot& Slot : Slots)
+	{
+		if (Slot.Kind == EInventorySlotKind::Medkit)
+		{
+			Total += Slot.Count;
+		}
+	}
+	return Total;
+}
+
+int32 UInventoryComponent::ConsumeMedkits(int32 Count)
+{
+	// Server only, for the reason ConsumeAmmo gives.
+	if (Count <= 0 || GetOwnerRole() != ROLE_Authority)
+	{
+		return 0;
+	}
+
+	int32 Remaining = Count;
+	for (int32 Index = 0; Index < Slots.Num() && Remaining > 0; ++Index)
+	{
+		FInventorySlot& Slot = Slots[Index];
+		if (Slot.Kind != EInventorySlotKind::Medkit)
+		{
+			continue;
+		}
+
+		const int32 Taken = FMath::Min(Slot.Count, Remaining);
+		Slot.Count -= Taken;
+		Remaining -= Taken;
+
+		// The last one out frees the cell.
 		if (Slot.Count <= 0)
 		{
 			Slot = FInventorySlot();
@@ -339,7 +399,7 @@ void UInventoryComponent::ReturnAttachmentsToBag(AShooterWeapon* Weapon)
 	// Then the free ones, into empty cells, and onto the floor when there is none.
 	for (UWeaponAttachmentDefinition* Def : Free)
 	{
-		const int32 Landing = FindEmptyCell();
+		const int32 Landing = FindOrOpenEmptyCell();
 		if (Landing != INDEX_NONE)
 		{
 			FInventorySlot& Cell = Slots[Landing];
@@ -468,7 +528,7 @@ bool UInventoryComponent::MountRaw(UWeaponAttachmentDefinition* Def, AShooterWea
 
 	// Free while the gun has free mounts left, otherwise it needs a cell to hold as its bill.
 	const bool bFree = Weapon->GetInstalledAttachmentCount() < FreeAttachmentSlots;
-	const int32 BillCell = bFree ? INDEX_NONE : FindEmptyCell();
+	const int32 BillCell = bFree ? INDEX_NONE : FindOrOpenEmptyCell();
 	if (!bFree && BillCell == INDEX_NONE)
 	{
 		return false;
@@ -501,7 +561,7 @@ void UInventoryComponent::StowLoose(UWeaponAttachmentDefinition* Def, int32 Pref
 		return;
 	}
 
-	const int32 Landing = (Slots.IsValidIndex(PreferredCell) && Slots[PreferredCell].IsEmpty()) ? PreferredCell : FindEmptyCell();
+	const int32 Landing = (Slots.IsValidIndex(PreferredCell) && Slots[PreferredCell].IsEmpty()) ? PreferredCell : FindOrOpenEmptyCell();
 	if (Landing != INDEX_NONE)
 	{
 		FInventorySlot& Cell = Slots[Landing];
@@ -827,7 +887,7 @@ bool UInventoryComponent::UninstallAttachment(AShooterWeapon* Weapon, EWeaponAtt
 	int32 LandingCell = INDEX_NONE;
 	if (HeldCell == INDEX_NONE)
 	{
-		LandingCell = FindEmptyCell();
+		LandingCell = FindOrOpenEmptyCell();
 		if (LandingCell == INDEX_NONE)
 		{
 			UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] cannot take %s off %s: no empty cell to "
@@ -914,6 +974,12 @@ bool UInventoryComponent::CanAccept(const FInventoryItem& Item, int32& OutSlotIn
 		return false;
 	}
 
+	// As many medkits as this player may carry already: no more, whatever room there is.
+	if (Item.Kind == EInventorySlotKind::Medkit && GetMedkitCount() >= GetMaxMedkits())
+	{
+		return false;
+	}
+
 	// Topping up an existing stack comes first: it costs no capacity at all, so a player with a
 	// full bag and a half-filled money cell can still pick money up.
 	OutSlotIndex = FindStackWithRoom(Item);
@@ -923,7 +989,22 @@ bool UInventoryComponent::CanAccept(const FInventoryItem& Item, int32& OutSlotIn
 	}
 
 	OutSlotIndex = FindEmptyCell();
-	return OutSlotIndex != INDEX_NONE;
+	// A bag with no ceiling always has room: the server opens the cell when it takes the item.
+	return OutSlotIndex != INDEX_NONE || bUnlimitedCells;
+}
+
+int32 UInventoryComponent::FindOrOpenEmptyCell()
+{
+	const int32 Found = FindEmptyCell();
+	if (Found != INDEX_NONE || !bUnlimitedCells || GetOwnerRole() != ROLE_Authority)
+	{
+		return Found;
+	}
+
+	const int32 First = Slots.Num();
+	Slots.AddDefaulted(FMath::Max(1, CellGrowStep));
+	UE_LOG(LogInventory, Log, TEXT("[INV_DEBUG] %s: bag grew to %d cells"), *GetNameSafe(GetOwner()), Slots.Num());
+	return First;
 }
 
 // ==================== Writing ====================
@@ -945,6 +1026,16 @@ int32 UInventoryComponent::TryAdd(const FInventoryItem& Item)
 
 	int32 Remaining = Item.Count;
 	bool bChanged = false;
+
+	// Medkits have a ceiling of their own, whatever room the bag has. What is over it is handed
+	// back like anything else that did not fit, so the pickup stays on the floor with the rest.
+	int32 OverCeiling = 0;
+	if (Item.Kind == EInventorySlotKind::Medkit)
+	{
+		const int32 Allowed = FMath::Max(0, GetMaxMedkits() - GetMedkitCount());
+		OverCeiling = FMath::Max(0, Remaining - Allowed);
+		Remaining -= OverCeiling;
+	}
 
 	// Partial stacks first, then empty cells. The loop keeps going while anything still fits,
 	// because one currency drop can finish a half-full cell and start the next one.
@@ -973,7 +1064,7 @@ int32 UInventoryComponent::TryAdd(const FInventoryItem& Item)
 			break;
 		}
 
-		TargetIndex = FindEmptyCell();
+		TargetIndex = FindOrOpenEmptyCell();
 		if (TargetIndex == INDEX_NONE)
 		{
 			// Out of capacity. Whatever is left goes back to the caller, which is what lets a
@@ -1007,7 +1098,7 @@ int32 UInventoryComponent::TryAdd(const FInventoryItem& Item)
 		OnInventoryChanged.Broadcast();
 	}
 
-	return Remaining;
+	return Remaining + OverCeiling;
 }
 
 bool UInventoryComponent::ClearSlot(int32 SlotIndex)
@@ -1226,7 +1317,7 @@ void UInventoryComponent::SetSlotCount(int32 NewCount)
 		return;
 	}
 
-	const int32 Clamped = FMath::Clamp(NewCount, 1, MaxSlotCount);
+	const int32 Clamped = bUnlimitedCells ? FMath::Max(NewCount, 1) : FMath::Clamp(NewCount, 1, MaxSlotCount);
 	if (Clamped == Slots.Num())
 	{
 		return;
@@ -1287,6 +1378,7 @@ namespace InventoryDebug
 		if (Token.Equals(TEXT("ammo"), ESearchCase::IgnoreCase))       { return EInventorySlotKind::Ammo; }
 		if (Token.Equals(TEXT("upgrade"), ESearchCase::IgnoreCase))    { return EInventorySlotKind::AbilityUpgrade; }
 		if (Token.Equals(TEXT("attachment"), ESearchCase::IgnoreCase)) { return EInventorySlotKind::Attachment; }
+		if (Token.Equals(TEXT("medkit"), ESearchCase::IgnoreCase))     { return EInventorySlotKind::Medkit; }
 		return EInventorySlotKind::Empty;
 	}
 
@@ -1298,6 +1390,7 @@ namespace InventoryDebug
 		case EInventorySlotKind::Ammo:           return TEXT("Ammo");
 		case EInventorySlotKind::AbilityUpgrade: return TEXT("AbilityUpgrade");
 		case EInventorySlotKind::Attachment:     return TEXT("Attachment");
+		case EInventorySlotKind::Medkit:         return TEXT("Medkit");
 		default:                                 return TEXT("Empty");
 		}
 	}

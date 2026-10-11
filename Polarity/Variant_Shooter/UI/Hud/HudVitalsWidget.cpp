@@ -7,6 +7,16 @@
 #include "HudShapeWidget.h"
 #include "PolarityPalette.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Health/FieldCareComponent.h"
+
+namespace
+{
+	// Two optional widgets of WBP_Vitals, found by name so the header stays as it is: a UHudBarWidget
+	// named ArmorBar and a text block named MedkitText. Renaming either in the blueprint switches
+	// it off without a word.
+	const FName ArmorBarName(TEXT("ArmorBar"));
+	const FName MedkitTextName(TEXT("MedkitText"));
+}
 
 void UHudVitalsWidget::NativeConstruct()
 {
@@ -25,6 +35,11 @@ void UHudVitalsWidget::NativeBind(AShooterCharacter* Character)
 		PlateRest = Plate->GetFillColor();
 	}
 	Apply(Character->GetCurrentHP(), Character->GetMaxHP(), true);
+
+	if (UHudBarWidget* const ArmorBar = Cast<UHudBarWidget>(GetWidgetFromName(ArmorBarName)))
+	{
+		ArmorBar->SetFraction(Character->GetMaxArmor() > 0.0f ? Character->GetCurrentArmor() / Character->GetMaxArmor() : 0.0f, true);
+	}
 }
 
 void UHudVitalsWidget::NativeUnbind()
@@ -38,6 +53,11 @@ void UHudVitalsWidget::NativeUnbind()
 void UHudVitalsWidget::HandleHealthChanged(float CurrentHP, float MaxHP, float LifePercent, float ArmorPercent)
 {
 	Apply(CurrentHP, MaxHP, false);
+
+	if (UHudBarWidget* const ArmorBar = Cast<UHudBarWidget>(GetWidgetFromName(ArmorBarName)))
+	{
+		ArmorBar->SetFraction(FMath::Clamp(ArmorPercent, 0.0f, 1.0f), false);
+	}
 }
 
 void UHudVitalsWidget::Apply(float CurrentHP, float MaxHP, bool bInstant)
@@ -78,6 +98,18 @@ void UHudVitalsWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 	Number.Update(InDeltaTime, HealthText);
+
+	// Medkits in the bag. Asked every frame and written only when the number changes.
+	if (UTextBlock* const MedkitText = Cast<UTextBlock>(GetWidgetFromName(MedkitTextName)))
+	{
+		const AShooterCharacter* const Character = GetBoundCharacter();
+		const UFieldCareComponent* const Care = Character ? Character->FindComponentByClass<UFieldCareComponent>() : nullptr;
+		const FString Wanted = FString::FromInt(Care ? Care->GetMedkitCount() : 0);
+		if (MedkitText->GetText().ToString() != Wanted)
+		{
+			MedkitText->SetText(FText::FromString(Wanted));
+		}
+	}
 
 	if (bPulsing && Plate)
 	{

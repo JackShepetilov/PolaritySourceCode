@@ -15,6 +15,7 @@
 #include "Variant_Shooter/UI/Hud/HudRegistry.h"
 #include "Variant_Shooter/UI/InventoryScreenWidget.h"
 #include "Variant_Shooter/Map/MapScreenWidget.h"
+#include "Variant_Shooter/Shop/ShopScreenWidget.h"
 #include "Polarity.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "RunSubsystem.h"
@@ -62,6 +63,31 @@ void AShooterPlayerController::CloseInventoryScreen()
 bool AShooterPlayerController::IsInventoryScreenOpen() const
 {
 	return InventoryScreen && InventoryScreen->IsOpen();
+}
+
+bool AShooterPlayerController::OpenShopScreen(ABuildableActor* Dispenser)
+{
+	if (!IsLocalController() || !ShopScreen || !Dispenser)
+	{
+		return false;
+	}
+	// One cursor screen at a time: the two would fight over the input mode.
+	CloseInventoryScreen();
+	ShopScreen->Open(Dispenser);
+	return ShopScreen->IsOpen();
+}
+
+void AShooterPlayerController::CloseShopScreen()
+{
+	if (ShopScreen)
+	{
+		ShopScreen->Close();
+	}
+}
+
+bool AShooterPlayerController::IsShopScreenOpen() const
+{
+	return ShopScreen && ShopScreen->IsOpen();
 }
 
 void AShooterPlayerController::ToggleMapScreen()
@@ -193,6 +219,26 @@ void AShooterPlayerController::BeginPlay()
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[INV_DEBUG] InventoryScreenClass is NOT set on ShooterPlayerController -> the inventory key will do nothing. Set it on BP_ShooterPlayerController."));
+		}
+
+		// The shop. Same shape again; it is opened by the feed key at a dispenser, not by a key of
+		// its own.
+		if (ShopScreenClass)
+		{
+			ShopScreen = CreateWidget<UShopScreenWidget>(this, ShopScreenClass);
+			if (ShopScreen)
+			{
+				ShopScreen->AddToPlayerScreen(10);
+				ShopScreen->SetVisibility(ESlateVisibility::Collapsed);
+				if (AShooterCharacter* PossessedCharacter = Cast<AShooterCharacter>(GetPawn()))
+				{
+					ShopScreen->InitializeFor(PossessedCharacter);
+				}
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SHOP_DEBUG] ShopScreenClass is NOT set on ShooterPlayerController -> the dispenser shows the old gun menu."));
 		}
 
 		// The map. Same shape as the inventory: built once, hidden, toggled by a key. Z-order above
@@ -506,6 +552,10 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 		if (InventoryScreen)
 		{
 			InventoryScreen->InitializeFor(ShooterCharacter);
+		}
+		if (ShopScreen)
+		{
+			ShopScreen->InitializeFor(ShooterCharacter);
 		}
 
 		// force update the life bar + armor bar

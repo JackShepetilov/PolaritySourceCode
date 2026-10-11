@@ -34,6 +34,10 @@ public:
 
 	AShooterPlayerState();
 
+	/** This player's account at the dispenser shop. Here for the reason the metal is. */
+	UFUNCTION(BlueprintPure, Category = "Shop")
+	class UShopComponent* GetShop() const { return Shop; }
+
 	// ==================== Metal ====================
 
 	/** Most metal one player can hold. What does not fit stays on the floor for somebody else. */
@@ -105,6 +109,9 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Shop")
+	TObjectPtr<class UShopComponent> Shop;
 
 	UPROPERTY(ReplicatedUsing = OnRep_OwnedBuildables)
 	TArray<TObjectPtr<ABuildableActor>> OwnedBuildables;

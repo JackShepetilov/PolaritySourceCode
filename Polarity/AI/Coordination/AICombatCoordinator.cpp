@@ -16,6 +16,9 @@
 #include "ShooterAIController.h"
 #include "ThreatComponent.h"
 #include "../Components/CoverFinderComponent.h"
+#include "../Components/AIAccuracyComponent.h"
+#include "Variant_Shooter/AI/SquadSpawn/Squad.h"
+#include "HAL/IConsoleManager.h"
 
 // ==================== FTokenPool ====================
 
@@ -136,6 +139,15 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 	// Groups follow from the targets decided just above.
 	RebuildTargetGroups();
 
+	// Are we stronger: once a second, from the targets just decided.
+	TimeSincePostures += DeltaTime;
+	if (TimeSincePostures >= PostureInterval)
+	{
+		TimeSincePostures = 0.0f;
+		UpdatePostures();
+	}
+	DrawPostureDebug();
+
 	// Token pools
 	UpdateTokenPools();
 	UpdateKamikazeTokenPoolSize();
@@ -145,6 +157,7 @@ void AAICombatCoordinator::Tick(float DeltaTime)
 		Group.Ranged.CleanupInvalid();
 		Group.Melee.CleanupInvalid();
 		Group.Special.CleanupInvalid();
+		Group.Aimed.CleanupInvalid();
 	}
 	KamikazeTokenPool.CleanupInvalid();
 
@@ -1062,6 +1075,54 @@ APawn* AAICombatCoordinator::FindNearestHostile(APawn* Asker) const
 	return Nearest;
 }
 
+APawn* AAICombatCoordinator::FindVisibleHostile(APawn* Asker) const
+{
+	const AShooterNPC* const Shooter = Cast<AShooterNPC>(Asker);
+	if (!Shooter)
+	{
+		return nullptr;
+	}
+
+	const FVector From = Asker->GetActorLocation();
+	const float MaxDistSq = FMath::Square(MaxEngagementDistance);
+
+	// Nearest first, and only then the trace: the list is short and the trace is the cost.
+	TArray<APawn*, TInlineAllocator<32>> Hostiles;
+	auto Consider = [&](APawn* Candidate)
+	{
+		if (Candidate && PolarityTeams::AreHostile(Asker, Candidate)
+			&& FVector::DistSquared(From, Candidate->GetActorLocation()) <= MaxDistSq)
+		{
+			Hostiles.Add(Candidate);
+		}
+	};
+
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	for (APawn* const Player : Players)
+	{
+		Consider(Player);
+	}
+	for (const FRegisteredNPCData& Entry : RegisteredNPCs)
+	{
+		Consider(Entry.NPC.Get());
+	}
+
+	Hostiles.Sort([&From](const APawn& A, const APawn& B)
+	{
+		return FVector::DistSquared(From, A.GetActorLocation()) < FVector::DistSquared(From, B.GetActorLocation());
+	});
+
+	for (APawn* const Hostile : Hostiles)
+	{
+		if (Shooter->HasLineOfSightTo(Hostile))
+		{
+			return Hostile;
+		}
+	}
+	return nullptr;
+}
+
 // ==================== Decoys ====================
 
 void AAICombatCoordinator::RegisterDecoy(AActor* Decoy, float Radius, float Duration)
@@ -1683,9 +1744,10 @@ void AAICombatCoordinator::ReleaseCover(AActor* NPC)
 	});
 }
 
-bool AAICombatCoordinator::IsCoverBlocked(const FVector& Location, const AActor* Asker) const
+bool AAICombatCoordinator::IsCoverBlocked(const FVector& Location, const AActor* Asker, float RadiusOverride) const
 {
-	const float RadiusSquared = CoverBlockRadius * CoverBlockRadius;
+	const float Radius = RadiusOverride >= 0.0f ? RadiusOverride : CoverBlockRadius;
+	const float RadiusSquared = Radius * Radius;
 
 	for (const FCoverClaim& Claim : CoverClaims)
 	{
@@ -1800,7 +1862,16 @@ bool AAICombatCoordinator::BeginRelocation(APawn* NPC, APawn* Opener, float Expe
 
 	// The ceiling. Refusing here is what leaves somebody at home: an NPC told no keeps its corner
 	// for now and asks again on its next cycle, by which time a slot has usually freed up.
-	if (ActiveRelocations.Num() >= MaxSimultaneousRelocations)
+	// Per side: the runners of the faction it is fighting are not its squad's to count.
+	int32 OwnSideRunners = 0;
+	for (const FRelocation& Entry : ActiveRelocations)
+	{
+		if (!PolarityTeams::AreHostile(NPC, Entry.Runner.Get()))
+		{
+			++OwnSideRunners;
+		}
+	}
+	if (OwnSideRunners >= MaxSimultaneousRelocations)
 	{
 		return false;
 	}
@@ -1871,6 +1942,12 @@ APawn* AAICombatCoordinator::GetSuppressionTarget(const APawn* NPC) const
 			continue;
 		}
 
+		// Somebody else's war: the runner is not of this NPC's side, or the one to sit on is.
+		if (PolarityTeams::AreHostile(NPC, Entry.Runner.Get()) || !PolarityTeams::AreHostile(NPC, Opener))
+		{
+			continue;
+		}
+
 		const float Threat = GetThreatFor(Opener);
 		if (Threat > BestThreat)
 		{
@@ -1881,6 +1958,498 @@ APawn* AAICombatCoordinator::GetSuppressionTarget(const APawn* NPC) const
 
 	return Best;
 }
+
+// ==================== One job at a time ====================
+
+bool AAICombatCoordinator::RequestAimedFire(APawn* NPC)
+{
+	FTargetGroup* const Group = FindGroupFor(NPC);
+	if (!Group || !Cast<APawn>(Group->Target.Get()))
+	{
+		return true;
+	}
+
+	Group->Aimed.MaxTokens = MaxAimedShooters;
+	Group->Aimed.CleanupInvalid();
+	return Group->Aimed.HasToken(NPC) || Group->Aimed.TryAcquire(NPC);
+}
+
+void AAICombatCoordinator::ReleaseAimedFire(APawn* NPC)
+{
+	// From every group, same as the attack tokens: the NPC may have changed target while holding one.
+	for (FTargetGroup& Group : Groups)
+	{
+		Group.Aimed.Release(NPC);
+	}
+}
+
+bool AAICombatCoordinator::RequestAssaultMove(APawn* NPC, FVector& OutPreferredPoint, bool& bOutFlank)
+{
+	bOutFlank = false;
+
+	const UWorld* const World = GetWorld();
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	FTargetGroup* const Group = FindGroupFor(NPC);
+	const APawn* const Target = Group ? Cast<APawn>(Group->Target.Get()) : nullptr;
+	if (!World || !Record || !Target || Record->Posture != ESquadPosture::Assault)
+	{
+		return false;
+	}
+
+	const int32 Lane = Record->AssaultElement.IndexOfByPredicate([NPC](const TWeakObjectPtr<AShooterNPC>& Entry)
+	{
+		return Entry.Get() == NPC;
+	});
+	if (Lane == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	if (Now - Group->LastBoundTime < BoundInterval)
+	{
+		return false;
+	}
+
+	// The middle of the squad, for the axis of the fight.
+	FVector Middle = FVector::ZeroVector;
+	int32 Counted = 0;
+	for (const TWeakObjectPtr<AShooterNPC>& Member : Record->Members)
+	{
+		if (const AShooterNPC* const Mate = Member.Get())
+		{
+			Middle += Mate->GetActorLocation();
+			++Counted;
+		}
+	}
+	if (Counted == 0)
+	{
+		return false;
+	}
+	Middle /= static_cast<float>(Counted);
+
+	const FVector TargetLocation = Target->GetActorLocation();
+	const FVector NPCLocation = NPC->GetActorLocation();
+	FVector Axis = (Middle - TargetLocation).GetSafeNormal2D();
+	if (Axis.IsNearlyZero())
+	{
+		Axis = (NPCLocation - TargetLocation).GetSafeNormal2D();
+	}
+	if (Axis.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const float MyDistance = FVector::Dist2D(NPCLocation, TargetLocation);
+	if (MyDistance <= AssaultStandOff + 150.0f)
+	{
+		// Already there: the close fight takes it from here.
+		return false;
+	}
+	const float NextDistance = FMath::Max(AssaultStandOff, MyDistance - BoundAdvanceStep);
+
+	// Lanes by place in the going half: front, left, right, front... The front closes straight down
+	// its own line; a side lane swings round the enemy as it closes.
+	const int32 Side = Lane % 3;
+	if (Side == 0)
+	{
+		const FVector MyDirection = (NPCLocation - TargetLocation).GetSafeNormal2D();
+		OutPreferredPoint = TargetLocation + MyDirection * NextDistance;
+	}
+	else
+	{
+		bOutFlank = true;
+		const FVector Round = Axis.RotateAngleAxis(Side == 1 ? FlankAngleDeg : -FlankAngleDeg, FVector::UpVector);
+		OutPreferredPoint = TargetLocation + Round * NextDistance;
+	}
+
+	// The slot: BeginRelocation holds the per side cap, and a granted one is what the rest cover.
+	if (!BeginRelocation(NPC, const_cast<APawn*>(Target), BoundSlotSeconds))
+	{
+		return false;
+	}
+	Group->LastBoundTime = Now;
+
+	UE_LOG(LogTemp, Log, TEXT("[TACTIC] %s assault move granted: %s lane, %.0f -> %.0f cm from %s"),
+		*GetNameSafe(NPC), Side == 0 ? TEXT("front") : (Side == 1 ? TEXT("left") : TEXT("right")),
+		MyDistance, NextDistance, *GetNameSafe(Target));
+
+	return true;
+}
+
+bool AAICombatCoordinator::HasCoveringMate(APawn* NPC) const
+{
+	const FTargetGroup* const Group = FindGroupFor(NPC);
+	if (!Group)
+	{
+		return false;
+	}
+
+	for (const int32 Index : Group->Members)
+	{
+		const AShooterNPC* const Other = RegisteredNPCs.IsValidIndex(Index) ? Cast<AShooterNPC>(RegisteredNPCs[Index].NPC.Get()) : nullptr;
+		if (Other && Other != NPC && !PolarityTeams::AreHostile(NPC, Other)
+			&& Other->IsCurrentlyShooting() && !IsRelocating(Other))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AAICombatCoordinator::WantsRush(APawn* NPC)
+{
+	// Switched off [author, 2026-10-11]. "Leave cover and close on a hurt player" was one case of a
+	// squad being stronger, and that question now has one owner: the posture (UpdatePostures). The
+	// tree still asks through here, so its Push state is simply never chosen.
+	return false;
+}
+
+// ==================== Squad posture ====================
+
+namespace
+{
+	const TCHAR* PostureName(ESquadPosture Posture)
+	{
+		switch (Posture)
+		{
+		case ESquadPosture::Assault: return TEXT("ASSAULT");
+		case ESquadPosture::Defense: return TEXT("DEFENSE");
+		default:                     return TEXT("FIREFIGHT");
+		}
+	}
+
+	bool IsFootSoldier(const AShooterNPC* NPC)
+	{
+		return NPC && !NPC->IsDead() && !NPC->IsA<AFlyingDrone>() && !NPC->IsA<AKamikazeDroneNPC>();
+	}
+}
+
+void AAICombatCoordinator::UpdatePostures()
+{
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+	const float RadiusSq = FMath::Square(EnemyGroupRadius);
+
+	for (FPostureRecord& Record : Postures)
+	{
+		Record.Members.Reset();
+		Record.Ours = 0;
+		Record.Theirs = 0;
+		Record.AnchorSum = FVector::ZeroVector;
+		Record.AnchorCount = 0;
+		Record.bSeenThisPass = false;
+
+		// A place nobody has fought at for a while is a free slot again.
+		if (Record.Team != 255 && Now - Record.LastSeenTime > 10.0f)
+		{
+			Record = FPostureRecord();
+		}
+	}
+
+	// Who fights where.
+	for (FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		Data.PostureIndex = INDEX_NONE;
+
+		AShooterNPC* const NPC = Cast<AShooterNPC>(Data.NPC.Get());
+		const APawn* const Target = Cast<APawn>(Data.Target.Get());
+		if (!IsFootSoldier(NPC) || !Target)
+		{
+			continue;
+		}
+
+		const uint8 Team = PolarityTeams::GetTeam(NPC);
+		const FVector TargetLocation = Target->GetActorLocation();
+
+		int32 Found = Postures.IndexOfByPredicate([&](const FPostureRecord& Record)
+		{
+			return Record.Team == Team && FVector::DistSquared2D(Record.AnchorLocation, TargetLocation) <= RadiusSq;
+		});
+		if (Found == INDEX_NONE)
+		{
+			Found = Postures.IndexOfByPredicate([](const FPostureRecord& Record) { return Record.Team == 255; });
+			if (Found == INDEX_NONE)
+			{
+				Found = Postures.AddDefaulted();
+			}
+			Postures[Found] = FPostureRecord();
+			Postures[Found].Team = Team;
+			Postures[Found].AnchorLocation = TargetLocation;
+		}
+
+		FPostureRecord& Record = Postures[Found];
+		Record.bSeenThisPass = true;
+		Record.Members.Add(NPC);
+		Record.AnchorSum += TargetLocation;
+		++Record.AnchorCount;
+		Data.PostureIndex = Found;
+
+		// A suppressed soldier is there, and is not strength.
+		const UAIAccuracyComponent* const Accuracy = NPC->FindComponentByClass<UAIAccuracyComponent>();
+		if (!Accuracy || !Accuracy->IsSuppressed())
+		{
+			++Record.Ours;
+		}
+	}
+
+	TArray<APawn*> Everyone;
+	CoopPlayers::GetAll(World, Everyone);
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		if (APawn* const Pawn = Data.NPC.Get())
+		{
+			Everyone.Add(Pawn);
+		}
+	}
+
+	for (FPostureRecord& Record : Postures)
+	{
+		if (!Record.bSeenThisPass || Record.Members.Num() == 0)
+		{
+			continue;
+		}
+
+		Record.LastSeenTime = Now;
+		Record.AnchorLocation = Record.AnchorSum / static_cast<float>(Record.AnchorCount);
+
+		const AShooterNPC* const Asker = Record.Members[0].Get();
+		for (const APawn* const Pawn : Everyone)
+		{
+			const AShooterNPC* const AsNPC = Cast<AShooterNPC>(Pawn);
+			if (Pawn && (!AsNPC || !AsNPC->IsDead()) && PolarityTeams::AreHostile(Asker, Pawn)
+				&& FVector::DistSquared2D(Pawn->GetActorLocation(), Record.AnchorLocation) <= RadiusSq)
+			{
+				++Record.Theirs;
+			}
+		}
+		Record.Theirs = FMath::Max(1, Record.Theirs);
+		Record.Ratio = static_cast<float>(Record.Ours) / static_cast<float>(Record.Theirs);
+
+		// The first count of a new fight stands as it is; after that it is eased.
+		const float Ease = RatioSmoothingSeconds > 0.0f ? FMath::Clamp(PostureInterval / RatioSmoothingSeconds, 0.0f, 1.0f) : 1.0f;
+		Record.SmoothedRatio = Record.bFresh ? Record.Ratio : FMath::Lerp(Record.SmoothedRatio, Record.Ratio, Ease);
+		Record.bFresh = false;
+		const float Decide = Record.SmoothedRatio;
+
+		// The commander. Losing one costs the squad its assault for a while.
+		bool bCommanderLost = false;
+		if (!IsFootSoldier(Record.Commander.Get()) || !Record.Members.Contains(Record.Commander))
+		{
+			// Dead, not merely fighting somebody else now: a commander whose target moved to another
+			// knot of enemies leaves this record without having gone anywhere.
+			if (Record.bHadCommander && !IsFootSoldier(Record.Commander.Get()))
+			{
+				Record.NoAssaultUntil = Now + CommanderLossSeconds;
+				bCommanderLost = true;
+				UE_LOG(LogTemp, Log, TEXT("[TACTIC] side %d lost its commander: no assault for %.0f s"),
+					Record.Team, CommanderLossSeconds);
+			}
+			Record.Commander = Record.Members[0];
+			Record.bHadCommander = true;
+		}
+
+		ESquadPosture Want = Record.Posture;
+		switch (Record.Posture)
+		{
+		case ESquadPosture::Assault:
+			if (Decide < AssaultExitRatio)
+			{
+				Want = ESquadPosture::Firefight;
+			}
+			break;
+		case ESquadPosture::Defense:
+			if (Decide >= DefenseExitRatio)
+			{
+				Want = ESquadPosture::Firefight;
+			}
+			break;
+		default:
+			if (Decide >= AssaultRatio)
+			{
+				Want = ESquadPosture::Assault;
+			}
+			else if (Decide < DefenseRatio)
+			{
+				Want = ESquadPosture::Defense;
+			}
+			break;
+		}
+		if (Want == ESquadPosture::Assault && Now < Record.NoAssaultUntil)
+		{
+			Want = ESquadPosture::Firefight;
+		}
+
+		if (Want != Record.Posture && (bCommanderLost || Now - Record.ChangedTime >= PostureMinHoldSeconds))
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TACTIC] side %d posture %s -> %s: %d of ours against %d (ratio %.1f)"),
+				Record.Team, PostureName(Record.Posture), PostureName(Want), Record.Ours, Record.Theirs, Record.Ratio);
+			Record.Posture = Want;
+			Record.ChangedTime = Now;
+		}
+
+		for (const TWeakObjectPtr<AShooterNPC>& Member : Record.Members)
+		{
+			if (FRegisteredNPCData* const MemberData = FindNPCData(Member.Get()))
+			{
+				MemberData->LastPosture = Record.Posture;
+			}
+		}
+
+		// The going half: kept while it lives, topped up from the ones nearest the enemy.
+		if (Record.Posture != ESquadPosture::Assault)
+		{
+			Record.AssaultElement.Reset();
+			continue;
+		}
+
+		Record.AssaultElement.RemoveAll([&Record](const TWeakObjectPtr<AShooterNPC>& Entry)
+		{
+			return !IsFootSoldier(Entry.Get()) || !Record.Members.Contains(Entry);
+		});
+
+		const int32 Wanted = FMath::Max(1, Record.Members.Num() / 2);
+		if (Record.AssaultElement.Num() < Wanted)
+		{
+			TArray<TWeakObjectPtr<AShooterNPC>> Spare = Record.Members.FilterByPredicate([&Record](const TWeakObjectPtr<AShooterNPC>& Entry)
+			{
+				return !Record.AssaultElement.Contains(Entry);
+			});
+			const FVector Anchor = Record.AnchorLocation;
+			Spare.Sort([&Anchor](const TWeakObjectPtr<AShooterNPC>& A, const TWeakObjectPtr<AShooterNPC>& B)
+			{
+				return FVector::DistSquared2D(A->GetActorLocation(), Anchor) < FVector::DistSquared2D(B->GetActorLocation(), Anchor);
+			});
+			for (int32 Index = 0; Index < Spare.Num() && Record.AssaultElement.Num() < Wanted; ++Index)
+			{
+				Record.AssaultElement.Add(Spare[Index]);
+			}
+		}
+	}
+}
+
+const AAICombatCoordinator::FPostureRecord* AAICombatCoordinator::FindPostureFor(const APawn* NPC) const
+{
+	const FRegisteredNPCData* const Data = FindNPCData(const_cast<APawn*>(NPC));
+	return (Data && Postures.IsValidIndex(Data->PostureIndex) && Postures[Data->PostureIndex].Team != 255)
+		? &Postures[Data->PostureIndex] : nullptr;
+}
+
+ESquadPosture AAICombatCoordinator::GetPostureFor(APawn* NPC) const
+{
+	// A soldier told to hold (an outpost) defends whatever the count says: it takes the corner at
+	// hand, keeps it, does not go looking and does not close in. It used to be read as a firefight,
+	// and a firefight walks: the garrison of the first outpost left its walls (2026-10-11).
+	const AShooterNPC* const Soldier = Cast<AShooterNPC>(NPC);
+	if (Soldier && Soldier->GetCombatTask() == ESquadTask::Hold)
+	{
+		return ESquadPosture::Defense;
+	}
+
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	if (!Record)
+	{
+		const FRegisteredNPCData* const Data = FindNPCData(NPC);
+		return Data ? Data->LastPosture : ESquadPosture::Firefight;
+	}
+	return Record->Posture;
+}
+
+float AAICombatCoordinator::GetForceRatioFor(APawn* NPC) const
+{
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	return Record ? Record->SmoothedRatio : 1.0f;
+}
+
+bool AAICombatCoordinator::IsInAssaultElement(APawn* NPC) const
+{
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	const AShooterNPC* const Soldier = Cast<AShooterNPC>(NPC);
+	return Record && Soldier && Soldier->GetCombatTask() != ESquadTask::Hold
+		&& Record->AssaultElement.ContainsByPredicate([NPC](const TWeakObjectPtr<AShooterNPC>& Entry) { return Entry.Get() == NPC; });
+}
+
+bool AAICombatCoordinator::IsSquadCommander(APawn* NPC) const
+{
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	return Record && Record->Commander.Get() == NPC;
+}
+
+FString AAICombatCoordinator::DescribePostureFor(APawn* NPC) const
+{
+	const FPostureRecord* const Record = FindPostureFor(NPC);
+	return Record
+		? FString::Printf(TEXT("%s %.1f (%d v %d)"), PostureName(Record->Posture), Record->Ratio, Record->Ours, Record->Theirs)
+		: FString(TEXT("no posture"));
+}
+
+static TAutoConsoleVariable<int32> CVarAIShowCommander(
+	TEXT("polarity.ai.showposture"),
+	1,
+	TEXT("1: draw each squad's posture and force ratio over its commander. 0: do not."));
+
+void AAICombatCoordinator::DrawPostureDebug() const
+{
+	if (CVarAIShowCommander.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	for (const FPostureRecord& Record : Postures)
+	{
+		const AShooterNPC* const Commander = Record.Commander.Get();
+		if (Record.Team == 255 || !Record.bSeenThisPass || !IsFootSoldier(Commander))
+		{
+			continue;
+		}
+
+		const FColor Colour = Record.Posture == ESquadPosture::Assault ? FColor::Red
+			: (Record.Posture == ESquadPosture::Defense ? FColor::Cyan : FColor::Yellow);
+		const FVector Above = Commander->GetActorLocation() + FVector(0.0f, 0.0f, Commander->GetSimpleCollisionHalfHeight() + 45.0f);
+		DrawDebugSphere(GetWorld(), Above, 14.0f, 6, Colour, false, -1.0f, 0, 2.0f);
+		DrawDebugString(GetWorld(), Above + FVector(0.0f, 0.0f, 20.0f),
+			FString::Printf(TEXT("CMD  %s %.1f (%d v %d)"), PostureName(Record.Posture), Record.Ratio, Record.Ours, Record.Theirs),
+			nullptr, Colour, 0.0f, true, 1.2f);
+	}
+}
+
+void AAICombatCoordinator::DebugSuppressAllAgainstPlayers(float Seconds)
+{
+	TArray<APawn*> Players;
+	CoopPlayers::GetAll(GetWorld(), Players);
+	if (Players.Num() == 0)
+	{
+		return;
+	}
+
+	int32 Count = 0;
+	for (const FRegisteredNPCData& Data : RegisteredNPCs)
+	{
+		APawn* const Pawn = Data.NPC.Get();
+		UAIAccuracyComponent* const Accuracy = Pawn ? Pawn->FindComponentByClass<UAIAccuracyComponent>() : nullptr;
+		if (Accuracy && PolarityTeams::AreHostile(Pawn, Players[0]))
+		{
+			Accuracy->ApplySuppression(Seconds);
+			++Count;
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("[TACTIC] debug: suppressed %d enemies of the players for %.1f s"), Count, Seconds);
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdAISuppressAll(
+	TEXT("polarity.ai.suppressall"),
+	TEXT("Suppress every enemy of the players. Usage: polarity.ai.suppressall [seconds, default 5]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(World))
+		{
+			Coordinator->DebugSuppressAllAgainstPlayers(Args.Num() > 0 ? FCString::Atof(*Args[0]) : 5.0f);
+		}
+	}));
 
 AActor* AAICombatCoordinator::ResolveTargetFor(APawn* NPC) const
 {

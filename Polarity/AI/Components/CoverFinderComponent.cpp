@@ -4,7 +4,9 @@
 
 #include "AI/PolarityTeams.h"
 #include "AI/TacticalSpace.h"
+#include "AI/FactionContactMemory.h"
 #include "AI/Coordination/AICombatCoordinator.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
@@ -97,6 +99,39 @@ void UCoverFinderComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void UCoverFinderComponent::SetSearchBias(const FVector& Point, float WeightPerMetre, float MinMoveDistance, float MinTargetDistance)
+{
+	bHasSearchBias = true;
+	SearchBiasPoint = Point;
+	SearchBiasWeightPerMetre = FMath::Max(0.0f, WeightPerMetre);
+	SearchBiasMinMove = FMath::Max(0.0f, MinMoveDistance);
+	SearchBiasMinTargetDistance = MinTargetDistance;
+}
+
+bool UCoverFinderComponent::IsFlanked() const
+{
+	const AActor* const Target = SearchTarget.Get();
+	if (!CurrentCover.bValid || !Target)
+	{
+		return false;
+	}
+
+	FCollisionQueryParams TraceParams;
+	BuildTraceParams(TraceParams);
+
+	// Walked round means the body at the hide end is in the enemy's view, in the pose it waits there
+	// in. Asked of the body and not of the wall: "is there still a wall within two metres on the line
+	// to him" said yes-flanked every time he took three steps sideways, whether or not he could see
+	// anything, and the corner was thrown away (recorded 2026-10-11, a new corner every 12 s).
+	if (const APawn* const TargetPawn = Cast<APawn>(Target))
+	{
+		return CanPlayerSee(TargetPawn, CurrentCover.HideLocation, TraceParams, CurrentCover.bLowCover);
+	}
+
+	const FVector TowardTarget = (Target->GetActorLocation() - CurrentCover.HideLocation).GetSafeNormal2D();
+	return !HasSolidCoverToward(CurrentCover.HideLocation, TowardTarget, CurrentCover.bLowCover, TraceParams);
+}
+
 bool UCoverFinderComponent::RequestCover(AActor* Target)
 {
 	if (!Target || !CoverQuery)
@@ -138,6 +173,10 @@ bool UCoverFinderComponent::RequestCover(AActor* Target)
 void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 {
 	bSearchInFlight = false;
+
+	// One search, one bias: taken here so every way out of this function has used it up.
+	const bool bBiased = bHasSearchBias;
+	bHasSearchBias = false;
 
 	// [COVER_DEBUG] TIMING: what one scoring pass costs on the game thread (the EQS part before it runs
 	// time-sliced and is not counted). Logged at Log so the bench sees it; one line per search.
@@ -195,6 +234,9 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 
 		/** Hidden only crouched: the numbers above are the crouched ones, and the NPC will wait down. */
 		bool bLow;
+
+		/** Rank added for lying away from the bias point, zero on an unbiased search. */
+		float BiasCost;
 	};
 
 	const FVector OwnerLocation = GetOwner()->GetActorLocation();
@@ -210,17 +252,76 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	SpaceWeights.AllyWeight = AllyCohesionWeight;
 	SpaceWeights.EnemyWeight = EnemyAvoidWeight;
 
-	for (const FVector& Candidate : Candidates)
+	UNavigationSystemV1* const SnapNav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+
+	float SnapChest = 0.0f;
+	float SnapHead = 0.0f;
+	float SnapSide = 0.0f;
+	GetBodySampleHeights(/*bCrouched*/ true, SnapChest, SnapHead, SnapSide);
+
+	// One told to hold a ground: its corners are inside it, at any distance from the enemy, and it
+	// may stand shoulder to shoulder with the next man of the garrison.
+	const AShooterNPC* const Holder = Cast<AShooterNPC>(GetOwner());
+	const bool bHolds = Holder && Holder->HasHoldArea();
+
+	// Why candidates fell out, for the one log line that says none was left.
+	int32 LostNoWall = 0, LostOffNav = 0, LostDistance = 0, LostOutside = 0, LostClaimed = 0, LostNotCover = 0;
+
+	for (const FVector& RawCandidate : Candidates)
 	{
-		const float DistanceToTarget = FVector::Dist2D(Candidate, TargetLocation);
-		if (DistanceToTarget < MinPeekDistance || DistanceToTarget > MaxPeekDistance)
+		// From a point on the floor to the spot behind the nearest solid thing between it and the
+		// target (see CoverSnapDistance). Asked at crouched chest height, so a low wall counts.
+		FVector Candidate = RawCandidate;
+		if (CoverSnapDistance > 0.0f)
 		{
+			const FVector Toward = (TargetLocation - RawCandidate).GetSafeNormal2D();
+			const FVector From = RawCandidate + FVector(0.0f, 0.0f, SnapChest);
+
+			FHitResult WallHit;
+			if (Toward.IsNearlyZero()
+				|| !GetWorld()->LineTraceSingleByChannel(WallHit, From, From + Toward * CoverSnapDistance, ECC_Visibility, TraceParams))
+			{
+				++LostNoWall;
+				continue;
+			}
+
+			FVector Behind = WallHit.ImpactPoint - Toward * CoverStandOff;
+			Behind.Z = RawCandidate.Z;
+
+			FNavLocation OnNav;
+			if (!SnapNav || !SnapNav->ProjectPointToNavigation(Behind, OnNav, FVector(60.0f, 60.0f, 150.0f)))
+			{
+				++LostOffNav;
+				continue;
+			}
+			Candidate = OnNav.Location;
+		}
+
+		const float DistanceToTarget = FVector::Dist2D(Candidate, TargetLocation);
+		const float NearLimit = (bBiased && SearchBiasMinTargetDistance >= 0.0f) ? SearchBiasMinTargetDistance : MinPeekDistance;
+		if (!bHolds && (DistanceToTarget < NearLimit || DistanceToTarget > MaxPeekDistance))
+		{
+			++LostDistance;
+			continue;
+		}
+
+		// Outside the ground this one was told to hold. @see AShooterNPC::SetHoldArea
+		if (Holder && !Holder->IsInsideHoldArea(Candidate))
+		{
+			++LostOutside;
 			continue;
 		}
 
 		// Somebody else's corner. Claimed spots block a radius around themselves so two NPCs do not
 		// end up behind the same wall from opposite sides, tripping over each other's peeks.
-		if (Coordinator && Coordinator->IsCoverBlocked(Candidate, GetOwner()))
+		if (Coordinator && Coordinator->IsCoverBlocked(Candidate, GetOwner(), bHolds ? HoldClaimRadius : -1.0f))
+		{
+			++LostClaimed;
+			continue;
+		}
+
+		// A bound is a move: the corner it already stands at is not an answer.
+		if (bBiased && FVector::Dist2D(Candidate, OwnerLocation) < SearchBiasMinMove)
 		{
 			continue;
 		}
@@ -257,17 +358,46 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 			}
 		}
 
+		// Cover is a wall next to you, between you and the one you are fighting [author, 2026-10-11].
+		// The sum above ranks spots (hidden from MOST of them is the better corner); it must not be
+		// what ADMITS them, or on open ground the least bad patch of floor wins and an enemy sits down
+		// in the middle of nowhere and calls it a corner. A wall at standing chest height is high
+		// cover; one only at crouched chest height is low cover, whatever the sum said.
+		{
+			const FVector TowardTarget = (TargetLocation - Candidate).GetSafeNormal2D();
+			if (!HasSolidCoverToward(Candidate, TowardTarget, /*bCrouched*/ false, TraceParams))
+			{
+				if (!HasSolidCoverToward(Candidate, TowardTarget, /*bCrouched*/ true, TraceParams))
+				{
+					++LostNotCover;
+					continue;
+				}
+				if (!bLow)
+				{
+					bLow = true;
+					Exposure = ComputeExposure(Candidate, Observers, TraceParams, /*bCrouched*/ true);
+					bSeenByExtra = SeenByExtraAt(true);
+				}
+			}
+		}
+
 		Scored.Add({ Candidate,
 			Exposure,
 			static_cast<float>(FVector::Dist2D(Candidate, OwnerLocation)),
 			TacticalSpace::ScorePosition(SpaceContext, Candidate, SpaceWeights),
-			bSeenByExtra, bLow });
+			bSeenByExtra, bLow,
+			bBiased ? SearchBiasWeightPerMetre * static_cast<float>(FVector::Dist2D(Candidate, SearchBiasPoint)) / 100.0f : 0.0f });
 	}
+
+	UE_LOG(LogCover, Verbose,
+		TEXT("[COVER_DEBUG] %s: %d candidates, %d scored. Lost: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d"),
+		*GetNameSafe(GetOwner()), Candidates.Num(), Scored.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover);
 
 	if (Scored.Num() == 0)
 	{
-		UE_LOG(LogCover, Verbose, TEXT("[COVER_DEBUG] %s: %d candidates, none passed distance/claim filters"),
-			*GetNameSafe(GetOwner()), Candidates.Num());
+		UE_LOG(LogCover, Verbose,
+			TEXT("[COVER_DEBUG] %s: %d candidates, none left: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d"),
+			*GetNameSafe(GetOwner()), Candidates.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover);
 		OnCoverSearchFinished.Broadcast(false, FCoverSpot());
 		return;
 	}
@@ -288,8 +418,8 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 			return !A.bSeenByExtra;
 		}
 
-		const float RankA = A.Exposure - SpaceScale * A.SpaceScore;
-		const float RankB = B.Exposure - SpaceScale * B.SpaceScore;
+		const float RankA = A.Exposure - SpaceScale * A.SpaceScore + A.BiasCost;
+		const float RankB = B.Exposure - SpaceScale * B.SpaceScore + B.BiasCost;
 
 		if (!FMath::IsNearlyEqual(RankA, RankB, 0.01f))
 		{
@@ -317,7 +447,27 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		}
 	}
 
-	for (int32 Index = 0; Index < ProbeCount; ++Index)
+	// Where the side knows an enemy at: what a corner's peek point is worth looking at.
+	TArray<FVector, TInlineAllocator<12>> KnownEnemyPlaces;
+	KnownEnemyPlaces.Add(TargetLocation);
+	if (const UFactionContactMemory* const Memory = UFactionContactMemory::Get(GetOwner()))
+	{
+		TArray<FFactionContact> Contacts;
+		Memory->GetContacts(PolarityTeams::GetTeam(GetOwner()), Contacts);
+		for (const FFactionContact& Contact : Contacts)
+		{
+			if (KnownEnemyPlaces.Num() >= 12)
+			{
+				break;
+			}
+			KnownEnemyPlaces.Add(Contact.LastKnownLocation);
+		}
+	}
+
+	float BestScore = TNumericLimits<float>::Max();
+	int32 Compared = 0;
+
+	for (int32 Index = 0; Index < ProbeCount && Compared < FMath::Max(1, MaxCornersToCompare); ++Index)
 	{
 		// Low cover whose standing muzzle clears the wall is peeked OVER, in place: P is H, and
 		// stepping out means standing up. Otherwise (high cover, or a low wall too tall to shoot over
@@ -332,6 +482,16 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		{
 			// No corner here. Not a failure, just not cover: this is what separates a real angle
 			// from open ground that happens to be far away.
+			UE_LOG(LogCover, Verbose, TEXT("[COVER_DEBUG] %s: spot %s low=%d exposure=%.2f has no peek: over=%d"),
+				*GetNameSafe(GetOwner()), *Scored[Index].Location.ToCompactString(), Scored[Index].bLow ? 1 : 0,
+				Scored[Index].Exposure, CanShootOverFrom(Scored[Index].Location, TraceParams) ? 1 : 0);
+			continue;
+		}
+
+		// The step out has to stay on the held ground too: the corners of a yard's outer walls
+		// otherwise count, and the peek from them is a walk outside (recorded 2026-10-11).
+		if (Holder && !Holder->IsInsideHoldArea(PeekLocation))
+		{
 			continue;
 		}
 
@@ -347,13 +507,38 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 			continue;
 		}
 
+		// How much of what the side knows this corner looks at, from its peek point, standing.
+		float StandChest = 0.0f;
+		float StandHead = 0.0f;
+		float StandSide = 0.0f;
+		GetBodySampleHeights(/*bCrouched*/ false, StandChest, StandHead, StandSide);
+		const FVector PeekEyes = PeekLocation + FVector(0.0f, 0.0f, StandHead);
+
+		int32 Seen = 0;
+		for (const FVector& Place : KnownEnemyPlaces)
+		{
+			if (HasLineOfSight(PeekEyes, Place + FVector(0.0f, 0.0f, TargetChestHeight), TraceParams))
+			{
+				++Seen;
+			}
+		}
+		const float Control = static_cast<float>(Seen) / static_cast<float>(KnownEnemyPlaces.Num());
+
+		const float Score = Scored[Index].Exposure - SpaceScale * Scored[Index].SpaceScore + Scored[Index].BiasCost
+			- ControlWeight * Control;
+		++Compared;
+		if (Score >= BestScore)
+		{
+			continue;
+		}
+		BestScore = Score;
+
 		Chosen.HideLocation = Scored[Index].Location;
 		Chosen.PeekLocation = PeekLocation;
 		Chosen.Exposure = Scored[Index].Exposure;
 		Chosen.bLowCover = Scored[Index].bLow;
 		Chosen.bPeekOver = bPeekOver;
 		Chosen.bValid = true;
-		break;
 	}
 
 	if (bDrawDebug)
@@ -469,7 +654,12 @@ bool UCoverFinderComponent::IsCoverStillGood() const
 	// relocating over, because that means somebody has walked around and opened the corner up. A
 	// spot that is merely as exposed as it was when nothing better existed stays usable, and the NPC
 	// fights from it instead of freezing.
-	return EvaluateCurrentExposure() <= FMath::Max(CoverLostExposureThreshold, CurrentCover.Exposure);
+	if (EvaluateCurrentExposure() > FMath::Max(CoverLostExposureThreshold, CurrentCover.Exposure))
+	{
+		return false;
+	}
+
+	return true;
 }
 
 float UCoverFinderComponent::GetRequeryCooldownRemaining() const
@@ -500,7 +690,13 @@ void UCoverFinderComponent::GetBodySampleHeights(bool bCrouched, float& OutChest
 	const float Height = bCrouched ? CrouchedHeight : StandingHeight;
 
 	OutChest = Height * 0.6f;
-	OutHead = Height * 0.92f;
+	// Crouched, the head is not inside the capsule. Measured 2026-10-11 on BP_ShooterNPC: the capsule
+	// ends 100 cm above the floor, the head bone sits at 101 to 103 and the top of the skull at about
+	// 115. Standing, the head bone is at 155 of 176.
+	// The sample is 105 and not 115: the point it is taken over is on the navmesh, which floats a
+	// few cm over the floor, and a wall 120 high has to pass. First tried at 115 and no cover on the
+	// whole outpost was admitted.
+	OutHead = bCrouched ? Height + 5.0f : Height * 0.92f;
 	// The body's half width plus arrival slack: the NPC stops within about a metre of the spot.
 	OutSideReach = (Capsule ? Capsule->GetScaledCapsuleRadius() : 34.0f) + 40.0f;
 }
@@ -618,12 +814,34 @@ bool UCoverFinderComponent::CanShootOverFrom(const FVector& HideLocation, const 
 	float Head = 0.0f;
 	float SideReach = 0.0f;
 	GetBodySampleHeights(/*bCrouched*/ false, Chest, Head, SideReach);
-	const FVector Muzzle = HideLocation + FVector(0.0f, 0.0f, Head * 0.85f);
+	// The muzzle of a standing one, measured 2026-10-11: 129 to 136 cm above the floor.
+	const FVector Muzzle = HideLocation + FVector(0.0f, 0.0f, Head * 0.8f);
 
 	// The target is not its own obstacle (a building target is solid, and its chest sits inside it).
 	FCollisionQueryParams SeeTargetParams = Params;
 	SeeTargetParams.AddIgnoredActor(Target);
 	return HasLineOfSight(Muzzle, Target->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight), SeeTargetParams);
+}
+
+bool UCoverFinderComponent::HasSolidCoverToward(const FVector& Point, const FVector& Toward, bool bCrouched,
+	const FCollisionQueryParams& Params) const
+{
+	if (Toward.IsNearlyZero())
+	{
+		return false;
+	}
+
+	float Chest = 0.0f;
+	float Head = 0.0f;
+	float SideReach = 0.0f;
+	GetBodySampleHeights(bCrouched, Chest, Head, SideReach);
+
+	// At the HEAD, in the pose it takes behind the wall. It was the chest, and a wall 100 cm high then
+	// counted as cover for a crouched soldier whose head ends at 115: the garrison sat behind its
+	// parapet with the top of every head showing over it [author, 2026-10-11]. The same for a wall
+	// that hides a standing chest and not a standing head: that one is low cover, to crouch behind.
+	const FVector From = Point + FVector(0.0f, 0.0f, Head);
+	return !HasLineOfSight(From, From + Toward * MaxCoverWallDistance, Params);
 }
 
 float UCoverFinderComponent::ComputeExposure(const FVector& Point, const TArray<APawn*>& Observers, const FCollisionQueryParams& Params,
@@ -733,9 +951,21 @@ bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const
 		// The target itself is not an obstacle to seeing it. Pawns were already ignored (Params), but
 		// a building target is solid, and TargetChest sits inside its box: without this every probe
 		// against a turret or a core would stop on the target's own surface and report "no line".
+		//
+		// Asked from the height of a standing muzzle first. EyeHeight is 60 on the shooters, which is
+		// the knee: from there no step out beside a window could see over its sill (1.2 m), so a yard
+		// wall with three windows in it had no peek point anywhere but its door, and the garrison
+		// stood in the windows with no cover it was allowed to call cover (recorded 2026-10-11: 75
+		// searches of 79 ended "no valid peek point"). The knee is still asked second, for a gap
+		// that is open only low down.
 		FCollisionQueryParams SeeTargetParams = Params;
 		SeeTargetParams.AddIgnoredActor(Target);
-		if (!HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, EyeHeight), TargetChest, SeeTargetParams))
+		float StandChest = 0.0f;
+		float StandHead = 0.0f;
+		float StandSide = 0.0f;
+		GetBodySampleHeights(/*bCrouched*/ false, StandChest, StandHead, StandSide);
+		if (!HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, StandHead * 0.8f), TargetChest, SeeTargetParams)
+			&& !HasLineOfSight(Projected.Location + FVector(0.0f, 0.0f, EyeHeight), TargetChest, SeeTargetParams))
 		{
 			continue;
 		}

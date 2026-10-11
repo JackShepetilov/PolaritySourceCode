@@ -64,6 +64,8 @@ struct FUpgradeOfferCard
 /** Broadcast when the shared health-pickup pool count changes (used by HealthBlast, ChargedPunch, future upgrades) */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStoredHealthPickupsChanged, int32, CurrentCount, int32, MaxCount);
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnUpgradeNotice, FName, Key, FText, Text, FGameplayTag, ColorTag, float, Duration);
+
 /**
  * Manages all active upgrades on the owning ShooterCharacter.
  * Handles granting, removing, querying, and persistence of upgrades.
@@ -143,6 +145,12 @@ public:
 	 *  draw by the pool entry weight. Exclude keeps an offer from showing one upgrade twice. Server. */
 	bool BuildUpgradeCard(const class UDispenserUpgradePool* Pool, EUpgradeRarity MaxRarity,
 		const TArray<const UUpgradeDefinition*>& Exclude, FUpgradeOfferCard& OutCard) const;
+
+	/** The card for ONE named upgrade, for the shop: its next level above what the player owns. An
+	 *  upgrade that would push another out of an exclusive slot is offered all the same, at its own
+	 *  next level (the shop sells a swap; only the reels asked for a higher level than the one held).
+	 *  False at the top level, or when a mutually exclusive upgrade is owned. Server. */
+	bool BuildCardFor(const class UDispenserUpgradePool* Pool, UUpgradeDefinition* Definition, FUpgradeOfferCard& OutCard) const;
 
 	/** Grant a taken card here and on the owning client. Server. @see AcquireUpgrade */
 	bool GrantOfferCard(const FUpgradeOfferCard& Card);
@@ -261,6 +269,18 @@ public:
 	/** Called by UMeleeAttackComponent on the authority when a quick melee swing lands on Target. */
 	void NotifyMeleeHitAuthority(AActor* Target);
 
+	/** Something an upgrade does has just started (or, with Duration 0, ended) and the player should
+	 *  be told. Key names the line so a repeat restarts it; Text is the upgrade's own wording. The
+	 *  HUD's notice slot listens. Local: raise it on the machine whose screen it is for. */
+	UPROPERTY(BlueprintAssignable, Category = "Upgrades")
+	FOnUpgradeNotice OnUpgradeNotice;
+
+	UFUNCTION(BlueprintCallable, Category = "Upgrades")
+	void RaiseNotice(FName Key, FText Text, FGameplayTag ColorTag, float Duration);
+
+	/** The hold attack of the first owned upgrade that has one. @see UUpgradeComponent::GetMeleeHoldAttack */
+	bool GetMeleeHoldAttack(struct FMeleeHoldAttack& Out) const;
+
 	/**
 	 * Called by AShooterWeapon when ADS / secondary action is pressed.
 	 * Returns true if an active upgrade handled the input and normal ADS should be blocked.
@@ -286,6 +306,9 @@ public:
 	/** Query all active upgrades for their combined knockback-distance multiplier on a melee target. */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")
 	float GetCombinedMeleeKnockbackDistanceMultiplier(AActor* Target) const;
+
+	/** The largest self-knockback any owned upgrade asks for on this hit. @see UUpgradeComponent::GetMeleeSelfKnockbackScale */
+	float GetMeleeSelfKnockbackScale(AActor* Target) const;
 
 	/** Query all active upgrades for their combined reload speed multiplier. */
 	UFUNCTION(BlueprintPure, Category = "Upgrades")

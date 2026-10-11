@@ -20,6 +20,7 @@
 #include "InputMappingContext.h"
 #include "TimerManager.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/ShooterPlayerController.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
 #include "DispenserSlotMachineComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
@@ -234,11 +235,17 @@ void UBuilderComponent::ToggleFeedMenu()
 		CloseFeedMenu();
 		return;
 	}
+	const AShooterCharacter* const Character = GetCharacter();
+	AShooterPlayerController* const ShopHost = Character ? Cast<AShooterPlayerController>(Character->GetController()) : nullptr;
+	if (ShopHost && ShopHost->IsShopScreenOpen())
+	{
+		ShopHost->CloseShopScreen();
+		return;
+	}
 	if (Mode != EBuilderMode::Idle)
 	{
 		return;
 	}
-	const AShooterCharacter* const Character = GetCharacter();
 	ATurretBuildable* const Turret = FindTurretUnderAim();
 	if (!Turret)
 	{
@@ -262,6 +269,13 @@ void UBuilderComponent::ToggleFeedMenu()
 					Dist / 100.0f, Reach / 100.0f));
 				UE_LOG(LogTemp, Log, TEXT("[DISPENSER_DEBUG] feed: %s is %.0f cm away, reach is %.0f"),
 					*Dispenser->GetName(), Dist, Reach);
+				return;
+			}
+
+			// A dispenser that sells: the shop screen, with the guns to sell on it. The menu of guns
+			// below is what a slot machine dispenser still shows, and the fallback with no screen set.
+			if (Dispenser->bFeedBuysShopCredit && ShopHost && ShopHost->OpenShopScreen(Dispenser))
+			{
 				return;
 			}
 

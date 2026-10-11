@@ -209,10 +209,48 @@ def step_tank():
     hb["_les"]().save_current_level()
 
 
+TAG_UPGRADES = "DamagePlaygroundUpgrades"
+POOL = "/Game/Variant_Shooter/Blueprints/Upgrades/DA_DispenserUpgradePool"
+UPGRADE_X, UPGRADE_ROW_X, UPGRADE_STEP_Y = -600.0, 300.0, 220.0
+
+
+def step_upgrades():
+    """Все улучшения из пула раздатчика лежат пикапами за спиной игрока: ряд на слот пула. Пикап тот
+    же, что раздатчик показывает в ячейке (UpgradePickupClass пула), берётся клавишей притягивания.
+    Взятый пикап пропадает до перезапуска PIE; снять улучшение: polarity.upgrade.remove <тег>."""
+    hb["guard"]()
+    hb["_clear"](TAG_UPGRADES)
+    eas = hb["_eas"]()
+    pool = unreal.load_asset(POOL)
+    if pool is None:
+        raise RuntimeError("нет {}".format(POOL))
+    cls = pool.get_editor_property("upgrade_pickup_class") or unreal.UpgradePickup
+    row = -1
+    for slot in pool.get_editor_property("slots"):
+        defs = [e.get_editor_property("upgrade") for e in slot.get_editor_property("upgrades")]
+        defs = [d for d in defs if d]
+        if not defs:
+            continue
+        row += 1
+        x = UPGRADE_X - row * UPGRADE_ROW_X
+        y0 = -0.5 * UPGRADE_STEP_Y * (len(defs) - 1)
+        for i, d in enumerate(defs):
+            y = y0 + i * UPGRADE_STEP_Y
+            short = d.get_name().replace("DA_UpgradeDefinition_", "").replace("DA_Upgrade_", "").replace("DA_UD_", "").replace("DA_", "")
+            act = eas.spawn_actor_from_class(cls, unreal.Vector(x, y, 110.0), unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0))
+            hb["_tag"](act, TAG_UPGRADES, "DP_Upgrade_{}".format(short), "DamagePlayground/Upgrades")
+            act.set_editor_property("upgrade_definition", d)
+            hb["text"]("Label_Upgrade_{}".format(short), x, y, 230.0, short, size=22.0, yaw=0.0,
+                       folder="DamagePlayground/Labels", tag=TAG_UPGRADES)
+            log("ADDED: upgrade {} row {} at y={:.0f}".format(short, row, y))
+    hb["_les"]().save_current_level()
+
+
 def main():
     step_level()
     step_light()
     step_room()
     step_game()
     step_tank()
+    step_upgrades()
     log("DONE: {}".format(LEVEL))

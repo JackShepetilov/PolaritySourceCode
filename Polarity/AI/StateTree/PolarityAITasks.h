@@ -941,6 +941,71 @@ struct POLARITY_API FSTCondition_ShooterShieldUp : public FStateTreeConditionCom
 };
 
 // ============================================================================
+// Which fight - the Push/Peek gate without the shield [author, 2026-10-10].
+//
+// The shield no longer chooses between the two fights. Cover is home: an armed enemy with a target
+// plays ShooterPeek. It leaves cover for the open fight (ShooterPush) only when the squad's
+// coordinator says its target is hurt enough to close on (AAICombatCoordinator::WantsRush), and it
+// comes back when that is over. The cornered charge (Last Stand) is left once it has run a while and
+// nobody is on top of the NPC any more.
+//
+// Three structs and not one with switches, for the reason the shield pair above gives: a condition
+// has no invert, and a tree reads better with the intent spelled out.
+// ============================================================================
+
+/** True while this NPC should leave cover and close on its target. An ENTER condition on
+ *  Root/Armed States/Push (beside Class Can Push) and the Peek -> Push transition. */
+USTRUCT(DisplayName = "Wants Open Fight", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ShooterWantsOpenFight : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+/** The exact opposite of Wants Open Fight: the Push -> Peek transition. */
+USTRUCT(DisplayName = "Wants Cover", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ShooterWantsCover : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+/** The Last Stand -> Peek transition. @see AShooterNPC::CanRetakeCover */
+USTRUCT(DisplayName = "Can Retake Cover", Category = "Polarity|AI|Shooter")
+struct POLARITY_API FSTCondition_ShooterCanRetakeCover : public FStateTreeConditionCommonBase
+{
+	GENERATED_BODY()
+
+	using FInstanceDataType = FSTCondition_ShooterShield_Data;
+	virtual const UStruct* GetInstanceDataType() const override { return FInstanceDataType::StaticStruct(); }
+
+	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+#if WITH_EDITOR
+	virtual FText GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+		const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const override;
+#endif
+};
+
+// ============================================================================
 // ShooterPeek - what an enemy does once its shield is gone.
 //
 // The mirror of ShooterPush. Push is how a SHIELDED enemy closes; this is how a broken one trades.
@@ -1010,6 +1075,53 @@ struct FSTTask_ShooterPeek_Data
 	 *  At the defaults this is three to four legs. */
 	UPROPERTY(EditAnywhere, Category = "Rhythm", meta = (ClampMin = "0.1"))
 	float PeekDuration = 2.0f;
+
+	// ---- Down for a reason [author, 2026-10-11] ----
+	//
+	// A soldier out from behind its cover stays out and shoots until it has a reason to get down:
+	// a suppressing round came past (UAIAccuracyComponent::IsSuppressed), it has to reload, or it
+	// was hit for DuckDamageThreshold inside AShooterNPC::RecentDamageWindow. The two durations
+	// above are the old clock (out for PeekDuration, down for HideDuration); they are used only
+	// with polarity.ai.duckbyreason 0. Recorded on the clock: a soldier was out about 0.7 s of
+	// every 3 with nobody shooting at it, and a player standing in the open lived 47 s.
+
+	/** Damage inside the window that sends it down. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "1.0"))
+	float DuckDamageThreshold = 35.0f;
+
+	/** How long it stays down after being hit (s). */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float DuckSecondsOnDamage = 2.5f;
+
+	/** How long it stays down after a suppressing round, counted from the last one (s). */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float DuckSecondsOnSuppression = 3.0f;
+
+	/** The least it stays behind a corner it has just reached, with no reason to stay longer (s). */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float MinHideSeconds = 0.4f;
+
+	/** For how long at a time it stands out firing at the place the target went down behind (s)
+	 *  [author, 2026-10-11: enemies are to be shooting most of the time, and this is what suppresses
+	 *  a player: he comes up into rounds already arriving]. Then it gets down for WatchRestSeconds
+	 *  and comes up again. It does not stand out silent: recorded the same day, a quarter of all the
+	 *  player's hits landed on a soldier that was standing and watching, half of the time not firing. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float WatchFireSeconds = 6.0f;
+
+	/** Down behind cover between two stretches of watching (s). */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float WatchRestSeconds = 1.5f;
+
+	/** A soldier that holds a ground and has had no line to anybody for this long takes the whole
+	 *  place instead (s). @see AShooterNPC::SetWideHoldArea */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "s"))
+	float WidenHoldAfterBlindSeconds = 8.0f;
+
+	/** After being sent down it comes up somewhere else: the nearest other spot of cover at least
+	 *  this far along (cm). 0: it comes up where it went down. */
+	UPROPERTY(EditAnywhere, Category = "Rhythm|Reason", meta = (ClampMin = "0.0", Units = "cm"))
+	float ShiftAfterDuckDistance = 120.0f;
 
 	// ---- Strafe while firing ----
 
@@ -1099,7 +1211,118 @@ struct FSTTask_ShooterPeek_Data
 	UPROPERTY(EditAnywhere, Category = "Squad", meta = (ClampMin = "0.0"))
 	float SuppressionStrafeLeash = 250.0f;
 
+	// ---- Going where it can shoot from ----
+	//
+	// The other reason to move. Everything above moves the NPC because its corner stopped hiding it;
+	// this moves it because its corner stopped being an ANGLE: it stepped out and the target was not
+	// there. What it does then is its squad's task (AShooterNPC::GetCombatTask): Hold goes back behind
+	// the corner and keeps watching it, Advance asks the coordinator for a bound toward the target or
+	// round the side, and goes when it gets one.
+	//
+	// How it travels is one rule: a run lowers the gun, so it is worth it only where the gun is no
+	// use anyway. Unseen, it runs. Seen, a short way is walked with the gun up, and a long way is run
+	// only when a mate is firing; otherwise that is walked with the gun up too. A run ends in a
+	// slide into the corner, and is broken off when the target turns up close in front.
+
+	/** A bound longer than this is run (sprint, weapon down, covered by the squad); a shorter one
+	 *  is walked with the weapon up. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float BoundSprintDistance = 350.0f;
+
+	/** Rank a candidate corner pays per metre from where the bound wants to go. One unit of rank is
+	 *  one hostile seeing the corner. @see UCoverFinderComponent::SetSearchBias */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float BoundBiasPerMetre = 0.15f;
+
+	/** A bound moves at least this far, or it is not one. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float BoundMinMove = 300.0f;
+
+	/** The last stretch of a run that is slid (cm from the corner). Zero: no slide. The slide still
+	 *  needs the speed the movement settings ask of one, so a run too slow simply arrives running. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float SlideEntryDistance = 500.0f;
+
+	/** The speed the slide into the corner is taken at, as a share of the speed of the run. The
+	 *  slide brakes to stop on the corner, so its length is SlideEntryDistance and its time is about
+	 *  twice that over the speed: 1 is the run's own speed, and was over in a third of a second
+	 *  (measured 2026-10-11, 29 slides); lower is slower and plain to see [author, 2026-10-11]. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.3", ClampMax = "1.5"))
+	float SlideEntrySpeedScale = 0.65f;
+
+	/** How fast the slide turns toward the corner (degrees a second). */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float SlideEntrySteerRate = 120.0f;
+
+	// ---- Magazine ----
+
+	/** Behind cover and unseen, a magazine below this fraction is refilled without waiting for it to
+	 *  run out. */
+	UPROPERTY(EditAnywhere, Category = "Magazine", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TacticalReloadBelow = 0.6f;
+
+	/** Out at the peek point, a magazine below this fraction sends the NPC back behind the corner,
+	 *  so it runs dry there and not in view. */
+	UPROPERTY(EditAnywhere, Category = "Magazine", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LowMagazineRetreatBelow = 0.2f;
+
+	/** A corner is kept at least this long, unless the enemy walks round it. The recheck that throws
+	 *  corners away ran every second from the first peek on, and a soldier covered 150 to 400 metres
+	 *  in a three minute fight changing them. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0", Units = "s"))
+	float MinCornerHold = 4.0f;
+
+	/** How close to the enemy the going half of an assault may take a corner (cm). */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float AssaultMinTargetDistance = 350.0f;
+
+	/** A target this close, in front and in view, breaks a run off: gun up, walk the rest. */
+	UPROPERTY(EditAnywhere, Category = "Bound", meta = (ClampMin = "0.0"))
+	float RunBreakDistance = 800.0f;
+
 	// ---- Runtime ----
+
+	/** Somebody other than Target whom this NPC can shoot while Target is out of sight, refreshed a
+	 *  few times a second. The one who came round the back. */
+	TWeakObjectPtr<AActor> OpportunityTarget;
+	float SinceOpportunityCheck = 0.0f;
+
+	/** Who the trigger is down on, to tell a change of target from more of the same. */
+	TWeakObjectPtr<AActor> ShootingAt;
+
+	/** No corner and no line to the target: walking at it until there is one. */
+	bool bClosingToSee = false;
+
+	/** Seconds in a row with no corner and no line to the target. */
+	float OpenBlindSeconds = 0.0f;
+
+	/** Peeks in a row from this corner that found nobody to shoot at. Two, and the corner is no good. */
+	int32 BlindPeeks = 0;
+
+	/** Corners given up one after another for seeing nobody. Zeroed by a line to the target. */
+	int32 BlindCorners = 0;
+
+	/** Rechecks in a row that found the hide end in the enemy's view. Two, and it has been walked round. */
+	int32 FlankedChecks = 0;
+
+	/** World time until which it stays down, set when it was SENT down. 0: nothing sent it. */
+	float DuckUntil = 0.0f;
+
+	/** Sent down, and has not looked for the spot to come up at yet. */
+	bool bShiftAfterDuck = false;
+
+	/** How the walk to the corner in hand is made (run or walk) has been decided. Once per walk. */
+	bool bRunDecided = false;
+
+	/** The slide into the corner at the end of this run has been launched. */
+	bool bEntrySlideStarted = false;
+
+	/** A bound has been granted and its search is out, or the NPC is on its way to the corner it found. */
+	bool bBoundPending = false;
+	bool bBoundFlank = false;
+
+	/** The corner the bound was asked from, to tell "found a new one" from "kept the old one". */
+	FVector BoundFromHide = FVector::ZeroVector;
 
 	EShooterPeekPhase Phase = EShooterPeekPhase::Seeking;
 
@@ -1166,6 +1389,15 @@ struct FSTTask_ShooterPeek_Data
 	 *  zero until the first sighting, which is why bHasLastSeen exists separately. */
 	FVector LastSeenTargetLocation = FVector::ZeroVector;
 	bool bHasLastSeen = false;
+
+	/** World time of the last tick the target was in view. */
+	float LastSeenTime = -1000.0f;
+
+	/** This tick it is out at the peek point with the gun on the place the target went down behind. */
+	bool bWatching = false;
+
+	/** Where it fires while it watches: just over the place the side last knew him at. */
+	FVector WatchPlace = FVector::ZeroVector;
 
 	/** Who this NPC is suppressing for a teammate's run, or null. Not the same thing as Target: the
 	 *  whole point is that it shoots the player who opened SOMEBODY ELSE'S corner, which is usually

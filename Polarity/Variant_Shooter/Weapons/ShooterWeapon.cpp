@@ -10,6 +10,9 @@
 #include "AudioDevice.h"
 #include "AudioThread.h"
 #include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/Bench/FightRecorder.h"
+#include "Variant_Shooter/ShootableButtonComponent.h"
+#include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
 #include "Engine/DataTable.h"
 #include "Sound/SoundBase.h"
 #include "UObject/FieldIterator.h"
@@ -1847,7 +1850,31 @@ float AShooterWeapon::GetShotDamageMultiplierAgainst(AActor* Target) const
 		}
 	}
 
-	return HeatMult * ZFactorMult * TagMult * UpgradeMult;
+	// @see AIDamageScale
+	const float EnemyHandsMult = (PawnOwner && !PawnOwner->IsPlayerControlled() && CoopPlayers::IsPlayer(Target))
+		? AIDamageScale : 1.0f;
+
+	return HeatMult * ZFactorMult * TagMult * UpgradeMult * EnemyHandsMult;
+}
+
+void AShooterWeapon::Multicast_AIAimHold_Implementation(bool bHolding, float Seconds)
+{
+	UWorld* const World = GetWorld();
+	if (World)
+	{
+		World->GetTimerManager().ClearTimer(AIAimHoldTimer);
+	}
+	bAIAimHolding = bHolding;
+	OnAIAimHold(bHolding, bHolding ? Seconds : 0.0f);
+
+	if (bHolding && World)
+	{
+		World->GetTimerManager().SetTimer(AIAimHoldTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			bAIAimHolding = false;
+			OnAIAimHold(false, 0.0f);
+		}), Seconds + 0.5f, false);
+	}
 }
 
 float AShooterWeapon::GetMaxReportedSingleHitDamage() const
@@ -4021,6 +4048,12 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 
 	if (HasAuthority())
 	{
+		// An enemy's round going past a player suppresses that player. @see UPlayerSuppressionComponent
+		if (PawnOwner && !PawnOwner->IsPlayerControlled())
+		{
+			UPlayerSuppressionComponent::NotifyHostileShot(PawnOwner, ProjectileTransform.GetLocation(),
+				ProjectileTransform.GetRotation().GetForwardVector());
+		}
 		SpawnProjectileAtTransform(ProjectileTransform, ChargeMultiplier, /*bCosmeticOnly*/ false);
 	}
 	else
@@ -4562,6 +4595,7 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 	// exceeding the 5deg cone half-angle, causing valid hits to be rejected.
 	if (PawnOwner && !PawnOwner->IsPlayerControlled())
 	{
+		UPlayerSuppressionComponent::NotifyHostileShot(PawnOwner, Start, Direction);
 		PerformSimpleHitscan(Start, Direction, 1.0f);
 	}
 	else
@@ -4574,6 +4608,12 @@ void AShooterWeapon::FireHitscan(const FVector& TargetLocation)
 
 void AShooterWeapon::ConsumeRoundAfterShot()
 {
+	// A player's round, for the record of the fight. An NPC's is noted by the NPC, which knows what
+	// it was fired at. @see UFightRecorderSubsystem
+	if (PawnOwner && PawnOwner->IsPlayerControlled())
+	{
+		UFightRecorderSubsystem::NoteShot(PawnOwner, nullptr, false);
+	}
 
 	//A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A�
 	WeaponOwner->PlayFiringMontage(FiringMontage);
@@ -4626,6 +4666,17 @@ void AShooterWeapon::ConsumeRoundAfterShot()
 			if (bAutoReloadWhenEmpty)
 			{
 				StartReload();
+			}
+
+			// The last round the player had for this gun: it is thrown away and gone [author,
+			// 2026-10-07]. Decided here, on the machine that pulled the trigger, because only it
+			// counts the magazine exactly (the server's copy of a client's magazine misses shots).
+			if (HasFiniteReserve() && GetPooledAmmo() <= 0)
+			{
+				if (AShooterCharacter* const Shooter = Cast<AShooterCharacter>(PawnOwner))
+				{
+					Shooter->NotifyWeaponRanDry(this);
+				}
 			}
 		}
 		else
@@ -5282,6 +5333,12 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 	if (!bHitscanDamageOwner && !bAllowOwnerDamage && HitActor == GetOwner())
 	{
 		return 0.0f;
+	}
+
+	// A shootable button gives the round back. @see RefundRoundForButton
+	if (HitActor->FindComponentByClass<UShootableButtonComponent>())
+	{
+		RefundRoundForButton();
 	}
 
 	// Read before anything touches the target: the shield's state at the moment the bullet arrived
@@ -6660,6 +6717,46 @@ void AShooterWeapon::SetBulletCount(int32 NewCount)
 	{
 		Client_SyncAmmoState(CurrentBullets, bHasLimitedAmmo);
 	}
+}
+
+void AShooterWeapon::RefundRoundForButton()
+{
+	UWorld* const World = GetWorld();
+	if (!World || !PawnOwner || !CoopPlayers::IsPlayer(PawnOwner))
+	{
+		return;
+	}
+
+	// One round per shot: eight pellets on the button are still one shell.
+	const float Now = World->GetTimeSeconds();
+	if (Now - LastButtonRefundTime < 0.5f * GetCurrentRefireRate())
+	{
+		return;
+	}
+	LastButtonRefundTime = Now;
+
+	// The magazine is counted by the machine that pulls the trigger. A trace lands on that machine;
+	// a round in flight lands on the server, which has to tell the owner.
+	if (PawnOwner->IsLocallyControlled())
+	{
+		World->GetTimerManager().SetTimerForNextTick(this, &AShooterWeapon::RefundRoundNow);
+	}
+	else if (HasAuthority())
+	{
+		Client_RefundRound();
+	}
+}
+
+void AShooterWeapon::Client_RefundRound_Implementation()
+{
+	RefundRoundNow();
+}
+
+void AShooterWeapon::RefundRoundNow()
+{
+	CurrentBullets = FMath::Min(MagazineSize, CurrentBullets + 1);
+	RefreshOwnerAmmoHUD();
+	UE_LOG(LogTemp, Verbose, TEXT("[BUTTON_DEBUG] %s: round given back, %d in the magazine"), *GetName(), CurrentBullets);
 }
 
 void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool bInHasLimitedAmmo)

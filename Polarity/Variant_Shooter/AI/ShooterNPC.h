@@ -51,6 +51,7 @@ DECLARE_MULTICAST_DELEGATE_ThreeParams(FOnAnyNPCDeath, AShooterNPC* /*DeadNPC*/,
 class AShooterWeapon;
 class UAnimMontage;
 class UAIAccuracyComponent;
+enum class ESquadTask : uint8;
 class UMeleeRetreatComponent;
 class AAICombatCoordinator;
 class USoundBase;
@@ -804,6 +805,14 @@ protected:
 
 	/** If true, NPC is in burst cooldown and cannot shoot */
 	bool bInBurstCooldown = false;
+
+	/** World time the aim hold of the gun in its hands is over (AShooterWeapon::AIAimHoldSeconds);
+	 *  negative: no hold running. */
+	float AimHoldUntil = -1.0f;
+
+	/** World time TryStartShooting last asked about the hold. A hold nobody has asked about for a
+	 *  while was abandoned (the soldier went down), and the next one starts over. */
+	float AimHoldLastAsked = -1000.0f;
 
 	// ==================== Reload State ====================
 
@@ -1584,7 +1593,7 @@ protected:
 	/** Empty magazine handling: ends the burst, gives up the attack slot and schedules the reload.
 	 *  Does nothing for a weapon with no magazine to fill, or one that still has rounds in it.
 	 *  Returns true when a reload was actually started. */
-	bool TryBeginReload();
+	bool TryBeginReload(bool bTactical = false);
 
 	/** Hands the reload to the weapon and starts the resume timer. */
 	void BeginReload();
@@ -1801,6 +1810,71 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsCurrentlyShooting() const { return bIsShooting && !bIsDead; }
 
+	/** What this NPC is doing in the fight, in a word, for the log ([TACTIC], written when it
+	 *  changes) and for the bench label over its head (polarity.ai.bench 1). The place a spoken
+	 *  callout will hang off later; today it is text only and stays on the server. */
+	void SayTactic(FName Note);
+
+	FName GetTacticNote() const { return TacticNote; }
+
+	/** What this NPC's squad is out to do, as its own fight reads it: Hold keeps its corner when the
+	 *  target drops out of sight, Advance goes to get the angle back. Written by whoever owns the
+	 *  squad (USquad::SetTask, a bench console); an NPC nobody told anything advances. */
+	void SetCombatTask(ESquadTask NewTask);
+
+	ESquadTask GetCombatTask() const { return CombatTask; }
+
+	/** The ground a soldier told to hold must not leave: the yard of an outpost. Its corners are
+	 *  looked for inside it and nowhere else, and it does not step out of it for any reason. Recorded
+	 *  2026-10-11 on the first outpost: with no such ground the garrison ran out into the field (a
+	 *  slide into cover fourteen times in one fight, 25 to 83 m walked each) and was shot one at a
+	 *  time in the open. Radius 0: no ground, the soldier goes where the fight takes it. */
+	void SetHoldArea(const FVector& Centre, float Radius);
+
+	bool HasHoldArea() const { return HoldRadius > 0.0f; }
+
+	/** The whole of the place its ground is a part of: the outpost, where the ground is one yard of
+	 *  it. A soldier that has had no line to anybody from its own ground goes over to this one
+	 *  (WidenHoldArea) and never back. Recorded 2026-10-11: with the attack on the south side the two
+	 *  behind the house walked up and down their own yard for the whole fight, 60 to 160 soldier
+	 *  seconds a fight, while the rest of the garrison was shot. */
+	void SetWideHoldArea(const FVector& Centre, float Radius);
+
+	bool CanWidenHoldArea() const { return WideHoldRadius > HoldRadius && HoldRadius > 0.0f; }
+
+	void WidenHoldArea();
+
+	/** True for any point when there is no ground to hold. */
+	bool IsInsideHoldArea(const FVector& Point) const;
+
+	/** The point of the held ground nearest to Toward: where one that sees nobody from where it
+	 *  stands goes to look. SideOffset shifts it along the edge (cm, signed). */
+	FVector GetHoldPointToward(const FVector& Toward, float SideOffset = 0.0f) const;
+
+	/** While on, a burst does not end on BurstShotCount: the trigger stays down until the magazine is
+	 *  empty. The close fight (FSTTask_ShooterPush, cornered) switches it on and off. */
+	void SetDumpMagazine(bool bEnabled) { bDumpMagazine = bEnabled; }
+
+	/** Reload a magazine that is not empty yet: there is no threat in view and no reason to wait for
+	 *  the last round. False when there is nothing to top up or a reload is already running. */
+	bool RequestTacticalReload() { return TryBeginReload(/*bTactical*/ true); }
+
+	/** Rounds left as a fraction of the magazine. 1 for a weapon that never reloads. */
+	float GetMagazineFraction() const;
+
+	/** The cornered charge has begun (FSTTask_ShooterPush with bNeverWithdraw). */
+	void NotifyLastStandBegan();
+
+	/** The cornered charge has run LastStandMinSeconds and nobody hostile stands within
+	 *  LastStandRetakeCoverDistance: there is room to look for a corner again. */
+	bool CanRetakeCover() const;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat", meta = (ClampMin = "0.0", Units = "s"))
+	float LastStandMinSeconds = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Combat", meta = (ClampMin = "0.0"))
+	float LastStandRetakeCoverDistance = 900.0f;
+
 	/** Returns true if this NPC is in burst cooldown (burst completed, waiting to fire again) */
 	UFUNCTION(BlueprintPure, Category = "Status")
 	bool IsInBurstCooldown() const { return bInBurstCooldown; }
@@ -1894,4 +1968,42 @@ public:
 private:
 	/** Unique ID for checkpoint respawn tracking */
 	FGuid CheckpointSpawnID;
+
+	/** @see SayTactic */
+	FName TacticNote;
+
+	/** World time the cornered charge began, below zero when it never has. */
+	float LastStandStartTime = -1.0f;
+
+	/** @see SetDumpMagazine */
+	bool bDumpMagazine = false;
+
+	/** @see SetCombatTask. Set in the constructor: the enum is only forward declared here. */
+	ESquadTask CombatTask;
+
+	/** @see SetHoldArea */
+	FVector HoldCentre = FVector::ZeroVector;
+	float HoldRadius = 0.0f;
+
+	/** @see SetWideHoldArea */
+	FVector WideHoldCentre = FVector::ZeroVector;
+	float WideHoldRadius = 0.0f;
+
+	/** @see GetRecentDamage */
+	float RecentDamageStart = -1000.0f;
+	float RecentDamageSum = 0.0f;
+
+public:
+
+	/** Damage taken inside the running window of RecentDamageWindow seconds. One of the three reasons
+	 *  a soldier gets down behind its cover [author, 2026-10-11]: being hit hard enough, soon enough. */
+	float GetRecentDamage() const;
+
+	/** The reason has been acted on: the same hits do not send it down twice. */
+	void ClearRecentDamage() { RecentDamageSum = 0.0f; }
+
+	/** The window GetRecentDamage counts over (s). Five, not two [author, 2026-10-11]: a round of the
+	 *  player's does 30, the threshold is 35, and with a window of two seconds single hits a few
+	 *  seconds apart never added up: soldiers took 5 to 15 hits over a fight and never got down. */
+	static constexpr float RecentDamageWindow = 5.0f;
 };

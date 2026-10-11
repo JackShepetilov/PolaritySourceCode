@@ -4,6 +4,7 @@
 #include "ApexMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "MovementSettings.h"
+#include "WeaponMovementProfile.h"
 #include "PolarityCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Abilities/NitroGate.h"
@@ -151,6 +152,16 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (PawnOwner && PawnOwner->IsLocallyControlled())
 	{
 		bWantsToSprint = bSprintKeyHeld && !IsSprintSuppressed();
+	}
+
+	// The gun the move is made with, on the same terms: the controlling machine decides, the server
+	// hears it through the move. A machine that only watches reads the replicated gun, which is all
+	// it has and all it needs (it simulates nothing, the number only feeds its animation).
+	if (PawnOwner && (PawnOwner->IsLocallyControlled() || PawnOwner->GetLocalRole() == ROLE_SimulatedProxy))
+	{
+		const APolarityCharacter* const Holder = Cast<APolarityCharacter>(PawnOwner);
+		const int32 Slot = Holder ? Holder->GetMovementWeaponSlot() : INDEX_NONE;
+		MoveWeaponSlot = (Slot >= 0 && Slot < 255) ? static_cast<uint8>(Slot) : 255;
 	}
 
 	// Slide cooldowns and slide fatigue used to be counted down here. They moved into
@@ -304,6 +315,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 	}
 
 	float BaseSpeed;
+	const UWeaponMovementProfile* const Gun = GetMoveWeaponProfile();
 
 	if (bIsGroundDashing)
 	{
@@ -315,11 +327,11 @@ float UApexMovementComponent::GetMaxSpeed() const
 	}
 	else if (IsCrouching())
 	{
-		BaseSpeed = MovementSettings->CrouchSpeed;
+		BaseSpeed = MovementSettings->CrouchSpeed * (Gun ? Gun->WalkSpeedScale : 1.0f);
 	}
 	else if (IsSprinting())
 	{
-		BaseSpeed = MovementSettings->SprintSpeed;
+		BaseSpeed = MovementSettings->SprintSpeed * (Gun ? Gun->SprintSpeedScale : 1.0f);
 	}
 	else
 	{
@@ -327,7 +339,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 		{
 		case MOVE_Walking:
 		case MOVE_NavWalking:
-			BaseSpeed = MovementSettings->WalkSpeed;
+			BaseSpeed = MovementSettings->WalkSpeed * (Gun ? Gun->WalkSpeedScale : 1.0f);
 			break;
 		case MOVE_Falling:
 			BaseSpeed = MovementSettings->SprintSpeed;
@@ -348,7 +360,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 		&& !bIsSliding && !bIsWallRunning && !bIsGroundDashing && !bIsAirDashing
 		&& (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
 	{
-		BaseSpeed = FMath::Min(BaseSpeed, MovementSettings->ADSSpeed);
+		BaseSpeed = FMath::Min(BaseSpeed, MovementSettings->ADSSpeed * (Gun ? Gun->ADSSpeedScale : 1.0f));
 	}
 
 	// The charged jump's wind-up. A multiplier and not a cap, unlike ADS above: the charge is a
@@ -544,7 +556,7 @@ void UApexMovementComponent::ProcessLanded(const FHitResult& Hit, float remainin
 		// in two ways that a player will notice: it needs SlideMinStartSpeed, and it needs the
 		// engine to have finished putting this character on the ground. Filter [NET_DEBUG] to see
 		// which one said no.
-		if (CanSlide())
+		if ((!MovementSettings || MovementSettings->bEnableSlideOnLand) && CanSlide())
 		{
 			StartSlide();
 		}
@@ -767,6 +779,27 @@ bool UApexMovementComponent::DoJump(bool bReplayingMoves, float DeltaTime)
 }
 
 // ==================== Input ====================
+
+bool UApexMovementComponent::IsSprinting() const
+{
+	if (!bWantsToSprint || bIsSliding || IsCrouching() || !IsMovingOnGround())
+	{
+		return false;
+	}
+
+	// Forward only, for players (an AI pawn is steered by requested velocity and has no push to read).
+	if (!MovementSettings || !MovementSettings->bSprintForwardOnly || !CharacterOwner || !CharacterOwner->IsPlayerControlled())
+	{
+		return true;
+	}
+
+	// Acceleration is the push: it rides the saved move, so the server and a replay answer the same.
+	// A copy that is only simulated here has none worth reading, and its velocity stands in.
+	const bool bSimulated = CharacterOwner->GetLocalRole() == ROLE_SimulatedProxy;
+	const FVector Push = (bSimulated ? Velocity : Acceleration).GetSafeNormal2D();
+	return !Push.IsNearlyZero()
+		&& FVector::DotProduct(Push, CharacterOwner->GetActorForwardVector().GetSafeNormal2D()) >= MovementSettings->SprintMinForwardDot;
+}
 
 void UApexMovementComponent::StartSprint()
 {
@@ -1007,6 +1040,7 @@ void FCharacterNetworkMoveData_Polarity::ClientFillNetworkMoveData(const FSavedM
 	// The engine only ever allocates our move type here (see FNetworkPredictionData_Client_Polarity).
 	const FSavedMove_Polarity& PolarityMove = static_cast<const FSavedMove_Polarity&>(ClientMove);
 	PolarityFlags         = PolarityMove.SavedPolarityFlags;
+	WeaponSlot            = PolarityMove.SavedWeaponSlot;
 	MeleeLungeTarget      = PolarityMove.SavedMeleeLungeTarget;
 	MeleeLungeTargetActor = PolarityMove.SavedMeleeLungeTargetActor.Get();
 	GrappleAnchor         = PolarityMove.SavedGrappleAnchor;
@@ -1022,6 +1056,9 @@ bool FCharacterNetworkMoveData_Polarity::Serialize(UCharacterMovementComponent& 
 	// Widening the flags from a byte to a word costs nothing while nothing is happening, and one
 	// extra byte only on the moves that actually carry a decision.
 	SerializeOptionalValue<uint32>(Ar.IsSaving(), Ar, PolarityFlags, 0);
+
+	// One bit with empty hands, a byte with a gun in them.
+	SerializeOptionalValue<uint8>(Ar.IsSaving(), Ar, WeaponSlot, 255);
 
 	// The lunge destination rides along only on the moves that have one, and the homing flag above is
 	// its presence bit — so it costs nothing at all until a swing is actually flying at somebody, and
@@ -1064,6 +1101,7 @@ void UApexMovementComponent::ServerMove_PerformMovement(const FCharacterNetworkM
 	const FCharacterNetworkMoveData_Polarity& PolarityData =
 		static_cast<const FCharacterNetworkMoveData_Polarity&>(MoveData);
 	PendingPolarityFlags          = PolarityData.PolarityFlags;
+	PendingWeaponSlot             = PolarityData.WeaponSlot;
 	PendingMeleeLungeTarget       = PolarityData.MeleeLungeTarget;
 	PendingMeleeLungeTargetActor  = Cast<AActor>(PolarityData.MeleeLungeTargetActor.Get());
 	PendingGrappleAnchor          = PolarityData.GrappleAnchor;
@@ -1094,6 +1132,9 @@ void UApexMovementComponent::MoveAutonomous(float ClientTimeStamp, float DeltaTi
 		// Same rule, same reason: a grapple that starts against last move's anchor swings the
 		// character around a post it is no longer attached to.
 		GrappleAnchor         = PendingGrappleAnchor;
+
+		// The gun goes in before the flags too: a slide that starts on this move reads its profile.
+		MoveWeaponSlot        = PendingWeaponSlot;
 
 		ApplyPolarityMoveFlags(PendingPolarityFlags);
 	}
@@ -1166,6 +1207,7 @@ void FSavedMove_Polarity::Clear()
 {
 	Super::Clear();
 	SavedPolarityFlags = 0;
+	SavedWeaponSlot = 255;
 	SavedMeleeLungeTarget = FVector::ZeroVector;
 	SavedMeleeLungeTargetActor = nullptr;
 	SavedMeleeLungeStartVelocity = FVector::ZeroVector;
@@ -1205,6 +1247,11 @@ bool FSavedMove_Polarity::CanCombineWith(const FSavedMovePtr& NewMove, ACharacte
 	{
 		return false;
 	}
+	// A different gun is a different speed.
+	if (NewPolarityMove && SavedWeaponSlot != NewPolarityMove->SavedWeaponSlot)
+	{
+		return false;
+	}
 	// The lunge destination moves with the enemy, so two lunging moves are only the same move if they
 	// were aimed at the same place. Merging them would send the server one flight to the newer target
 	// for a stretch the client flew in two directions.
@@ -1228,6 +1275,7 @@ void FSavedMove_Polarity::SetMoveFor(ACharacter* Character, float InDeltaTime, F
 	if (const UApexMovementComponent* Apex = Cast<UApexMovementComponent>(Character->GetCharacterMovement()))
 	{
 		SavedPolarityFlags = Apex->PackPolarityMoveFlags();
+		SavedWeaponSlot    = Apex->MoveWeaponSlot;
 		bSavedJumpHeld     = Apex->bJumpHeld ? 1 : 0;
 
 		// Only worth sending while the flight is actually homing; otherwise it stays zero and the
@@ -1287,6 +1335,7 @@ void FSavedMove_Polarity::PrepMoveFor(ACharacter* Character)
 		// The anchor and the timer go in before the flags, for the same reason the lunge's do:
 		// UpdateGrapple runs on the very move being replayed and reads both, and a replay that
 		// started from a fresh timer would end the swing at a different moment.
+		Apex->MoveWeaponSlot       = SavedWeaponSlot;
 		Apex->GrappleAnchor        = SavedGrappleAnchor;
 		Apex->GrappleElapsed       = SavedGrappleElapsed;
 		Apex->GrappleLowSpeedTime  = SavedGrappleLowSpeedTime;
@@ -1405,7 +1454,42 @@ bool UApexMovementComponent::CanSlide() const
 		return false;
 	}
 
-	return Velocity.Size2D() >= MovementSettings->SlideMinStartSpeed;
+	return Velocity.Size2D() >= GetSlideStartSpeed();
+}
+
+const UWeaponMovementProfile* UApexMovementComponent::GetMoveWeaponProfile() const
+{
+	if (MoveWeaponSlot == 255)
+	{
+		return nullptr;
+	}
+	const APolarityCharacter* const Holder = Cast<APolarityCharacter>(CharacterOwner);
+	return Holder ? Holder->GetWeaponMovementProfile(MoveWeaponSlot) : nullptr;
+}
+
+float UApexMovementComponent::GetSlideStartSpeed() const
+{
+	if (!MovementSettings)
+	{
+		return 400.0f;
+	}
+
+	float Gate = MovementSettings->SlideMinStartSpeed;
+
+	// A gun that sprints slower than the gate would never slide: the gate follows its sprint down.
+	if (MovementSettings->SlideStartSprintFraction > 0.0f)
+	{
+		const UWeaponMovementProfile* const Gun = GetMoveWeaponProfile();
+		const float Sprint = MovementSettings->SprintSpeed * (Gun ? Gun->SprintSpeedScale : 1.0f);
+		Gate = FMath::Min(Gate, Sprint * MovementSettings->SlideStartSprintFraction);
+	}
+
+	// Down a hill the slide is gravity's, and it starts from a walk.
+	if (GetSlopeAngle() < -MovementSettings->SlideFreeDownhillAngle)
+	{
+		Gate = FMath::Min(Gate, MovementSettings->SlideMinSpeed);
+	}
+	return Gate;
 }
 
 void UApexMovementComponent::StartSlide()
@@ -1433,7 +1517,7 @@ void UApexMovementComponent::StartSlide()
 		const float CurrentSpeed = Velocity.Size2D();
 		const float MinBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMinSpeedBurst : MovementSettings->SlideMinSpeedBurst;
 		const float MaxBoost = bExternalSlideSpeedBurstOverride ? ExternalSlideMaxSpeedBurst : MovementSettings->SlideMaxSpeedBurst;
-		const float MinStartSpeed = MovementSettings->SlideMinStartSpeed;
+		const float MinStartSpeed = GetSlideStartSpeed();
 
 		float SpeedRatio = FMath::Clamp((CurrentSpeed - MinStartSpeed) / 500.0f, 0.0f, 1.0f);
 		float BoostAmount = FMath::Lerp(MaxBoost, MinBoost, SpeedRatio);
@@ -1443,6 +1527,12 @@ void UApexMovementComponent::StartSlide()
 		// SlideboostCooldown seconds forever: this entry was the one that accelerated without limit.
 		const float FatigueScale = ConsumeSlideBoostFatigue();
 		BoostAmount *= FatigueScale;
+
+		// The gun in the hands: a heavy one adds little or nothing to the run that started the slide.
+		if (const UWeaponMovementProfile* const Gun = GetMoveWeaponProfile())
+		{
+			BoostAmount *= Gun->SlideBoostScale;
+		}
 
 		Velocity += SlideDirection * BoostAmount;
 		SlideBoostCooldownRemaining = MovementSettings->SlideboostCooldown;
@@ -1837,8 +1927,7 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		const float Remaining = ToPoint.Size();
 		const float Speed2D = Velocity.Size2D();
 
-		constexpr float ArriveTolerance = 40.0f;
-		if (Remaining <= ArriveTolerance)
+		if (Remaining <= SlideToPointArriveTolerance)
 		{
 			UE_LOG(LogSlide, Log, TEXT("[AI_DEBUG] slide arrived: remaining=%.0f speed=%.0f"), Remaining, Speed2D);
 			EndSlide();
@@ -1882,7 +1971,6 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		// SlideDuration is the second net, for the case where the spot keeps retreating fast enough
 		// to keep the speed above the floor: a charge is an event, not a state, so it gets a
 		// ceiling in seconds regardless.
-		constexpr float MaxSlideToPointDuration = 2.5f;
 		if (NewSpeed < SlideMinSpeed || SlideDuration > MaxSlideToPointDuration)
 		{
 			UE_LOG(LogSlide, Log, TEXT("[AI_DEBUG] slide gave up: remaining=%.0f speed=%.0f duration=%.2f"),
@@ -1968,6 +2056,12 @@ void UApexMovementComponent::UpdateSlide(float DeltaTime)
 		if (bSlideFireStreak)
 		{
 			DecelAmount *= GetSlideFireFrictionScale();
+		}
+
+		// And the gun: how far a slide carries is its number. Flat terms only, like the line above.
+		if (const UWeaponMovementProfile* const Gun = GetMoveWeaponProfile())
+		{
+			DecelAmount *= Gun->SlideFrictionScale;
 		}
 
 		if (SlopeAngle > 3.0f)
@@ -4322,7 +4416,8 @@ void UApexMovementComponent::LaunchChargedJump(const FJumpSlotParams& Params)
 bool UApexMovementComponent::CanGroundDash() const
 {
 	if (!MovementSettings || !CharacterOwner || !IsMovingOnGround() || bIsGroundDashing
-		|| bIsSliding || bIsMantling || bIsWallRunning || IsCrouching() || bRunLaunchActive)
+		|| bIsSliding || bIsMantling || bIsWallRunning || IsCrouching() || bRunLaunchActive
+		|| !MovementSettings->bEnableGroundDash)
 	{
 		return false;
 	}

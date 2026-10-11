@@ -213,6 +213,50 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (ClampMin = "1.0"))
 	float HeadshotMultiplier = 2.0f;
 
+public:
+	// ==================== In an enemy's hands ====================
+	//
+	// How an enemy fires THIS gun. On the gun and not on the enemy, because the enemy rolls its gun
+	// at spawn (AShooterNPC::WeaponOptions) and its own burst numbers know nothing about which one it
+	// got [author, 2026-10-12]. Recorded the day before: a soldier with the revolver pulled the
+	// trigger every 0.2 s for 45 to 58 a hit, and one with the bolt rifle hit for 80 to 92 from past
+	// 45 m with nothing to say it was about to. Nothing here touches the gun in a player's hands.
+
+	/** Rounds in one pull of the trigger by an enemy. 0: the enemy's own AShooterNPC::BurstShotCount. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0"))
+	int32 AIBurstShotCount = 0;
+
+	/** Seconds between two pulls by an enemy. Negative: the enemy's own AShooterNPC::BurstCooldown.
+	 *  With AIBurstShotCount 1 this is the pause between shots. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (Units = "s"))
+	float AIBurstCooldown = -1.0f;
+
+	/** Seconds an enemy holds this gun on its target before each pull. The telegraph: the time a
+	 *  player has to see it coming (OnAIAimHold, bAIAimHolding) and get down. 0: fires at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0.0", Units = "s"))
+	float AIAimHoldSeconds = 0.0f;
+
+	/** Damage to a PLAYER when an enemy fires this gun, as a share of what it does. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0.0"))
+	float AIDamageScale = 1.0f;
+
+	/** True while an enemy is holding this gun on its target before a shot. For whatever shows it. */
+	UPROPERTY(BlueprintReadOnly, Category = "AI Use")
+	bool bAIAimHolding = false;
+
+	/** The aim hold began or ended, on every machine. Seconds: how long it will last (0 on the end). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "AI Use")
+	void OnAIAimHold(bool bHolding, float Seconds);
+
+	/** Server: an enemy has started (or fired at the end of) its aim hold. The hold also ends by
+	 *  itself after Seconds, so one that was abandoned does not leave the sign on. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_AIAimHold(bool bHolding, float Seconds);
+
+	FTimerHandle AIAimHoldTimer;
+
+protected:
+
 	/** Damage type for a shot of this weapon. A projectile with its own HitDamageType wins, because
 	 *  fire and explosion belong to the payload rather than to the barrel it left. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (DisplayName = "Damage Type"))
@@ -2379,6 +2423,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Presentation")
 	TObjectPtr<UTexture2D> Icon;
 
+	/** How this gun changes its holder's movement: walk, sprint and aim speed, and how far a slide
+	 *  goes. One profile per weapon class of the game, shared. Empty: the gun changes nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement")
+	TObjectPtr<class UWeaponMovementProfile> MovementProfile;
+
 	/** The badge beside the ammo count: rounds of this weapon's ammo with its silhouette over them,
 	 *  cut to a triangle. Authored outside the engine from Icon plus the ammo art, so it is a plain
 	 *  slot rather than something GenerateIconFromMesh produces.
@@ -2487,6 +2536,8 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Presentation")
 	UTexture2D* GetIcon() const { return Icon; }
+
+	const class UWeaponMovementProfile* GetMovementProfile() const { return MovementProfile; }
 
 #if WITH_EDITOR
 	/** Render the first person mesh to a white silhouette and store it in Icon.
@@ -2785,6 +2836,20 @@ public:
 	 *  had counted out forty rounds. Sent on change, not per frame. */
 	UFUNCTION(Client, Reliable)
 	void Client_SyncAmmoState(int32 InBullets, bool bInHasLimitedAmmo);
+
+	/** A round that struck a shootable button goes back in the magazine [author, 2026-10-11]: the
+	 *  consoles of the bench level are pressed by shooting them, and a fight should not start a
+	 *  round short. One round per shot, however many pellets of it landed. Players only. */
+	void RefundRoundForButton();
+
+	UFUNCTION(Client, Reliable)
+	void Client_RefundRound();
+
+	/** The magazine gets its round back on the next tick: a trace lands inside Fire(), before the
+	 *  round it is giving back has been taken. */
+	void RefundRoundNow();
+
+	float LastButtonRefundTime = -1000.0f;
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsHitscan() const { return bUseHitscan; }

@@ -16,6 +16,9 @@
 // luck: unity builds put it next to a translation unit that had one, and the first change that
 // reshuffled the blobs took that away. Same fault as the one written up in InventoryTypes.cpp.
 #include "Coop/CoopPlayers.h"
+#include "Variant_Shooter/Bench/FightRecorder.h"
+#include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
+#include "Variant_Shooter/Health/FieldCareComponent.h"
 #include "Variant_Shooter/AnimNotify_WeaponSwitch.h"
 #include "Animation/AnimMontage.h"
 #include "Net/UnrealNetwork.h"
@@ -90,6 +93,7 @@
 #include "Variant_Shooter/Abilities/AbilityDefinition_Throw.h"
 #include "Variant_Shooter/Abilities/AbilityHandler_Throw.h"
 #include "Upgrades/Upgrades/Upgrade_MeleeCloak.h"
+#include "Upgrades/MeleeHoldAttack.h"
 #include "Variant_Shooter/UI/LootCardWidget.h"
 #include "Variant_Shooter/UI/LootOutline.h"
 #include "CableComponent.h"
@@ -269,6 +273,10 @@ AShooterCharacter::AShooterCharacter()
 	// create the recoil component
 	RecoilComponent = CreateDefaultSubobject<UWeaponRecoilComponent>(TEXT("Recoil Component"));
 
+	SuppressionComponent = CreateDefaultSubobject<UPlayerSuppressionComponent>(TEXT("Suppression Component"));
+
+	FieldCareComponent = CreateDefaultSubobject<UFieldCareComponent>(TEXT("Field Care Component"));
+
 	// create the FPS Animation Pack recoil component (PRAS). Costs nothing while idle: it does not
 	// tick until Init is given a recoil asset, which only a pack weapon provides.
 	PackRecoilComponent = CreateDefaultSubobject<URecoilAnimationComponent>(TEXT("Pack Recoil Component"));
@@ -368,6 +376,13 @@ void AShooterCharacter::BeginPlay()
 
 	// Initialize HP based on StartingHPPercent (1.0 = full HP)
 	CurrentHP = MaxHP * FMath::Clamp(StartingHPPercent, 0.0f, 1.0f);
+
+	// The soldier comes into the world in a whole set of armour [author, 2026-10-11]. It used to
+	// start at nothing, a leftover of armour being something only pickups gave.
+	if (HasAuthority())
+	{
+		CurrentArmor = MaxArmor;
+	}
 
 	// Remember where the mesh sits before anything can ragdoll it: standing back up has to restore
 	// this exactly, and by then the physics simulation has thrown the original attachment away.
@@ -533,6 +548,14 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(ADSAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoStopADS);
 		}
 
+		// The two held keys of field care: down starts, up before the time is out cancels.
+		if (FieldCareComponent && MedkitAction)
+		{
+			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Started, FieldCareComponent.Get(), &UFieldCareComponent::BeginMedkit);
+			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Completed, FieldCareComponent.Get(), &UFieldCareComponent::Cancel);
+			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Canceled, FieldCareComponent.Get(), &UFieldCareComponent::Cancel);
+		}
+
 		// Melee attack
 		if (MeleeAction)
 		{
@@ -559,6 +582,8 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 		if (FetchAction)
 		{
 			EnhancedInputComponent->BindAction(FetchAction, ETriggerEvent::Started, this, &AShooterCharacter::DoFetchPressed);
+			EnhancedInputComponent->BindAction(FetchAction, ETriggerEvent::Completed, this, &AShooterCharacter::DoFetchReleased);
+			EnhancedInputComponent->BindAction(FetchAction, ETriggerEvent::Canceled, this, &AShooterCharacter::DoFetchReleased);
 		}
 
 		// Building: the menu key, the slot keys and the placement keys. The actions themselves live
@@ -1537,18 +1562,18 @@ void AShooterCharacter::KeepHandsEmptyAfterMelee()
 	}
 }
 
-void AShooterCharacter::Server_ApplyMeleeRecoil_Implementation(FVector LaunchVelocity)
+void AShooterCharacter::Server_ApplyMeleeSelfKnockback_Implementation(FVector LaunchVelocity)
 {
 	// Bounded the same way a reported shove is: never more than the melee settings on THIS machine
 	// say a hit can throw somebody.
 	const float MaxSpeed = MeleeAttackComponent ? MeleeAttackComponent->GetMaxReportedKnockbackDistance() * 4.0f : 0.0f;
-	if (MaxSpeed <= 0.0f || bIsDowned || IsDead())
+	if (MaxSpeed <= 0.0f || bIsDowned || IsDead() || !UpgradeManager)
 	{
 		return;
 	}
 
-	// The owning client has already launched itself; the host's own character is launched by the
-	// caller. So this only has to move the authority's copy of a REMOTE player.
+	// The owning client has already launched itself, and the host's own character is launched where
+	// the hit was worked out. So this only ever moves the authority's copy of a REMOTE player.
 	if (!IsLocallyControlled())
 	{
 		LaunchCharacter(LaunchVelocity.GetClampedToMaxSize(MaxSpeed), true, true);
@@ -2326,6 +2351,7 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 
 	// Reduce HP by remaining damage after armor
 	CurrentHP -= RemainingDamage;
+	UFightRecorderSubsystem::NoteDamage(this, EventInstigator, DamageCauser, Damage, CurrentHP);
 
 	// Reset regeneration delay timer
 	TimeSinceLastDamage = 0.0f;
@@ -2515,6 +2541,12 @@ void AShooterCharacter::DoStartFiring()
 	// The cursor owns the mouse while the inventory overlay is up. Without this the same left
 	// click that picks a cell up also empties a magazine into the wall behind the screen.
 	if (IsInventoryScreenOpen())
+	{
+		return;
+	}
+
+	// Hands busy with a medkit or with a body's armour.
+	if (FieldCareComponent && FieldCareComponent->IsBusy())
 	{
 		return;
 	}
@@ -3618,6 +3650,134 @@ void AShooterCharacter::CancelWeaponSwitch()
 
 void AShooterCharacter::DoMeleeAttack()
 {
+	// With an upgrade that owns a hold attack, the key does not swing on the press: it waits to
+	// learn whether this is a tap (the ordinary swing, on release) or a hold (the hold attack, the
+	// moment its time is up). The pulses of a key that stays down arrive here too, and only the
+	// first of a press arms the wait. @see FMeleeHoldAttack
+	FMeleeHoldAttack Hold;
+	if (UpgradeManager && UpgradeManager->GetMeleeHoldAttack(Hold))
+	{
+		if (!bMeleeHoldPending && !bMeleePressAnswered)
+		{
+			bMeleeHoldPending = true;
+			MeleeHoldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+			BeginHoldPrompt(MeleeAction, Hold.Label, Hold.HoldTime);
+		}
+		return;
+	}
+
+	PerformMeleeSwing(false);
+}
+
+void AShooterCharacter::UpdateMeleeHold()
+{
+	if (!bMeleeHoldPending || !IsLocallyControlled())
+	{
+		return;
+	}
+
+	FMeleeHoldAttack Hold;
+	if (!UpgradeManager || !UpgradeManager->GetMeleeHoldAttack(Hold))
+	{
+		// The upgrade went away mid-press. Nothing to wait for.
+		bMeleeHoldPending = false;
+		EndHoldPrompt(MeleeAction);
+		return;
+	}
+
+	const float Held = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f) - MeleeHoldStartTime;
+	if (Held >= Hold.HoldTime)
+	{
+		bMeleeHoldPending = false;
+		bMeleePressAnswered = true;
+		EndHoldPrompt(MeleeAction);
+		PerformMeleeSwing(true);
+	}
+}
+
+void AShooterCharacter::BeginHoldPrompt(const UInputAction* Action, const FText& Label, float Duration)
+{
+	if (!IsLocallyControlled() || !Action || Duration <= 0.0f)
+	{
+		return;
+	}
+	HoldPromptAction = Action;
+	HoldPromptLabel = Label;
+	HoldPromptDuration = Duration;
+	HoldPromptStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+}
+
+void AShooterCharacter::EndHoldPrompt(const UInputAction* Action)
+{
+	if (HoldPromptAction.Get() == Action)
+	{
+		HoldPromptAction.Reset();
+	}
+}
+
+bool AShooterCharacter::GetHoldPrompt(FText& OutKey, FText& OutLabel, float& OutProgress) const
+{
+	const UInputAction* Action = HoldPromptAction.Get();
+	const UWorld* const World = GetWorld();
+
+	// Field care first: a medkit going in, armour coming off a body, and, with nothing held, the
+	// offer to take the armour of a body at hand (an empty bar and the key). @see UFieldCareComponent
+	bool bCare = false;
+	if (FieldCareComponent && World)
+	{
+		const EFieldCareAction Care = FieldCareComponent->GetAction();
+		if (Care == EFieldCareAction::Medkit)
+		{
+			Action = MedkitAction.Get();
+			OutLabel = NSLOCTEXT("FieldCare", "Medkit", "MEDKIT");
+			OutProgress = FieldCareComponent->GetProgress();
+			bCare = true;
+		}
+		else if (Care == EFieldCareAction::StripArmor || (!FieldCareComponent->IsBusy() && FieldCareComponent->CanStripArmor()))
+		{
+			Action = FetchAction;
+			OutLabel = NSLOCTEXT("FieldCare", "StripArmor", "TAKE ARMOR");
+			OutProgress = Care == EFieldCareAction::StripArmor ? FieldCareComponent->GetProgress() : 0.0f;
+			bCare = true;
+		}
+	}
+
+	if (!bCare)
+	{
+		if (!Action || !World || HoldPromptDuration <= 0.0f)
+		{
+			return false;
+		}
+
+		OutProgress = (World->GetTimeSeconds() - HoldPromptStartTime) / HoldPromptDuration;
+		if (OutProgress >= 1.0f)
+		{
+			// The hold has done what it does. Nothing left to show.
+			return false;
+		}
+
+		OutLabel = HoldPromptLabel;
+	}
+	OutKey = FText::GetEmpty();
+	if (const APlayerController* const PC = Cast<APlayerController>(GetController()))
+	{
+		if (const ULocalPlayer* const LP = PC->GetLocalPlayer())
+		{
+			if (const UEnhancedInputLocalPlayerSubsystem* const Input = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+			{
+				const TArray<FKey> Keys = Input->QueryKeysMappedToAction(Action);
+				if (Keys.Num() > 0)
+				{
+					OutKey = Keys[0].GetDisplayName(false);
+				}
+			}
+		}
+	}
+	return true;
+}
+
+void AShooterCharacter::PerformMeleeSwing(bool bHoldAttack)
+{
 	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === DoMeleeAttack CALLED ==="));
 	UE_LOG(LogTemp, Warning, TEXT("[MELEE_INPUT_DEBUG] DoMeleeAttack (Triggered) fired @ %.3fs"),
 		GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f);
@@ -3683,8 +3843,17 @@ void AShooterCharacter::DoMeleeAttack()
 			CurrentWeapon->StopFiring();
 		}
 
-		bool bResult = MeleeAttackComponent->StartAttack();
-		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartAttack returned: %d"), bResult);
+		bool bResult = false;
+		FMeleeHoldAttack Hold;
+		if (bHoldAttack && UpgradeManager && UpgradeManager->GetMeleeHoldAttack(Hold))
+		{
+			bResult = MeleeAttackComponent->StartHoldAttack(Hold.Animation);
+		}
+		else
+		{
+			bResult = MeleeAttackComponent->StartAttack();
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] StartAttack returned: %d (hold=%d)"), bResult, bHoldAttack ? 1 : 0);
 	}
 	else
 	{
@@ -3708,6 +3877,17 @@ void AShooterCharacter::DoMeleeReleased()
 	// Broadcast for hold-based upgrades to finalize. Subscribers decide whether
 	// the elapsed hold time crossed their threshold and act accordingly.
 	OnMeleeChargeHoldReleased.Broadcast();
+
+	// Let go before the hold attack's time was up: this press was a tap, and the swing it has been
+	// waiting for comes out now. @see DoMeleeAttack
+	const bool bWasTap = bMeleeHoldPending;
+	bMeleeHoldPending = false;
+	bMeleePressAnswered = false;
+	EndHoldPrompt(MeleeAction);
+	if (bWasTap)
+	{
+		PerformMeleeSwing(false);
+	}
 }
 
 void AShooterCharacter::DoAbilityPressed()
@@ -3816,15 +3996,29 @@ void AShooterCharacter::DoAbilityReleased()
 
 void AShooterCharacter::DoFetchPressed()
 {
-	if (!FetchDefinition || IsWeaponSwitchInProgress())
+	// The item the brackets are on, which this machine picked.
+	if (FetchDefinition && !IsWeaponSwitchInProgress())
 	{
-		return;
+		if (AActor* const Target = GrappleFetchTarget.Get())
+		{
+			Server_FetchItem(Target);
+			return;
+		}
 	}
 
-	// The item the brackets are on, which this machine picked. Nothing bracketed, nothing thrown.
-	if (AActor* const Target = GrappleFetchTarget.Get())
+	// Nothing bracketed: the same key, held, takes the armour off a body at hand [author,
+	// 2026-10-11: no key of its own, it is the key that takes things].
+	if (FieldCareComponent)
 	{
-		Server_FetchItem(Target);
+		FieldCareComponent->BeginStripArmor();
+	}
+}
+
+void AShooterCharacter::DoFetchReleased()
+{
+	if (FieldCareComponent && FieldCareComponent->GetAction() == EFieldCareAction::StripArmor)
+	{
+		FieldCareComponent->Cancel();
 	}
 }
 
@@ -4663,6 +4857,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	UpdateGrappleFetchAiming();
 	UpdateAbilityAiming();
 	UpdateThrowAiming();
+	UpdateMeleeHold();
 	UpdateMeleeFocusReticle();
 
 	// ==================== FPS Animation Pack: state handoff ====================
@@ -4980,6 +5175,12 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
+	// Hands busy with a medkit or with a body's armour.
+	if (FieldCareComponent && FieldCareComponent->IsBusy())
+	{
+		return;
+	}
+
 	// Don't ADS if melee attacking
 	if (MeleeAttackComponent && MeleeAttackComponent->IsAttacking())
 	{
@@ -5164,6 +5365,8 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		TargetAlpha,
 		DeltaTime,
 		MovementSettings->ADSInterpSpeed * (CurrentWeapon ? CurrentWeapon->GetStockADSSpeed() : 1.0f)
+			// Under fire the sight comes up slower; it goes down as fast as ever.
+			* ((SuppressionComponent && TargetAlpha > CurrentADSAlpha) ? SuppressionComponent->GetADSSpeedMultiplier() : 1.0f)
 	);
 
 	DumpADSDiagnostics(this, CurrentADSAlpha, CurrentWeapon);
@@ -7197,8 +7400,12 @@ FRotator AShooterCharacter::GetViewRotation() const
 	ViewRotation.Normalize();
 
 	const FRotator Punch = RecoilComponent->GetPunchRotation();
-	ViewRotation.Pitch = FMath::Clamp(ViewRotation.Pitch + Punch.Pitch, -89.0f, 89.0f);
-	ViewRotation.Yaw += Punch.Yaw;
+	// Under fire the sight wanders while aiming. Here and not in the camera manager, so that the
+	// round goes where the sight is: the sway is something to aim through, not a lie about the aim.
+	const FRotator Sway = SuppressionComponent ? SuppressionComponent->GetSwayRotation(CurrentADSAlpha) : FRotator::ZeroRotator;
+
+	ViewRotation.Pitch = FMath::Clamp(ViewRotation.Pitch + Punch.Pitch + Sway.Pitch, -89.0f, 89.0f);
+	ViewRotation.Yaw += Punch.Yaw + Sway.Yaw;
 	ViewRotation.Roll += Punch.Roll;
 
 	return ViewRotation;
@@ -8554,14 +8761,14 @@ int32 AShooterCharacter::ChooseSlotForIncomingWeapon() const
 		}
 	}
 
-	// Both taken: the one in hand makes room. CurrentWeapon still points at a gun the player put away
+	// All taken: the one in hand makes room. CurrentWeapon still points at a gun the player put away
 	// by hand, and that is the one in hand for this purpose.
 	if (CurrentWeapon && CurrentWeapon->GetHotkeySlot() != INDEX_NONE)
 	{
 		return CurrentWeapon->GetHotkeySlot();
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[WEAPON_SLOT] %s: both slots taken and nothing in hand, using slot 0"), *GetName());
+	UE_LOG(LogTemp, Warning, TEXT("[WEAPON_SLOT] %s: every slot taken and nothing in hand, using slot 0"), *GetName());
 	return 0;
 }
 
@@ -8660,27 +8867,101 @@ void AShooterCharacter::Server_DropWeaponFromInventory_Implementation(AShooterWe
 	DropWeaponFromInventory(Weapon);
 }
 
-void AShooterCharacter::SwapWeaponSlots()
+int32 AShooterCharacter::GetMovementWeaponSlot() const
 {
-	if (!HasAuthority())
+	// Hands the player emptied on purpose move like empty hands. CurrentWeapon still points at the
+	// holstered gun then, which is why the phase is asked as well.
+	if (!CurrentWeapon || WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer)
+	{
+		return INDEX_NONE;
+	}
+	return CurrentWeapon->GetHotkeySlot();
+}
+
+const UWeaponMovementProfile* AShooterCharacter::GetWeaponMovementProfile(int32 Slot) const
+{
+	const AShooterWeapon* const Weapon = FindOwnedWeaponInHotkeySlot(Slot);
+	return Weapon ? Weapon->GetMovementProfile() : nullptr;
+}
+
+void AShooterCharacter::NotifyWeaponRanDry(AShooterWeapon* Weapon)
+{
+	if (!Weapon || Weapon->IsMeleeWeapon())
+	{
+		return;
+	}
+	if (HasAuthority())
+	{
+		DiscardEmptyWeapon(Weapon, 8);
+	}
+	else if (IsLocallyControlled())
+	{
+		Server_DiscardEmptyWeapon(Weapon);
+	}
+}
+
+void AShooterCharacter::Server_DiscardEmptyWeapon_Implementation(AShooterWeapon* Weapon)
+{
+	// The reserve is the server's own number; the magazine is the client's word.
+	if (Weapon && OwnedWeapons.Contains(Weapon) && Weapon->GetEnergyReserve() <= 0)
+	{
+		DiscardEmptyWeapon(Weapon, 8);
+	}
+}
+
+void AShooterCharacter::DiscardEmptyWeapon(AShooterWeapon* Weapon, int32 TriesLeft)
+{
+	if (!HasAuthority() || !Weapon || !OwnedWeapons.Contains(Weapon))
 	{
 		return;
 	}
 
-	for (AShooterWeapon* const Owned : OwnedWeapons)
+	// The drop reads the gun's counts: written empty here so the drop knows to vanish, whatever the
+	// server's copy of a client's magazine said.
+	Weapon->SetBulletCount(0);
+	if (DropWeaponFromInventory(Weapon))
 	{
-		if (Owned && (Owned->GetHotkeySlot() == 0 || Owned->GetHotkeySlot() == 1))
-		{
-			Owned->SetHotkeySlot(1 - Owned->GetHotkeySlot());
-		}
+		UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s: %s ran dry and was thrown away"), *GetName(), *GetNameSafe(Weapon));
+		return;
 	}
-	OnWeaponInventoryChanged.Broadcast();
-	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s swapped weapon slots"), *GetName());
+
+	// Refused mid-switch. The gun is still empty, so ask again shortly.
+	if (TriesLeft > 0)
+	{
+		FTimerHandle Retry;
+		GetWorldTimerManager().SetTimer(Retry, FTimerDelegate::CreateWeakLambda(this, [this, WeakWeapon = TWeakObjectPtr<AShooterWeapon>(Weapon), TriesLeft]()
+		{
+			DiscardEmptyWeapon(WeakWeapon.Get(), TriesLeft - 1);
+		}), 0.25f, false);
+	}
 }
 
-void AShooterCharacter::Server_SwapWeaponSlots_Implementation()
+void AShooterCharacter::SwapWeaponSlots(int32 SlotA, int32 SlotB)
 {
-	SwapWeaponSlots();
+	if (!HasAuthority() || SlotA == SlotB
+		|| SlotA < 0 || SlotA >= WeaponSlotCount || SlotB < 0 || SlotB >= WeaponSlotCount)
+	{
+		return;
+	}
+
+	// Both read before either is written: after the first write the two would share a slot.
+	AShooterWeapon* const InA = FindOwnedWeaponInHotkeySlot(SlotA);
+	AShooterWeapon* const InB = FindOwnedWeaponInHotkeySlot(SlotB);
+	if (InA)
+	{
+		InA->SetHotkeySlot(SlotB);
+	}
+	if (InB)
+	{
+		InB->SetHotkeySlot(SlotA);
+	}
+	OnWeaponInventoryChanged.Broadcast();
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s swapped weapon slots %d and %d"), *GetName(), SlotA, SlotB);
+}
+
+void AShooterCharacter::Server_SwapWeaponSlots_Implementation(int32 SlotA, int32 SlotB)
+{
+	SwapWeaponSlots(SlotA, SlotB);
 }
 
 AShooterWeapon* AShooterCharacter::FindOwnedWeaponInHotkeySlot(int32 Slot) const
@@ -9281,6 +9562,7 @@ void AShooterCharacter::RestoreArmor(float Amount)
 
 void AShooterCharacter::Die()
 {
+	UFightRecorderSubsystem::NoteDeath(this, nullptr);
 	// Tell everyone else this one is terminal, so their copy plays the death instead of guessing
 	// from HP that looks identical to being downed.
 	if (HasAuthority())

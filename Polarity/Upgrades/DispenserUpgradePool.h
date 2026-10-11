@@ -149,4 +149,41 @@ public:
 
 	/** Index of the slot Upgrade was put in, or INDEX_NONE. */
 	int32 FindSlotOf(const UUpgradeDefinition* Upgrade) const;
+
+	// ==================== Shop [author, 2026-10-07] ====================
+	// The same lists are the shop's catalogue (UShopComponent). Prices and credit are in magazines:
+	// what a fed gun is worth is the rounds it carried, counted in its own magazines.
+
+	/** Credit for one magazine fed. A fixed rate: no curve, no luck. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "0.0"))
+	float ShopCreditPerMagazine = 1.0f;
+
+	/** Offers dealt off the deck to one player's shelf. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "1", ClampMax = "9"))
+	int32 ShopShelfSize = 4;
+
+	/** A new shelf. Never free. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "0.0"))
+	float ShopRestockPrice = 1.0f;
+
+	/** Price of an upgrade level or an attachment by its rarity: common, rare, epic, legendary. */
+	UPROPERTY(EditAnywhere, EditFixedSize, BlueprintReadOnly, Category = "Shop")
+	TArray<float> ShopPriceByRarity = { 2.0f, 4.0f, 7.0f, 11.0f };
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "0.0"))
+	float ShopBuffPrice = 1.0f;
+
+	/** Attachments always on offer for each gun the player carries. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 ShopOffersPerWeapon = 2;
+
+	/** Those cost this much more than the same thing off the deck: the price of not waiting for it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Shop", meta = (ClampMin = "1.0"))
+	float ShopWeaponShelfMarkup = 1.25f;
+
+	float GetShopPrice(EUpgradeRarity Rarity) const
+	{
+		const int32 Index = static_cast<int32>(Rarity);
+		return ShopPriceByRarity.IsValidIndex(Index) ? ShopPriceByRarity[Index] : 0.0f;
+	}
 };

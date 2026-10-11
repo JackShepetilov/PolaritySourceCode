@@ -95,6 +95,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen")
 	bool bDropOutsideGridDropsToWorld = true;
 
+	/** Cells in one row of the grid. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen", meta = (ClampMin = "1"))
+	int32 GridColumnCount = 5;
+
+	/** Rows on screen at once; the mouse wheel moves through the rest. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen", meta = (ClampMin = "1"))
+	int32 GridVisibleRows = 2;
+
 	// ==================== Containers (must exist in the WBP under these names) ====================
 
 	/** The cell grid. Filled two rows tall, growing sideways. */
@@ -109,13 +117,19 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UPanelWidget> SecondWeaponAttachments;
 
-	/** The whole panel of weapon slot 0 / 1: what a gun is dragged from, and what an attachment or a
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ThirdWeaponAttachments;
+
+	/** The whole panel of weapon slot 0 / 1 / 2: what a gun is dragged from, and what an attachment or a
 	 *  gun is dropped on. Found by name; only their on-screen rectangle is used. */
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UWidget> WeaponPanel1;
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UWidget> WeaponPanel2;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> WeaponPanel3;
 
 	/** The action slots (jump, aim, slide...): one labelled square per exclusive slot of the
 	 *  upgrade layout, holding the equipped upgrade. Upgrades are dragged here from the grid and
@@ -165,6 +179,10 @@ protected:
 	void BP_SetWeaponPanel(int32 PanelIndex, AShooterWeapon* Weapon, int32 CurrentAmmo, int32 MagazineSize,
 		int32 ReserveAmmo, bool bInfiniteAmmo, bool bIsEquipped);
 
+	/** The grid moved or changed length: FirstRow is the top row on screen. For a scroll mark. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory Screen", meta = (DisplayName = "On Grid Scrolled"))
+	void BP_OnGridScrolled(int32 FirstRow, int32 VisibleRows, int32 TotalRows);
+
 	/** Fired after the screen is shown and input has been handed to the cursor. Play the blur and
 	 *  fade-in here. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory Screen", meta = (DisplayName = "On Opened"))
@@ -174,7 +192,24 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory Screen", meta = (DisplayName = "On Closed"))
 	void BP_OnClosed();
 
+	virtual FReply NativeOnMouseWheel(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+
+	/** Height of the scroll mark's track (the GridScrollTrack widget), for placing the thumb. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Screen", meta = (ClampMin = "1.0"))
+	float GridScrollTrackHeight = 150.0f;
+
 private:
+
+	/** Top row of the grid on screen. */
+	int32 GridScrollRow = 0;
+
+	/** The scroll mark beside the grid: widgets GridScroll (the whole thing, hidden while every row
+	 *  fits) and GridScrollThumb inside it, found by name. */
+	void UpdateScrollMark(int32 FirstRow, int32 VisibleRows, int32 TotalRows);
+
+	/** The third weapon panel, drawn here for the reason the corner's third row is: the Blueprint's
+	 *  graph knows two. Widgets by name: Panel3NameText, Panel3AmmoText, Panel3ReserveText, Panel3Icon. */
+	void DrawThirdPanel(AShooterWeapon* Weapon, int32 Ammo, int32 MagazineSize, int32 Reserve, bool bInfinite, bool bIsEquipped);
 
 	void Rebuild();
 	void RebuildGrid(const UInventoryComponent& Inventory);
@@ -212,11 +247,11 @@ private:
 	UFUNCTION()
 	void HandleDragEnded(UDragDropOperation* Operation);
 
-	/** The gun in weapon slot 0 or 1, or null. Panels are SLOTS: they do not move when the player
+	/** The gun in a weapon slot, or null. Panels are SLOTS: they do not move when the player
 	 *  switches, and they follow the keys. */
 	AShooterWeapon* GetWeaponInPanel(int32 PanelIndex) const;
 
-	/** Which weapon panel (0/1) is under a screen position, or INDEX_NONE. */
+	/** Which weapon panel (a slot index) is under a screen position, or INDEX_NONE. */
 	int32 FindPanelUnder(const FVector2D& ScreenPosition) const;
 
 	/** Every attachment square under both guns, for the drag hints. */
@@ -283,6 +318,14 @@ private:
 
 	/** Layout slot index each of ActionSquares stands for (passive slots are skipped). */
 	TArray<int32> ActionSquareSlotIndices;
+
+	/** One read-only square per OWNED upgrade of a non-exclusive slot, after the action squares.
+	 *  Nothing is dragged in or out of these: they only show what the player carries. */
+	UPROPERTY()
+	TArray<TObjectPtr<UInventorySlotWidget>> PassiveSquares;
+
+	/** The upgrade each of PassiveSquares stands for. */
+	TArray<TWeakObjectPtr<UUpgradeDefinition>> PassiveSquareUpgrades;
 
 	bool bIsOpen = false;
 };

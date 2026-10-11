@@ -258,6 +258,11 @@ void ADroppedRangedWeapon::BeginPlay()
 		Body->SetSimulatePhysics(false);
 	}
 
+	if (HasAuthority())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(this, &ADroppedRangedWeapon::VanishIfEmpty);
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[DroppedRangedWeapon] %s BeginPlay: Weapon=%s, Charge=%.2f, bCanBeCaptured=%d"),
 		*GetName(), *GetNameSafe(WeaponClass), GetCharge(), bCanBeCaptured);
 
@@ -531,6 +536,26 @@ void ADroppedRangedWeapon::GrantAmmoToInventory(AShooterCharacter* Player, AShoo
 		// player should be able to see what they could not carry.
 		SpawnLeftoverDrop(Player, Left);
 	}
+}
+
+void ADroppedRangedWeapon::VanishIfEmpty()
+{
+	if (!HasAuthority() || SpawnedBulletCount != 0)
+	{
+		return;
+	}
+
+	// An energy-class gun with no reserve written (-1) is given its designer's reserve on pickup,
+	// so only an explicit zero counts. A cells gun has the one number.
+	const AShooterWeapon* const CDO = WeaponClass ? WeaponClass->GetDefaultObject<AShooterWeapon>() : nullptr;
+	if (CDO && CDO->IsEnergyClass() && CarriedEnergyReserve != 0)
+	{
+		return;
+	}
+
+	bCanBeCaptured = false;
+	SetLifeSpan(EmptyVanishDelay);
+	UE_LOG(LogTemp, Log, TEXT("[WEAPON_SLOT] %s (%s) is empty: gone in %.1f s"), *GetName(), *GetNameSafe(WeaponClass), EmptyVanishDelay);
 }
 
 void ADroppedRangedWeapon::CarryEnergyAmmoFrom(const AShooterWeapon* Weapon)

@@ -47,6 +47,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float SprintSpeed = 1150.0f;
 
+	/** A player sprints only while pushing forward or forward and sideways, the way Apex does it
+	 *  [author, 2026-10-08]. Off: any direction, the way it was. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
+	bool bSprintForwardOnly = true;
+
+	/** How far off straight ahead still counts: the cosine of the angle between the facing and the
+	 *  push. 0.5 lets the forward diagonals (45 degrees) sprint and stops a pure strafe. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground", meta = (ClampMin = "-1.0", ClampMax = "1.0", EditCondition = "bSprintForwardOnly"))
+	float SprintMinForwardDot = 0.5f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float CrouchSpeed = 400.0f;
 
@@ -66,6 +76,9 @@ public:
 	float DefaultGravityScale = 1.5f;
 
 	// ==================== Ground Dash ====================
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground Dash")
+	bool bEnableGroundDash = true;
 
 	/** Horizontal speed maintained during the ground-only dash. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground Dash", meta = (ClampMin = "0.0"))
@@ -177,6 +190,21 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Minimum speed required to start sliding. Titanfall default: 850"))
 	float SlideMinStartSpeed = 850.0f;
+
+	/** The start gate is never above this share of the holder's own sprint speed (the gun's
+	 *  SprintSpeedScale included): a heavy gun whose sprint is below SlideMinStartSpeed could not
+	 *  slide at all otherwise. 0 switches this off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SlideStartSprintFraction = 0.9f;
+
+	/** Going downhill steeper than this, the start gate drops to SlideMinSpeed: sliding down a hill
+	 *  is always possible, at a walk too [author, 2026-10-08]. Degrees. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ClampMin = "0.0", ClampMax = "45.0"))
+	float SlideFreeDownhillAngle = 8.0f;
+
+	/** Crouch held in the air turns the landing into a slide. Off: it is a crouch. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide")
+	bool bEnableSlideOnLand = true;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Slide", meta = (ToolTip = "Ground friction during slide. Titanfall uses 0!"))
 	float SlideFriction = 0.0f;
@@ -678,6 +706,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View")
 	FVector SlideCameraOffset = FVector(0.0f, 0.0f, -50.0f);
 
+	/** How far the eye goes down, on top of the capsule shrinking, when crouched or sliding (cm).
+	 *  Measured 2026-10-11: without it the crouched camera sits 117 cm above the floor and the
+	 *  capsule ends at 100, so a player crouched behind a low wall looks and shoots over it while no
+	 *  part of him that can be hit shows. 22 puts the eye at 95, inside the capsule: crouched is
+	 *  hidden, and to shoot over the wall he stands up, the same rule the enemies follow [author,
+	 *  2026-10-11]. Moves the whole first person mesh, so the hands and the eye go together. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View", meta = (ClampMin = "0.0", Units = "cm"))
+	float CrouchEyeDrop = 22.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View")
 	float CrouchCameraZOffset = -40.0f;
 
@@ -859,6 +896,89 @@ public:
 	/** Minimum speed to apply run aim offset (cm/s) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon Sway|Aim Offset", meta = (ClampMin = "0.0"))
 	float AimOffsetMinSpeed = 200.0f;
+
+	// ==================== Readout ====================
+	//
+	// What the numbers above come to, worked out from them and shown read-only [author, 2026-10-11:
+	// cover heights on the levels and jump heights have to be fitted to each other]. Recounted on
+	// load and on every edit of this asset. Flat ground, no gun in the hands (a weapon's
+	// UWeaponMovementProfile scales the sprint, the slide boost and the slide friction), no slide
+	// fatigue. The same sums the movement component does: ApexMovementComponent.cpp, the jump in
+	// TryJump and UpdateJumpHold, the slide in StartSlide and UpdateSlide.
+
+	/** Feet above the take-off point at the top of a jump with the key tapped. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "cm"))
+	float ReadoutJumpHeightTap = 0.0f;
+
+	/** The same with the key held for all of JumpHoldTime. The highest ledge a single jump lands on. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "cm"))
+	float ReadoutJumpHeightHeld = 0.0f;
+
+	/** Held jump, and the air jump taken at the very top of it. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "cm"))
+	float ReadoutDoubleJumpHeight = 0.0f;
+
+	/** The jump out of a slide (SlidehopJumpZVelocity). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "cm"))
+	float ReadoutSlidehopHeight = 0.0f;
+
+	/** Take-off to landing on the same level, key held. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "s"))
+	float ReadoutJumpAirTime = 0.0f;
+
+	/** Ground covered by that jump at SprintSpeed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Jump", meta = (Units = "cm"))
+	float ReadoutJumpLengthAtSprint = 0.0f;
+
+	/** The speed a slide can start from: the lower of SlideMinStartSpeed and the sprint fraction. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm/s"))
+	float ReadoutSlideStartGate = 0.0f;
+
+	/** What the start adds to a slide entered at SprintSpeed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm/s"))
+	float ReadoutSlideBoostAtSprint = 0.0f;
+
+	/** SprintSpeed plus that: the fastest moment of the slide. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm/s"))
+	float ReadoutSlidePeakSpeed = 0.0f;
+
+	/** How far a slide entered at SprintSpeed goes before it ends at SlideMinSpeed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm"))
+	float ReadoutSlideLength = 0.0f;
+
+	/** And how long it lasts. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "s"))
+	float ReadoutSlideDuration = 0.0f;
+
+	/** The part of it that is faster than running: past this the slide is slower than a sprint. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm"))
+	float ReadoutSlideLengthFasterThanSprint = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "s"))
+	float ReadoutSlideTimeFasterThanSprint = 0.0f;
+
+	/** Speed one second in, to read the shape of the bleed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm/s"))
+	float ReadoutSlideSpeedAfter1s = 0.0f;
+
+	/** The shortest slide there is: entered at the start gate, where the boost is at its largest. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm"))
+	float ReadoutSlideLengthFromGate = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "s"))
+	float ReadoutSlideDurationFromGate = 0.0f;
+
+	/** Head room a slide and a crouch need: twice CrouchingCapsuleHalfHeight. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "Readout|Slide", meta = (Units = "cm"))
+	float ReadoutSlideClearance = 0.0f;
+
+	void RefreshReadouts();
+
+	virtual void PostLoad() override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 };
 
 /**

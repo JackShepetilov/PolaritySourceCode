@@ -3,6 +3,7 @@
 #include "Variant_Shooter/AI/SquadSpawn/Squad.h"
 
 #include "GameFramework/Pawn.h"
+#include "Variant_Shooter/AI/ShooterNPC.h"
 
 int32 USquad::AliveCount() const
 {
@@ -83,6 +84,15 @@ void USquad::SetTask(ESquadTask NewTask, FName NewObjectiveTag, const FVector& N
 	ObjectiveTag = NewObjectiveTag;
 	Objective = NewObjective;
 	bHasObjective = bHasNewObjective;
+
+	// The members fight by the squad's task too, not only march by it. @see AShooterNPC::SetCombatTask
+	for (const TWeakObjectPtr<APawn>& Weak : Members)
+	{
+		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Weak.Get()))
+		{
+			NPC->SetCombatTask(Task);
+		}
+	}
 }
 
 void USquad::EnsureCommander()
@@ -118,6 +128,11 @@ void USquad::AddMember(APawn* Pawn)
 	}
 
 	Members.AddUnique(Pawn);
+
+	if (AShooterNPC* const NPC = Cast<AShooterNPC>(Pawn))
+	{
+		NPC->SetCombatTask(Task);
+	}
 }
 
 void USquad::RemoveMember(APawn* Pawn)

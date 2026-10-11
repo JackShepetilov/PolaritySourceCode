@@ -141,6 +141,18 @@ static ABossCharacter* FindFinisherBossInCone(UWorld* World, AActor* Owner, cons
 	return Best;
 }
 
+bool UMeleeAttackComponent::StartHoldAttack(const FMeleeAnimationData* Animation)
+{
+	// Carried into the one StartAttack below and cleared whatever it answers, so a refused hold
+	// attack cannot turn the next ordinary swing into one.
+	bHoldAttackRequested = true;
+	RequestedHoldAnimation = Animation;
+	const bool bStarted = StartAttack();
+	bHoldAttackRequested = false;
+	RequestedHoldAnimation = nullptr;
+	return bStarted;
+}
+
 bool UMeleeAttackComponent::StartAttack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("[DROPKICK_DEBUG] === StartAttack ENTER === State=%d, bInputLocked=%d, bExternallyDisabled=%d, bIsDropKick=%d, bHasHitThisAttack=%d"),
@@ -239,6 +251,15 @@ bool UMeleeAttackComponent::StartAttack()
 	default:
 		SelectedAnimationData = SelectWeightedAnimation(GroundAttacks);
 		break;
+	}
+
+	bLungeCutShort = false;
+
+	// The hold attack is this same swing with its own animation, when it has one.
+	bIsHoldAttack = bHoldAttackRequested;
+	if (bIsHoldAttack && RequestedHoldAnimation)
+	{
+		SelectedAnimationData = RequestedHoldAnimation;
 	}
 
 	// Cache owner velocity for momentum calculations
@@ -1321,7 +1342,7 @@ void UMeleeAttackComponent::UpdateLunge(float DeltaTime)
 	//
 	// A drop kick is the same kind of flight and rides the same channel: it reuses the target and the
 	// target actor and adds one flag, rather than opening a second set of everything.
-	const bool bLunging = bInLungePhase && (Settings.bPreserveMomentum || bIsDropKick);
+	const bool bLunging = bInLungePhase && (Settings.bPreserveMomentum || bIsDropKick) && !bLungeCutShort;
 
 	if (!bLunging)
 	{
@@ -2285,6 +2306,20 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 	// The NPC applies its own multiplier again, so divide out the one folded in above.
 	const float DistanceToSend = Cast<AShooterNPC>(HitActor) ? (KnockbackDistance / NPCMultiplier) : KnockbackDistance;
 
+	// An upgrade can send the same shove back onto the swinger. Worked out from the numbers above and
+	// nothing else, so the two halves cannot drift apart.
+	if (const AShooterCharacter* const SelfShooter = Cast<AShooterCharacter>(OwnerCharacter))
+	{
+		if (const UUpgradeManagerComponent* const SelfUpgrades = SelfShooter->GetUpgradeManager())
+		{
+			const float SelfScale = SelfUpgrades->GetMeleeSelfKnockbackScale(HitActor);
+			if (SelfScale > 0.0f)
+			{
+				ApplySelfKnockback(KnockbackDirection, KnockbackDistance, KnockbackDuration, SelfScale);
+			}
+		}
+	}
+
 	// ==================== Who is allowed to shove ====================
 	// The numbers above could only be computed here: they need the swing's entry speed and this
 	// character's upgrade multipliers, neither of which the other machine has. Applying them is a
@@ -2322,6 +2357,36 @@ void UMeleeAttackComponent::ApplyCharacterImpulse(AActor* HitActor, const FVecto
 		UE_LOG(LogTemp, Warning, TEXT("[NET_DEBUG] %s shoved something on a client but is not a ShooterCharacter - shove dropped"),
 			*OwnerCharacter->GetName());
 	}
+}
+
+void UMeleeAttackComponent::ApplySelfKnockback(const FVector& EnemyDirection, float EnemyDistance,
+	float EnemyDuration, float Scale)
+{
+	AShooterCharacter* const Swinger = Cast<AShooterCharacter>(OwnerCharacter);
+	if (!Swinger || !Swinger->IsLocallyControlled() || EnemyDuration <= 0.0f || Scale <= 0.0f)
+	{
+		return;
+	}
+
+	// The lunge lets go first. While it runs, the movement simulation owns the velocity and carries
+	// the swinger on after the enemy, straight through any launch.
+	bLungeCutShort = true;
+	if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Swinger->GetCharacterMovement()))
+	{
+		Apex->SetMeleeLungeIntent(false, false, false, FVector::ZeroVector, nullptr);
+	}
+
+	// The same launch a player gets when something shoves THEM: direction times distance over time.
+	// @see ApplyKnockbackOnAuthority
+	const FVector LaunchVelocity = -EnemyDirection * (EnemyDistance / EnemyDuration) * Scale;
+	Swinger->LaunchCharacter(LaunchVelocity, true, true);
+	if (!Swinger->HasAuthority())
+	{
+		Swinger->Server_ApplyMeleeSelfKnockback(LaunchVelocity);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[MELEE_DMG_DEBUG] Self knockback: %s shoved back at %.0f cm/s (enemy %.0f cm over %.2fs, x%.2f)"),
+		*Swinger->GetName(), LaunchVelocity.Size(), EnemyDistance, EnemyDuration, Scale);
 }
 
 void UMeleeAttackComponent::ApplyKnockbackOnAuthority(AActor* Target, const FVector& Direction,

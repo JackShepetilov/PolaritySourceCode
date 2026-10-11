@@ -306,6 +306,15 @@ protected:
 
 public:
 
+	/** The shop screen sold a gun: the same request the dispenser's number keys send. */
+	void SellWeaponToDispenser(ABuildableActor* Dispenser, AShooterWeapon* Weapon)
+	{
+		if (Dispenser && Weapon)
+		{
+			Server_FuelDispenser(Dispenser, Weapon);
+		}
+	}
+
 	/** Take card CardIndex of this player's open spin at Dispenser from the menu, without the grapple.
 	 *  The server checks reach and ownership; the machine checks the rest. */
 	UFUNCTION(Server, Reliable)

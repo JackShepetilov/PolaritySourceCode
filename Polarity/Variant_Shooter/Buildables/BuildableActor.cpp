@@ -24,7 +24,9 @@
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/Pickups/LootDropComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Upgrades/DispenserUpgradePool.h"
 #include "Variant_Shooter/ShooterPlayerState.h"
+#include "Variant_Shooter/Shop/ShopComponent.h"
 #include "Variant_Shooter/Siege/SiegeDirector.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
@@ -359,8 +361,9 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 		return false;
 	}
 
-	// Refused while the gun is still in the hands: the machine is busy with a spin.
-	const FString Refusal = SlotMachine ? SlotMachine->GetSpinRefusal(Donor) : FString(TEXT("Dispenser: no slot machine"));
+	// Refused while the gun is still in the hands: the machine is busy with a spin. A shop is never busy.
+	const FString Refusal = bFeedBuysShopCredit ? FString()
+		: (SlotMachine ? SlotMachine->GetSpinRefusal(Donor) : FString(TEXT("Dispenser: no slot machine")));
 	if (!Refusal.IsEmpty())
 	{
 		UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s refused at %s: %s"), *Donor->GetName(), *GetName(), *Refusal);
@@ -396,6 +399,24 @@ bool ABuildableActor::AcceptWeaponForFuel(AShooterCharacter* Donor, AShooterWeap
 	UE_LOG(LogTemp, Log, TEXT("[CASINO_DEBUG] %s fed %s to %s: %d loaded + %d reserve = %.1f magazines (total %.1f, health %.0f/%.0f%s)"),
 		*Donor->GetName(), *WeaponName, *GetName(), Loaded, FMath::Max(0, Reserve), Magazines, TotalDepositedMagazines,
 		Health, MaxHealth, bSiegeCore ? TEXT(", core") : TEXT(""));
+
+	if (bFeedBuysShopCredit)
+	{
+		const UDispenserUpgradePool* const Pool = SlotMachine ? SlotMachine->GetPool() : nullptr;
+		const float Earned = Magazines * (Pool ? Pool->ShopCreditPerMagazine : 1.0f);
+		UShopComponent* const Account = UShopComponent::Get(Donor);
+		if (Account)
+		{
+			Account->AddCredit(Earned);
+			Account->OpenWith(Pool, Donor);
+		}
+		if (UBuilderComponent* const Builder = Donor->FindComponentByClass<UBuilderComponent>())
+		{
+			Builder->Client_ShowCasinoReceipt(FString::Printf(TEXT("Shop: %s sold for %.1f, credit %.1f"), *WeaponName, Earned,
+				Account ? Account->GetCredit() : 0.0f));
+		}
+		return true;
+	}
 
 	SlotMachine->StartSpin(Donor, Magazines, WeaponName);
 	return true;

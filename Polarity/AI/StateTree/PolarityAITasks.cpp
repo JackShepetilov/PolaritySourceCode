@@ -7,6 +7,8 @@
 #include "../Components/MeleeRetreatComponent.h"
 #include "../Components/CoverFinderComponent.h"
 #include "../Components/AIAccuracyComponent.h"
+#include "../FactionContactMemory.h"
+#include "../../Variant_Shooter/Bench/FightRecorder.h"
 #include "../../EMFVelocityModifier.h"
 #include "../../Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "AI/PolarityTeams.h"
@@ -22,6 +24,26 @@
 #include "../../ApexMovementComponent.h"
 #include "../../MovementSettings.h"
 #include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
+#include "../../Variant_Shooter/AI/SquadSpawn/Squad.h"
+
+static TAutoConsoleVariable<int32> CVarAIDuckByReason(
+	TEXT("polarity.ai.duckbyreason"),
+	1,
+	TEXT("1: a soldier out from behind cover gets down only for a reason (suppressed, reloading, hit hard). 0: on the old clock."));
+
+// A reaction to being hit or pinned, into the record of the fight, EVERY time. The word the soldier
+// says goes through AShooterNPC::SayTactic, which drops a word said twice in a row, so a soldier
+// sent down twice running left one line and the second read as "did not react" (2026-10-12).
+static void NoteDuckReaction(const AShooterNPC* Who, const TCHAR* What)
+{
+	UFightRecorderSubsystem::NoteTactic(Who, FName(*FString::Printf(TEXT("DUCK: %s"), What)));
+}
+
+static TAutoConsoleVariable<int32> CVarAIAttackSlide(
+	TEXT("polarity.ai.attackslide"),
+	0,
+	TEXT("1: a pushing enemy ends its charge in a slide at the target, as it used to. 0: it does not."));
 
 // Its own category, off by default, so the push can be watched without the log being unusable the
 // rest of the time. Turn it on in the console with:  log LogShooterPush Verbose
@@ -64,7 +86,13 @@ namespace
 		}
 
 		Apex->StopSprint();
-		Apex->StartSlideToPoint(Point, SteerRateDeg);
+
+		// The slide AT the target is switched off by default [author, 2026-10-11]: a slide is how an
+		// enemy gets into cover now. polarity.ai.attackslide 1 brings the charge's slide back.
+		if (CVarAIAttackSlide.GetValueOnGameThread() != 0)
+		{
+			Apex->StartSlideToPoint(Point, SteerRateDeg);
+		}
 	}
 
 	void SetShooterRotationMode(AShooterNPC* NPC, bool bFaceTarget)
@@ -1613,6 +1641,91 @@ FText FSTTask_GetRandomNavPoint::GetDescription(const FGuid& ID, FStateTreeDataV
 // ShooterPush
 // ============================================================================
 
+// ---- The close fight ----
+//
+// What the cornered state is [author, 2026-10-11]. It used to be a charge: sprint at the target, slide
+// round it, strafe in its face, which with two squads in one room read as enemies running circles
+// round each other. Now an enemy with somebody on top of it, or with no corner left to take, does
+// the one thing that makes sense at that range: it stands its ground, turns on whoever is nearest
+// and empties the magazine into them without pausing between bursts. It sidesteps while it does, so
+// it is not a post, and it gives a little ground to anybody inside arm's reach; it never closes.
+// The tree takes it back to cover once nobody is near (AShooterNPC::CanRetakeCover).
+//
+// polarity.ai.attackslide 1 brings the old charge back in its place.
+// TODO: a strike with the weapon once the magazine is dry. AShooterNPC has no melee of its own (that
+// is AMeleeNPC), and one needs a montage.
+namespace
+{
+	EStateTreeRunStatus ShooterPush_TickCloseFight(FSTTask_ShooterPush_Data& Data)
+	{
+		UWorld* const World = Data.NPC->GetWorld();
+		const float Now = World->GetTimeSeconds();
+		const FVector NPCLocation = Data.NPC->GetActorLocation();
+
+		// Whoever is nearest, not whoever it was fighting before somebody got this close.
+		AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		AActor* Threat = Coordinator ? Coordinator->FindNearestHostile(Data.NPC) : nullptr;
+		if (!Threat)
+		{
+			Threat = Data.Target;
+		}
+
+		Data.Controller->SetFocus(Threat);
+		SetShooterRotationMode(Data.NPC, /*bFaceTarget*/ true);
+		Data.NPC->SetDumpMagazine(true);
+
+		if (Data.NPC->HasLineOfSightTo(Threat))
+		{
+			if (!Data.bIsShooting || !Data.NPC->IsCurrentlyShooting())
+			{
+				Data.NPC->StartShooting(Threat, /*bHasExternalPermission*/ true);
+				Data.bIsShooting = true;
+			}
+		}
+		else if (Data.bIsShooting)
+		{
+			Data.NPC->StopShooting();
+			Data.bIsShooting = false;
+		}
+
+		Data.NPC->SayTactic(Data.NPC->IsReloadingWeapon() ? TEXT("CLOSE FIGHT: reloading") : TEXT("CLOSE FIGHT: emptying the magazine"));
+
+		// The sidestep. Lateral to the threat, plus a step back when it is inside arm's reach.
+		if (Now >= Data.LegEndTime)
+		{
+			Data.LegSign = -Data.LegSign;
+			Data.LegEndTime = Now + FMath::FRandRange(0.5f, 0.9f);
+
+			const FVector ToThreat = (Threat->GetActorLocation() - NPCLocation).GetSafeNormal2D();
+			const float ThreatDistance = FVector::Dist2D(Threat->GetActorLocation(), NPCLocation);
+			FVector Step = FVector::CrossProduct(FVector::UpVector, ToThreat) * Data.LegSign * 180.0f;
+			if (ThreatDistance < 300.0f || Data.NPC->IsReloadingWeapon())
+			{
+				Step -= ToThreat * 200.0f;
+			}
+			else if (!Data.bIsShooting && Coordinator && Coordinator->GetPostureFor(Data.NPC) != ESquadPosture::Defense)
+			{
+				// Nobody in view: a sidestep on the spot is the enemy standing in a corner. Go and look.
+				Step = ToThreat * 300.0f;
+				Data.NPC->SayTactic(TEXT("CLOSE FIGHT: nobody in view, going to look"));
+			}
+
+			FNavLocation OnNav;
+			UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+			if (NavSys && NavSys->ProjectPointToNavigation(NPCLocation + Step, OnNav, FVector(150.0f, 150.0f, 250.0f)))
+			{
+				FAIMoveRequest MoveRequest;
+				MoveRequest.SetGoalLocation(OnNav.Location);
+				MoveRequest.SetAcceptanceRadius(30.0f);
+				MoveRequest.SetCanStrafe(true);
+				Data.Controller->MoveTo(MoveRequest);
+			}
+		}
+
+		return EStateTreeRunStatus::Running;
+	}
+}
+
 EStateTreeRunStatus FSTTask_ShooterPush::EnterState(FStateTreeExecutionContext& Context,
 	const FStateTreeTransitionResult& Transition) const
 {
@@ -1650,6 +1763,22 @@ EStateTreeRunStatus FSTTask_ShooterPush::EnterState(FStateTreeExecutionContext& 
 
 	const float Now = Data.NPC->GetWorld()->GetTimeSeconds();
 
+	if (Data.bNeverWithdraw && CVarAIAttackSlide.GetValueOnGameThread() == 0)
+	{
+		// The close fight: no charge to set up. See ShooterPush_TickCloseFight.
+		Data.NPC->NotifyLastStandBegan();
+		Data.bIsShooting = false;
+		Data.LegEndTime = 0.0f;
+		Data.LegSign = FMath::RandBool() ? 1.0f : -1.0f;
+		Data.Phase = Data.PreviousPhase = EShooterPushPhase::Duel;
+
+		if (UApexMovementComponent* const Apex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement()))
+		{
+			Apex->StopSprint();
+		}
+		return EStateTreeRunStatus::Running;
+	}
+
 	Data.Phase = ResolvePhase(Data);
 
 	// Last Stand is a finishing move, not a distance band, and the trigger for it is exactly the
@@ -1665,11 +1794,16 @@ EStateTreeRunStatus FSTTask_ShooterPush::EnterState(FStateTreeExecutionContext& 
 	bool bLastStandOrbit = false;
 	if (Data.bNeverWithdraw)
 	{
+		Data.NPC->NotifyLastStandBegan();
 		bLastStandOrbit = HasRoomToOrbit(Data);
 		Data.Phase = bLastStandOrbit ? EShooterPushPhase::Sprint : EShooterPushPhase::Approach;
 
 		UE_LOG(LogTemp, Warning, TEXT("[PUSH_DEBUG] %s LAST STAND branch: %s"),
 			*GetNameSafe(Data.NPC), bLastStandOrbit ? TEXT("charge+orbit (open)") : TEXT("straight approach (tight)"));
+	}
+	else
+	{
+		Data.NPC->SayTactic(TEXT("RUSH: target is hurt"));
 	}
 
 	Data.PreviousPhase = Data.Phase;
@@ -1748,6 +1882,11 @@ EStateTreeRunStatus FSTTask_ShooterPush::Tick(FStateTreeExecutionContext& Contex
 	if (!World)
 	{
 		return EStateTreeRunStatus::Failed;
+	}
+
+	if (Data.bNeverWithdraw && CVarAIAttackSlide.GetValueOnGameThread() == 0)
+	{
+		return ShooterPush_TickCloseFight(Data);
 	}
 
 	const float Now = World->GetTimeSeconds();
@@ -2105,6 +2244,11 @@ void FSTTask_ShooterPush::ExitState(FStateTreeExecutionContext& Context,
 {
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 	ReleaseMovementState(Data);
+
+	if (Data.NPC)
+	{
+		Data.NPC->SetDumpMagazine(false);
+	}
 }
 
 /** Dead band on the distance thresholds. Without one, a target sitting on a boundary flips the phase
@@ -2196,6 +2340,13 @@ EShooterPushPhase FSTTask_ShooterPush::ResolvePhase(const FInstanceDataType& Dat
 	}
 	if (Distance > Data.DuelDistance)
 	{
+		// A sprint lowers the weapon, so it is not STARTED in front of the target: seen, the NPC keeps
+		// walking in with the gun up [author, 2026-10-10]. Asked on the way in only. A sprint already
+		// running is finished, or the phase would flip on every corner the line of sight crosses.
+		if (Data.PreviousPhase != EShooterPushPhase::Sprint && Data.NPC->HasLineOfSightTo(Data.Target))
+		{
+			return EShooterPushPhase::Approach;
+		}
 		return EShooterPushPhase::Sprint;
 	}
 	return EShooterPushPhase::Duel;
@@ -2599,6 +2750,55 @@ bool FSTCondition_ShooterShieldUp::TestCondition(FStateTreeExecutionContext& Con
 	return bUp;
 }
 
+// ============================================================================
+// Which fight
+// ============================================================================
+
+namespace
+{
+	bool ShooterWantsOpenFight(AShooterNPC* NPC)
+	{
+		AAICombatCoordinator* const Coordinator = IsValid(NPC) ? AAICombatCoordinator::GetCoordinator(NPC) : nullptr;
+		return Coordinator && Coordinator->WantsRush(NPC);
+	}
+}
+
+bool FSTCondition_ShooterWantsOpenFight::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	return ShooterWantsOpenFight(Context.GetInstanceData(*this).NPC);
+}
+
+bool FSTCondition_ShooterWantsCover::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	return !ShooterWantsOpenFight(Context.GetInstanceData(*this).NPC);
+}
+
+bool FSTCondition_ShooterCanRetakeCover::TestCondition(FStateTreeExecutionContext& Context) const
+{
+	const AShooterNPC* const NPC = Context.GetInstanceData(*this).NPC;
+	return IsValid(NPC) && NPC->CanRetakeCover();
+}
+
+#if WITH_EDITOR
+FText FSTCondition_ShooterWantsOpenFight::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Coordinator says close on the hurt target"));
+}
+
+FText FSTCondition_ShooterWantsCover::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("No reason to fight in the open"));
+}
+
+FText FSTCondition_ShooterCanRetakeCover::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
+	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("Cornered charge has run its time and nobody is close"));
+}
+#endif
+
 #if WITH_EDITOR
 FText FSTCondition_ShooterShieldDown::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView,
 	const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
@@ -2720,6 +2920,13 @@ EStateTreeRunStatus FSTTask_ShooterPeek::EnterState(FStateTreeExecutionContext& 
 	Data.LastSeenBurstShots = Data.NPC->GetCurrentBurstShots();
 	Data.bFiredFromCorner = false;
 	Data.bHasLastSeen = false;
+	Data.bBoundPending = false;
+	Data.bBoundFlank = false;
+	Data.bRunDecided = false;
+	Data.bEntrySlideStarted = false;
+	Data.BlindPeeks = 0;
+	Data.FlankedChecks = 0;
+	Data.OpenBlindSeconds = 0.0f;
 
 	// Which way the first leg goes is a coin flip, so two enemies peeking from the same corner do
 	// not step out in lockstep.
@@ -2813,6 +3020,19 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		{
 			++Data.FailedSearches;
 		}
+
+		// The search of a bound came back with the corner it left from: nothing over there. Keep the
+		// corner and ask again later, on a shorter clock than the first time.
+		if (Data.bBoundPending && Finder->HasCover()
+			&& FVector::Dist2D(Finder->GetCover().HideLocation, Data.BoundFromHide) < 50.0f)
+		{
+			Data.bBoundPending = false;
+			if (AAICombatCoordinator* const SlotCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+			{
+				SlotCoordinator->EndRelocation(Data.NPC);
+			}
+			Data.NPC->SayTactic(TEXT("NOWHERE to go, holding"));
+		}
 	}
 	Data.bWasSearching = bSearchingNow;
 
@@ -2868,7 +3088,132 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 		if (!Finder->IsSearching() && Finder->GetRequeryCooldownRemaining() <= 0.0f)
 		{
-			Finder->RequestCover(Data.Target);
+			// On the defensive the corner to take is the one at hand: every metre from where it stands
+			// costs, so the search does not send it across the field to a slightly better wall.
+			AAICombatCoordinator* const SeekCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+			const bool bSeekNear = SeekCoordinator && SeekCoordinator->GetPostureFor(Data.NPC) == ESquadPosture::Defense;
+			if (bSeekNear)
+			{
+				Finder->SetSearchBias(Data.NPC->GetActorLocation(), 0.3f, 0.0f);
+			}
+			if (!Finder->RequestCover(Data.Target) && bSeekNear)
+			{
+				Finder->ClearSearchBias();
+			}
+		}
+
+		// No corner is no reason to hold fire: it is standing in the open with a target in view, which
+		// is the one situation where shooting is all there is to do. Same pacing as the block at the
+		// end of this function, which this return skips.
+		// Reloading in the open, in view: back away from the target while the hands are busy, a leg
+		// at a time. There is no corner to go to (that is why it is here), but standing still on the
+		// spot it emptied the magazine from is the worst of what is left.
+		Data.LegElapsed += DeltaTime;
+
+		// Hit hard with no corner to get down behind: off the line it is being shot along, a few
+		// metres back and to the side, at once. The reason is the same one that sends a soldier down
+		// behind its cover; standing where it was just hit is not an answer to it [author,
+		// 2026-10-11: "not all of them get down when hit"].
+		const UAIAccuracyComponent* const OpenPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+		const bool bOpenPinned = OpenPinned && OpenPinned->IsSuppressed() && Data.LegElapsed >= 1.2f;
+		if (CVarAIDuckByReason.GetValueOnAnyThread() != 0 && FireTarget
+			&& (Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold || bOpenPinned))
+		{
+			Data.NPC->ClearRecentDamage();
+			Data.LegElapsed = 0.0f;
+			Data.LegSign = -Data.LegSign;
+			const FVector HitAway = (Data.NPC->GetActorLocation() - FireTarget->GetActorLocation()).GetSafeNormal2D();
+			const FVector HitSide = FVector::CrossProduct(FVector::UpVector, HitAway) * Data.LegSign;
+			FNavLocation HitNav;
+			UNavigationSystemV1* const HitNavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
+			if (HitNavSys && HitNavSys->ProjectPointToNavigation(Data.NPC->GetActorLocation() + HitAway * 200.0f + HitSide * 350.0f,
+				HitNav, FVector(200.0f, 200.0f, 300.0f)) && Data.NPC->IsInsideHoldArea(HitNav.Location))
+			{
+				TryMoveTo(Data, HitNav.Location);
+				Data.NPC->SayTactic(bOpenPinned ? TEXT("PINNED in the open: off the line") : TEXT("HIT in the open: off the line"));
+				NoteDuckReaction(Data.NPC, bOpenPinned ? TEXT("pinned, in the open") : TEXT("hit, in the open"));
+			}
+		}
+
+		if (Data.NPC->IsReloadingWeapon() && FireTarget && Data.LegElapsed >= 0.8f && Data.NPC->HasLineOfSightTo(FireTarget))
+		{
+			Data.LegElapsed = 0.0f;
+			const FVector Away = (Data.NPC->GetActorLocation() - FireTarget->GetActorLocation()).GetSafeNormal2D();
+			const FVector Side = FVector::CrossProduct(FVector::UpVector, Away) * Data.LegSign;
+			FNavLocation OnNav;
+			UNavigationSystemV1* const NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
+			if (NavSys && NavSys->ProjectPointToNavigation(Data.NPC->GetActorLocation() + Away * 350.0f + Side * 150.0f,
+				OnNav, FVector(200.0f, 200.0f, 300.0f)) && Data.NPC->IsInsideHoldArea(OnNav.Location))
+			{
+				TryMoveTo(Data, OnNav.Location);
+				Data.NPC->SayTactic(TEXT("RELOADING in the open, backing off"));
+			}
+		}
+
+		const UEnemyCombatProfile* const OpenProfile = Data.NPC->GetCombatProfile();
+		const bool bTooClose = OpenProfile && OpenProfile->MinFireDistance > 0.0f && FireTarget
+			&& FVector::Dist2D(FireTarget->GetActorLocation(), Data.NPC->GetActorLocation()) < OpenProfile->MinFireDistance;
+		const bool bOpenSees = FireTarget && Data.NPC->HasLineOfSightTo(FireTarget);
+
+		// No corner AND no line: nothing to do here at all, and standing in it is the enemy "stuck in
+		// a corner doing nothing". An advancing one walks at the target until it has a line; one that
+		// holds stays where it was put.
+		// Who may: the going half of an assault at once; anybody else only after it has stood blind
+		// for a while (a firefight is fought from positions, and "I cannot see him" is a reason to look
+		// for a corner first, which the search above is doing); a squad on the defensive never.
+		Data.OpenBlindSeconds = bOpenSees ? 0.0f : Data.OpenBlindSeconds + DeltaTime;
+		AAICombatCoordinator* const OpenCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+		const bool bMayClose = OpenCoordinator && OpenCoordinator->GetPostureFor(Data.NPC) != ESquadPosture::Defense
+			&& (OpenCoordinator->IsInAssaultElement(Data.NPC) || Data.OpenBlindSeconds >= 4.0f);
+
+		if (!bOpenSees && FireTarget && !Data.NPC->IsReloadingWeapon() && bMayClose && Data.LegElapsed >= 1.0f)
+		{
+			Data.LegElapsed = 0.0f;
+			Data.bClosingToSee = TryMoveTo(Data, FireTarget->GetActorLocation());
+			Data.NPC->SayTactic(TEXT("NO COVER, NO ANGLE: closing to see the target"));
+		}
+		else if (!bOpenSees && FireTarget && !Data.NPC->IsReloadingWeapon() && Data.NPC->HasHoldArea()
+			&& Data.OpenBlindSeconds >= 1.5f && Data.LegElapsed >= 2.0f)
+		{
+			// One that holds a ground does not close in, and must not stand blind either: it goes along
+			// its own ground, to the edge on the side the enemy is on, left of the line and then right
+			// of it, until it has a line. Recorded 2026-10-11: with nothing left to send it down and up
+			// again, three of five stood for a whole fight behind a fence they could not see through.
+			Data.LegElapsed = 0.0f;
+			Data.LegSign = -Data.LegSign;
+			if (Data.OpenBlindSeconds >= Data.WidenHoldAfterBlindSeconds && Data.NPC->CanWidenHoldArea())
+			{
+				// Its own yard has no line to the fight at all: the whole place is its ground now.
+				Data.NPC->WidenHoldArea();
+				Data.NPC->SayTactic(TEXT("HOLD: my ground sees nobody, taking the whole place"));
+			}
+			else
+			{
+				Data.NPC->SayTactic(TEXT("HOLD: no line from here, moving along my ground"));
+			}
+			TryMoveTo(Data, Data.NPC->GetHoldPointToward(FireTarget->GetActorLocation(), 300.0f * Data.LegSign));
+		}
+		else if (bOpenSees && Data.bClosingToSee)
+		{
+			Data.bClosingToSee = false;
+			Data.Controller->StopMovement();
+		}
+
+		if (FireTarget && !bTooClose && bOpenSees)
+		{
+			Data.NPC->SayTactic(TEXT("NO COVER, shooting from the open"));
+			if (!Data.bIsShooting)
+			{
+				StartShooting(Data, FireTarget);
+			}
+			else if (!Data.NPC->IsCurrentlyShooting() || Data.NPC->IsInBurstCooldown())
+			{
+				StopShooting(Data);
+			}
+		}
+		else if (Data.bIsShooting)
+		{
+			StopShooting(Data);
 		}
 
 		return EStateTreeRunStatus::Running;
@@ -2881,6 +3226,8 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	{
 		// A NEW spot, so this NPC owes it one peek before the recheck is allowed to give up on it.
 		Data.bPeekedSinceCover = false;
+		Data.BlindPeeks = 0;
+		Data.FlankedChecks = 0;
 
 		// New corner, new clock and a clean sheet on having fired from it. Both are per POSITION,
 		// which is what makes "never shoot twice from the same place" mean anything.
@@ -2893,6 +3240,22 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	}
 
 	const FVector NPCLocation = Data.NPC->GetActorLocation();
+
+	// Whoever CAN be shot from here while the one it is fighting cannot: the enemy who came round the
+	// back. A corner is for shooting from, at whoever shows.
+	AActor* Opportunity = nullptr;
+	if (!bSuppressing && FireTarget && !Data.bIsRelocating)
+	{
+		Data.SinceOpportunityCheck += DeltaTime;
+		if (Data.SinceOpportunityCheck >= 0.3f)
+		{
+			Data.SinceOpportunityCheck = 0.0f;
+			AAICombatCoordinator* const EyesCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+			Data.OpportunityTarget = (!EyesCoordinator || Data.NPC->HasLineOfSightTo(FireTarget))
+				? nullptr : EyesCoordinator->FindVisibleHostile(Data.NPC);
+		}
+		Opportunity = Data.OpportunityTarget.Get();
+	}
 
 	switch (Data.Phase)
 	{
@@ -2915,13 +3278,92 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// and only above the threshold: a shuffle behind the same wall does not deserve two
 		// teammates standing in the open on its behalf. A refusal means the squad already has as
 		// many runners as it can cover, and this NPC simply walks it instead.
-		if (!Data.bIsRelocating && ToHideDistance > Data.RelocationSprintDistance)
+		// Run or walk, decided once per walk (see the header: unseen runs, seen and short walks with the
+		// gun up, seen and long runs only under a mate's fire).
+		if (!Data.bRunDecided)
 		{
-			BeginRelocationRun(Data, ToHideDistance);
+			Data.bRunDecided = true;
+
+			AAICombatCoordinator* const RunCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+			const bool bSeen = Data.NPC->HasLineOfSightTo(Data.Target);
+			const bool bCovered = RunCoordinator && RunCoordinator->HasCoveringMate(Data.NPC);
+			const bool bRun = ToHideDistance > Data.BoundSprintDistance && (!bSeen || bCovered);
+
+			if (bRun && BeginRelocationRun(Data, ToHideDistance))
+			{
+				Data.NPC->SayTactic(!bSeen ? TEXT("RUNNING unseen")
+					: (Data.bBoundFlank ? TEXT("FLANKING (run, gun down, covered)") : TEXT("RUNNING (gun down, covered)")));
+			}
+			else if (RunCoordinator && Data.bBoundPending)
+			{
+				// Walking it: the mover slot the bound took is not needed for a walk with the gun up.
+				RunCoordinator->EndRelocation(Data.NPC);
+			}
+		}
+
+		// Walking, and rounds are going past or it has just been hit: the rest is run. A walk with the
+		// gun up is for ground nobody is shooting across. Recorded 2026-10-11: a quarter of the
+		// player's hits landed on a soldier walking to its corner.
+		if (!Data.bIsRelocating && CVarAIDuckByReason.GetValueOnAnyThread() != 0 && ToHideDistance > 150.0f)
+		{
+			const UAIAccuracyComponent* const WalkPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+			if (((WalkPinned && WalkPinned->IsSuppressed()) || Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold)
+				&& BeginRelocationRun(Data, ToHideDistance))
+			{
+				Data.NPC->SayTactic(TEXT("UNDER FIRE: running to cover"));
+				NoteDuckReaction(Data.NPC, TEXT("under fire on the walk, runs"));
+			}
+		}
+
+		if (Data.bIsRelocating)
+		{
+			UApexMovementComponent* const RunApex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+
+			// Broken off: the target is close, in front and in view. Gun up, the rest is walked.
+			const FVector ToTarget = Data.Target->GetActorLocation() - NPCLocation;
+			const bool bTargetAhead = FVector::DotProduct(ToTarget.GetSafeNormal2D(), Data.NPC->GetVelocity().GetSafeNormal2D()) > 0.3f;
+			if (ToTarget.Size2D() < Data.RunBreakDistance && bTargetAhead && Data.NPC->HasLineOfSightTo(Data.Target))
+			{
+				EndRelocationRun(Data);
+				Data.NPC->SayTactic(TEXT("RUN BROKEN: target close in front"));
+			}
+			// The last stretch is slid: faster through the open, and it arrives low.
+			else if (!Data.bEntrySlideStarted && RunApex && Data.SlideEntryDistance > 0.0f
+				&& ToHideDistance < Data.SlideEntryDistance && ToHideDistance > 150.0f)
+			{
+				RunApex->StartSlideToPoint(Spot.HideLocation, Data.SlideEntrySteerRate);
+				if (RunApex->IsSliding())
+				{
+					RunApex->Velocity = FVector(RunApex->Velocity.X * Data.SlideEntrySpeedScale,
+						RunApex->Velocity.Y * Data.SlideEntrySpeedScale, RunApex->Velocity.Z);
+					Data.bEntrySlideStarted = true;
+					RunApex->StopSprint();
+					Data.NPC->SayTactic(TEXT("SLIDING into cover"));
+				}
+			}
+			else
+			{
+				// The corner it is running to stopped being one (the target moved): pick again.
+				Data.SinceRecheck += DeltaTime;
+				if (Data.SinceRecheck >= 0.5f)
+				{
+					Data.SinceRecheck = 0.0f;
+					if (!Finder->IsCoverStillGood())
+					{
+						Data.bBoundPending = false;
+						EndRelocationRun(Data);
+						Finder->ReleaseCover();
+						Data.Controller->StopMovement();
+						EnterPhase(Data, EShooterPeekPhase::Seeking);
+						break;
+					}
+				}
+			}
 		}
 
 		if (ToHideDistance <= ShooterPeek_EffectiveArriveRadius(Data))
 		{
+			Data.bBoundPending = false;
 			EndRelocationRun(Data);
 			Data.Controller->StopMovement();
 			EnterPhase(Data, EShooterPeekPhase::AtHide);
@@ -2933,6 +3375,8 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s STALLED walking to H, %.0f left (best %.0f, arrive<=%.0f)"),
 				*GetNameSafe(Data.NPC), ToHideDistance, Data.BestGoalDistance, ShooterPeek_EffectiveArriveRadius(Data));
 
+			Data.bBoundPending = false;
+			EndRelocationRun(Data);
 			Finder->ReleaseCover();
 			Data.Controller->StopMovement();
 			EnterPhase(Data, EShooterPeekPhase::Seeking);
@@ -2976,7 +3420,12 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		{
 			Data.SinceRecheck = 0.0f;
 
-			if (!Finder->IsCoverStillGood())
+			// A corner is held MinCornerHold before "a little more exposed than it was" may retire it.
+			// Walked round is different: its wall is gone, and it goes at once.
+			Data.FlankedChecks = Finder->IsFlanked() ? Data.FlankedChecks + 1 : 0;
+			const bool bCornerLost = Data.FlankedChecks >= 2
+				|| (Data.CornerElapsed >= Data.MinCornerHold && !Finder->IsCoverStillGood());
+			if (bCornerLost)
 			{
 				UE_LOG(LogTemp, Verbose,
 					TEXT("[PEEK_DEBUG] %s DROPPED cover at AtHide: exposure %.2f over threshold, sat %.2fs of %.2fs"),
@@ -2985,6 +3434,38 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 				Finder->ReleaseCover();
 				EnterPhase(Data, EShooterPeekPhase::Seeking);
 				break;
+			}
+		}
+
+		// ---- Assault: the going half ----
+		//
+		// The squad is three to one or better and this NPC is one of the half that goes in. After a
+		// couple of seconds on a corner it asks for its next one, toward its lane (the front, or round
+		// one side). The search is the ordinary one, leaned that way and allowed closer, so what it
+		// goes to is still a corner. Two go at a time; the rest of the going half waits its turn and
+		// the staying half fires.
+		if (!Data.bBoundPending && !bSuppressing && Data.CornerElapsed >= 2.0f
+			&& !Finder->IsSearching() && Finder->GetRequeryCooldownRemaining() <= 0.0f)
+		{
+			AAICombatCoordinator* const AssaultCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+			FVector Preferred = FVector::ZeroVector;
+			bool bFlank = false;
+			if (AssaultCoordinator && AssaultCoordinator->IsInAssaultElement(Data.NPC)
+				&& AssaultCoordinator->RequestAssaultMove(Data.NPC, Preferred, bFlank))
+			{
+				Finder->SetSearchBias(Preferred, Data.BoundBiasPerMetre, Data.BoundMinMove, Data.AssaultMinTargetDistance);
+				if (Finder->RequestCover(Data.Target))
+				{
+					Data.bBoundPending = true;
+					Data.bBoundFlank = bFlank;
+					Data.BoundFromHide = Spot.HideLocation;
+					Data.NPC->SayTactic(bFlank ? TEXT("ASSAULT: going round the side") : TEXT("ASSAULT: going forward"));
+				}
+				else
+				{
+					Finder->ClearSearchBias();
+					AssaultCoordinator->EndRelocation(Data.NPC);
+				}
 			}
 		}
 
@@ -3024,12 +3505,29 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// moved" and bounce it straight back into ToHide, every tick, forever.
 		if (FVector::Dist2D(NPCLocation, Spot.HideLocation) > ShooterPeek_EffectiveArriveRadius(Data))
 		{
-			// A different corner, so its one owed peek starts over with it.
+			// A different corner, so its one owed peek starts over with it, and so does its clock.
 			Data.bPeekedSinceCover = false;
+			Data.CornerElapsed = 0.0f;
+			Data.bFiredFromCorner = false;
 
 			EnterPhase(Data, EShooterPeekPhase::ToHide);
 			TryMoveTo(Data, Spot.HideLocation);
 			break;
+		}
+
+		// Its bound is being looked for: stay down until the answer is in, so the run starts from
+		// behind the corner and not from half way out of it.
+		if (Data.bBoundPending && Finder->IsSearching())
+		{
+			break;
+		}
+
+		// Behind the corner with nobody looking and a magazine that is not full: fill it now. The
+		// alternative is running dry out at P, which is the one place a reload cannot be afforded.
+		if (Data.NPC->GetMagazineFraction() < Data.TacticalReloadBelow && !Data.NPC->IsReloadingWeapon()
+			&& !Data.NPC->HasLineOfSightTo(Data.Target) && Data.NPC->RequestTacticalReload())
+		{
+			Data.NPC->SayTactic(TEXT("RELOADING in cover (magazine not empty)"));
 		}
 
 		// A peek that steps out with an unusable weapon is a peek wasted, and it is the single
@@ -3043,8 +3541,39 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// the exact one.
 		const bool bWeaponReady = !Data.NPC->IsInBurstCooldown() && !Data.NPC->IsReloadingWeapon();
 
-		if (Data.PhaseElapsed >= Data.HideDuration && bWeaponReady)
+		// How long it stays down. On the clock: HideDuration. By reason: until what sent it down is
+		// over, and while rounds that suppress keep coming the time runs from the last of them.
+		const bool bByReason = CVarAIDuckByReason.GetValueOnAnyThread() != 0;
+		const float HideNow = Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f;
+		const UAIAccuracyComponent* const HideAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+		if (bByReason && HideAccuracy && HideAccuracy->IsSuppressed())
 		{
+			Data.DuckUntil = FMath::Max(Data.DuckUntil, HideNow + Data.DuckSecondsOnSuppression);
+		}
+
+		// Sent down: it comes up at the nearest other spot of cover, not where the one who sent it
+		// down is holding his sight. The search is the ordinary one, leaned hard toward where it is;
+		// its answer moves the corner, and the test above ("the corner moved") walks it there.
+		if (bByReason && Data.bShiftAfterDuck && !Finder->IsSearching() && Finder->GetRequeryCooldownRemaining() <= 0.0f)
+		{
+			Data.bShiftAfterDuck = false;
+			if (Data.ShiftAfterDuckDistance > 0.0f)
+			{
+				Finder->SetSearchBias(Spot.HideLocation, 1.0f, Data.ShiftAfterDuckDistance);
+				if (!Finder->RequestCover(Data.Target))
+				{
+					Finder->ClearSearchBias();
+				}
+			}
+		}
+
+		const bool bHiddenLongEnough = bByReason
+			? (HideNow >= Data.DuckUntil && Data.PhaseElapsed >= Data.MinHideSeconds && !Finder->IsSearching())
+			: Data.PhaseElapsed >= Data.HideDuration;
+
+		if (bHiddenLongEnough && bWeaponReady)
+		{
+			Data.DuckUntil = 0.0f;
 			EnterPhase(Data, EShooterPeekPhase::ToPeek);
 
 			// The step out is the one move whose refusal used to cost the whole peek. Ignoring the
@@ -3075,6 +3604,28 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 	case EShooterPeekPhase::ToPeek:
 	{
+		// An empty gun in the open has one useful thing to do, which is to stop being in the open.
+		if (Data.NPC->IsReloadingWeapon() && !bSuppressing)
+		{
+			Data.NPC->SayTactic(TEXT("RELOADING, back to cover"));
+			EnterPhase(Data, EShooterPeekPhase::ToHide);
+			TryMoveTo(Data, Spot.HideLocation);
+			break;
+		}
+
+		// Hit hard on the way out: the reason to get down does not wait for it to arrive.
+		if (CVarAIDuckByReason.GetValueOnAnyThread() != 0 && Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold)
+		{
+			Data.DuckUntil = (Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f) + Data.DuckSecondsOnDamage;
+			Data.bShiftAfterDuck = true;
+			Data.NPC->ClearRecentDamage();
+			EnterPhase(Data, EShooterPeekPhase::ToHide);
+			Data.NPC->SayTactic(TEXT("HIT: down behind cover"));
+			NoteDuckReaction(Data.NPC, TEXT("hit, stepping out"));
+			TryMoveTo(Data, Spot.HideLocation);
+			break;
+		}
+
 		const float ToPeekDistance = FVector::Dist2D(NPCLocation, Spot.PeekLocation);
 
 		// The slide of a slide peek. It cannot start from a standstill (SlideMinStartSpeed), so it is
@@ -3163,14 +3714,112 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			}
 		}
 		const bool bPoseSettled = Data.PhaseElapsed >= 0.3f && !(PeekApex && PeekApex->IsSliding());
-		if (bPoseSettled && (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget)))
+		if (bPoseSettled && !Opportunity && (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget)))
 		{
-			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s corner is BLIND from P, releasing"),
-				*GetNameSafe(Data.NPC));
+			// He is not in view. Is the place he went down behind? Then this corner is doing its job:
+			// the soldier stays out with the gun on that place, and its aim goes on settling. Going
+			// back and taking another corner is for a corner that looks at a wall, not for an enemy
+			// who ducked. Recorded 2026-10-11: a player crouched behind a low wall at 20 m, and the
+			// garrison answered every time with "nobody in view, back" and, twice in a row, with
+			// "this corner sees nobody: taking another". 17 to 33 corners thrown away a fight.
+			if (FireTarget && CVarAIDuckByReason.GetValueOnAnyThread() != 0)
+			{
+				FFactionContact WatchContact;
+				const UFactionContactMemory* const WatchMemory = UFactionContactMemory::Get(Data.NPC);
+				const FVector Place = (WatchMemory && WatchMemory->FindNearestContact(
+					PolarityTeams::GetTeam(Data.NPC), FireTarget->GetActorLocation(), WatchContact))
+					? WatchContact.LastKnownLocation : FireTarget->GetActorLocation();
 
-			Finder->ReleaseCover();
-			Data.Controller->StopMovement();
-			EnterPhase(Data, EShooterPeekPhase::Seeking);
+				FCollisionQueryParams WatchParams(SCENE_QUERY_STAT(PeekWatch), false, Data.NPC);
+				WatchParams.AddIgnoredActor(FireTarget);
+				FHitResult WatchHit;
+				const FVector Eyes = Data.NPC->GetPawnViewLocation();
+				const FVector Over = Place + FVector(0.0f, 0.0f, 60.0f);
+				const bool bBlocked = Data.NPC->GetWorld()->LineTraceSingleByChannel(WatchHit, Eyes, Over, ECC_Visibility, WatchParams);
+
+				// Clear all the way, or stopped only by what he is hiding behind (within 2.5 m of him).
+				if (!bBlocked || FVector::Dist(WatchHit.ImpactPoint, Over) <= 250.0f)
+				{
+					if (UAIAccuracyComponent* const WatchAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>())
+					{
+						WatchAccuracy->NoteAiming(FireTarget);
+					}
+					Data.BlindPeeks = 0;
+
+					// The reasons to get down still apply while it watches.
+					const UAIAccuracyComponent* const WatchPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+					if (!Data.NPC->IsReloadingWeapon() && !(WatchPinned && WatchPinned->IsSuppressed())
+						&& Data.NPC->GetRecentDamage() < Data.DuckDamageThreshold)
+					{
+						if (Data.PhaseElapsed < Data.WatchFireSeconds)
+						{
+							Data.bWatching = true;
+							Data.WatchPlace = Over;
+							Data.NPC->SayTactic(TEXT("WATCHING the place he went down"));
+							break;
+						}
+
+						// Long enough stood out: down for a moment, and up again.
+						Data.DuckUntil = (Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f) + Data.WatchRestSeconds;
+						Data.NPC->SayTactic(TEXT("WATCHED long enough: down for a moment"));
+						EnterPhase(Data, EShooterPeekPhase::ToHide);
+						TryMoveTo(Data, Spot.HideLocation);
+						break;
+					}
+
+					// Hit or pinned while it watched: down for as long as the reason says, the same as
+					// out at the peek point with the target in view. It used to fall through to "nobody
+					// in view, back", which sets no time to stay down, and it was up again in 0.4 s.
+					// Recorded 2026-10-11: 20 of the player's 102 hits in four fights landed on one
+					// that was watching.
+					if (!Data.NPC->IsReloadingWeapon())
+					{
+						const bool bWatchPinned = WatchPinned && WatchPinned->IsSuppressed();
+						Data.DuckUntil = (Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f)
+							+ (bWatchPinned ? Data.DuckSecondsOnSuppression : Data.DuckSecondsOnDamage);
+						Data.bShiftAfterDuck = true;
+						Data.NPC->ClearRecentDamage();
+						EnterPhase(Data, EShooterPeekPhase::ToHide);
+						Data.NPC->SayTactic(bWatchPinned ? TEXT("PINNED: down behind cover") : TEXT("HIT: down behind cover"));
+						NoteDuckReaction(Data.NPC, bWatchPinned ? TEXT("pinned, watching") : TEXT("hit, watching"));
+						TryMoveTo(Data, Spot.HideLocation);
+						break;
+					}
+				}
+			}
+
+			UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s corner is BLIND from P"), *GetNameSafe(Data.NPC));
+
+			// Out at P with nobody to shoot at: back behind the corner. Twice in a row from the same
+			// corner and the corner is no good (a corner is for shooting from): it is given up and
+			// another one looked for, which is the ordinary search and so is not a move forward. A squad
+			// on the defensive keeps what it has, blind or not.
+			++Data.BlindPeeks;
+			AAICombatCoordinator* const BlindCoordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+			// One that holds a ground (a garrison) is the exception to the exception: its next corner is
+			// inside the same yard, so giving a blind one up costs it nothing and gets a gun back into
+			// the fight. Recorded 2026-10-11: three of five stood behind corners that saw nobody.
+			const bool bDefending = BlindCoordinator && BlindCoordinator->GetPostureFor(Data.NPC) == ESquadPosture::Defense
+				&& !Data.NPC->HasHoldArea();
+
+			if (!bDefending && !Data.bBoundPending && Data.BlindPeeks >= 2)
+			{
+				Data.BlindPeeks = 0;
+				if (++Data.BlindCorners >= 2 && Data.NPC->CanWidenHoldArea())
+				{
+					Data.NPC->WidenHoldArea();
+					Data.NPC->SayTactic(TEXT("HOLD: my ground sees nobody, taking the whole place"));
+				}
+				Data.NPC->SayTactic(TEXT("THIS CORNER SEES NOBODY: taking another"));
+				Finder->ReleaseCover();
+				Data.Controller->StopMovement();
+				EnterPhase(Data, EShooterPeekPhase::Seeking);
+				break;
+			}
+
+			Data.NPC->SayTactic(bDefending ? TEXT("DEFENDING: nobody in view, holding the corner") : TEXT("NOBODY IN VIEW, back behind the corner"));
+			EnterPhase(Data, EShooterPeekPhase::ToHide);
+			TryMoveTo(Data, Spot.HideLocation);
 			break;
 		}
 
@@ -3183,6 +3832,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// the leash keeps the strafe from turning the hold into a relocation of its own.
 		if (bSuppressing)
 		{
+			Data.NPC->SayTactic(TEXT("COVERING a runner"));
 			Data.LegElapsed += DeltaTime;
 			if (Data.LegElapsed >= Data.LegDuration && !Spot.bPeekOver)
 			{
@@ -3192,7 +3842,40 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			break;
 		}
 
-		if (Data.PhaseElapsed >= Data.PeekDuration)
+		// Same as on the way out: dry in the open means back behind the corner now, not when the
+		// peek's clock says so. And it does not wait to BE dry: with the last rounds of the magazine it
+		// is already on its way back, so the empty click happens behind the wall.
+		if (Data.NPC->IsReloadingWeapon()
+			|| (Data.PhaseElapsed > 0.5f && Data.NPC->GetMagazineFraction() < Data.LowMagazineRetreatBelow))
+		{
+			Data.NPC->SayTactic(TEXT("RELOADING, back to cover"));
+			EnterPhase(Data, EShooterPeekPhase::ToHide);
+			TryMoveTo(Data, Spot.HideLocation);
+			break;
+		}
+
+		// Down for a reason [author, 2026-10-11]. It stays out and shoots until a suppressing round
+		// comes past or it has been hit hard enough lately; the reload is the block above. The clock
+		// is the old rule, kept behind the switch for comparing the two.
+		if (CVarAIDuckByReason.GetValueOnAnyThread() != 0)
+		{
+			const UAIAccuracyComponent* const PeekAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+			const bool bPinned = PeekAccuracy && PeekAccuracy->IsSuppressed();
+			const bool bHurt = Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold;
+			if (bPinned || bHurt)
+			{
+				const float PeekNow = Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f;
+				Data.DuckUntil = PeekNow + (bPinned ? Data.DuckSecondsOnSuppression : Data.DuckSecondsOnDamage);
+				Data.bShiftAfterDuck = true;
+				Data.NPC->ClearRecentDamage();
+				EnterPhase(Data, EShooterPeekPhase::ToHide);
+				Data.NPC->SayTactic(bPinned ? TEXT("PINNED: down behind cover") : TEXT("HIT: down behind cover"));
+				NoteDuckReaction(Data.NPC, bPinned ? TEXT("pinned, out shooting") : TEXT("hit, out shooting"));
+				TryMoveTo(Data, Spot.HideLocation);
+				break;
+			}
+		}
+		else if (Data.PhaseElapsed >= Data.PeekDuration)
 		{
 			// Fire deliberately NOT stopped here. The walk back to cover is still exposed, so it is
 			// still a shooting phase; the unified block after this switch keeps it running and
@@ -3245,15 +3928,25 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		break;
 
 	case EShooterPeekPhase::ToHide:
+	case EShooterPeekPhase::Seeking:
 		// Silent on a RUN even though it is exposed: the runner is sprinting with its body on its
 		// own direction of travel, so it has nothing to aim with. That silence is precisely what the
 		// covering fire is buying.
-		bWantsFire = Data.bPeekedSinceCover && !Data.bIsRelocating;
+		//
+		// Everything else on the way to a corner, and standing with no corner at all, shoots
+		// [author, 2026-10-10]: seen with a ready weapon and not firing is the one thing an enemy has
+		// no reason to do. The walk to a FRESH corner used to be silent, which on an arena with little
+		// cover was most of the fight. The line-of-sight test below keeps it from shooting walls.
+		bWantsFire = !Data.bIsRelocating;
 		break;
 
 	default:
-		// Seeking has no corner yet, AtHide is the whole point of having one.
-		bWantsFire = false;
+		// AtHide, and the same rule: behind a corner that hides it there is no line and so no fire,
+		// which is the whole point of having one. A "corner" the target can see is not one (the search
+		// hands out the best spot there is, and on open ground the best is still in view), and an
+		// enemy standing in view with a ready gun and holding its fire is the one thing it has no
+		// reason to do.
+		bWantsFire = true;
 		break;
 	}
 
@@ -3262,10 +3955,14 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	// Remembered whenever it is true, so the blind-fire branch below has somewhere to aim. Kept even
 	// after the line is lost, which is the entire value of it.
 	const bool bSeesFireTarget = FireTarget && Data.NPC->HasLineOfSightTo(FireTarget);
+	const float FireNow = Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f;
 	if (bSeesFireTarget)
 	{
+		Data.BlindPeeks = 0;
+		Data.BlindCorners = 0;
 		Data.LastSeenTargetLocation = FireTarget->GetActorLocation();
 		Data.bHasLastSeen = true;
+		Data.LastSeenTime = FireNow;
 	}
 
 	// Explosives will not fire into their own blast radius. A fire inhibitor and nothing more: the
@@ -3290,20 +3987,51 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	//
 	// Standing at P is the one moment where no line to the target means the target has moved rather
 	// than that there is a wall in the way, which is exactly the situation this was written for.
-	const bool bBlindFire = bWantsFire && !bSeesFireTarget && Data.bHasLastSeen
+	// And for anybody at all, for WatchFireSeconds after he went down, while the place he went down
+	// behind is in view (bWatching): rounds go on arriving where he is going to come up.
+	const bool bWatchFire = Data.bWatching;
+	Data.bWatching = false;
+	const bool bBlindFire = bWantsFire && !bSeesFireTarget
 		&& Data.Phase == EShooterPeekPhase::AtPeek
-		&& FireProfile && FireProfile->bFireAtLastSeenWhenBlind;
+		&& (bWatchFire || (Data.bHasLastSeen && FireProfile && FireProfile->bFireAtLastSeenWhenBlind));
 
 	if (bBlindFire)
 	{
-		Data.Controller->SetFocalPoint(Data.LastSeenTargetLocation);
+		// Watching: the place the SIDE last knew him at, which is newer than what this one saw itself.
+		Data.Controller->SetFocalPoint(bWatchFire ? Data.WatchPlace : Data.LastSeenTargetLocation);
 	}
 
-	if (bWantsFire && FireTarget && (bSeesFireTarget || bBlindFire))
+	// The one it is fighting is out of sight and somebody else is not: that one.
+	AActor* ShootAt = FireTarget;
+	bool bSeesShootAt = bSeesFireTarget;
+	if (!bSeesFireTarget && !bBlindFire && Opportunity && Data.NPC->HasLineOfSightTo(Opportunity))
 	{
+		ShootAt = Opportunity;
+		bSeesShootAt = true;
+		Data.Controller->SetFocus(Opportunity);
+		Data.NPC->SayTactic(TEXT("TARGET OF OPPORTUNITY: shooting who shows"));
+	}
+
+	// A change of target closes the request; the next tick opens it on the new one.
+	if (Data.bIsShooting && ShootAt && Data.ShootingAt.Get() != ShootAt)
+	{
+		StopShooting(Data);
+	}
+
+	if (bWantsFire && ShootAt && (bSeesShootAt || bBlindFire))
+	{
+		if (Data.Phase == EShooterPeekPhase::AtHide && !Data.bPeekedSinceCover)
+		{
+			// Shooting from the hide end means the hide end is in view: this corner has been traded
+			// from, so the exposure recheck is free to throw it away.
+			Data.bPeekedSinceCover = true;
+			Data.NPC->SayTactic(TEXT("SEEN in cover, shooting"));
+		}
+
 		if (!Data.bIsShooting)
 		{
-			StartShooting(Data, FireTarget);
+			StartShooting(Data, ShootAt);
+			Data.ShootingAt = ShootAt;
 		}
 		else if (!Data.NPC->IsCurrentlyShooting()
 			|| (Data.NPC->IsInBurstCooldown() && !bSuppressing))
@@ -3452,6 +4180,25 @@ void FSTTask_ShooterPeek::EnterPhase(FInstanceDataType& Data, EShooterPeekPhase 
 	Data.Phase = NewPhase;
 	Data.PhaseElapsed = 0.0f;
 
+	if (NewPhase == EShooterPeekPhase::ToHide)
+	{
+		Data.bRunDecided = false;
+		Data.bEntrySlideStarted = false;
+	}
+
+	if (Data.NPC)
+	{
+		switch (NewPhase)
+		{
+		case EShooterPeekPhase::Seeking: Data.NPC->SayTactic(TEXT("LOOKING for cover")); break;
+		case EShooterPeekPhase::ToHide:  Data.NPC->SayTactic(Data.bPeekedSinceCover ? TEXT("BACK to cover") : TEXT("TO COVER (walk, gun up)")); break;
+		case EShooterPeekPhase::AtHide:  Data.NPC->SayTactic(TEXT("IN COVER")); break;
+		case EShooterPeekPhase::ToPeek:  Data.NPC->SayTactic(TEXT("STEPPING OUT")); break;
+		case EShooterPeekPhase::AtPeek:  Data.NPC->SayTactic(TEXT("OUT, shooting")); break;
+		default: break;
+		}
+	}
+
 	// The pose of the cycle. Here rather than at the movement calls, because this is the one funnel
 	// every phase change goes through regardless of which branch asked for it.
 	//   AtHide  - down behind LOW cover (it hides a crouched body only), otherwise standing.
@@ -3481,7 +4228,10 @@ void FSTTask_ShooterPeek::EnterPhase(FInstanceDataType& Data, EShooterPeekPhase 
 			{
 				const UEnemyCombatProfile* const StanceProfile = Data.NPC->GetCombatProfile();
 				Data.bPeekCrouch = !bOver && StanceProfile && StanceProfile->RollCrouchPeek();
-				Data.bPeekSlide = !bOver && StanceProfile && StanceProfile->RollSlidePeek();
+				// The slide out of cover is switched off [author, 2026-10-11]: a slide is how an enemy gets
+				// INTO cover now (SlideEntryDistance), and sliding out to shoot read as a cartoon. The
+				// profile's SlidePeekChance stays where it is for the day it comes back.
+				Data.bPeekSlide = false;
 				Data.bPeekSlideStarted = false;
 				if (Data.bPeekSlide)
 				{
@@ -3658,6 +4408,13 @@ bool FSTTask_ShooterPeek::BeginRelocationRun(FInstanceDataType& Data, float Dist
 		}
 	}
 
+	// A bound leaves a corner nobody opened, so there is nobody to name. The one to sit on is then
+	// simply the one this NPC is fighting: that is who will see it run.
+	if (!Opener && Data.bBoundPending)
+	{
+		Opener = Cast<APawn>(Data.Target.Get());
+	}
+
 	const UCharacterMovementComponent* const Movement = Data.NPC->GetCharacterMovement();
 	const float Speed = FMath::Max(100.0f, Movement ? Movement->GetMaxSpeed() : 400.0f);
 	const float ExpectedSeconds = Distance / Speed;
@@ -3740,6 +4497,17 @@ void FSTTask_ShooterPeek::StartShooting(FInstanceDataType& Data, AActor* ShootAt
 	// bHasExternalPermission is the existing mechanism for exactly this, not a new one:
 	// AShooterNPC::RequestAttackPermission short-circuits on it (ShooterNPC.cpp), so the coordinator
 	// is bypassed rather than fought with.
+	//
+	// What the coordinator does decide is whether this fire is AT the target or near it. Asked at the
+	// start of every string (the task closes and reopens the request around each burst cooldown), so
+	// the aimed slots rotate through the squad at the rhythm of the bursts.
+	AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC);
+	const bool bAimed = !Coordinator || Coordinator->RequestAimedFire(Data.NPC);
+	if (UAIAccuracyComponent* const Accuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>())
+	{
+		Accuracy->SetPinFire(!bAimed);
+	}
+
 	Data.NPC->StartShooting(ShootAt, /*bHasExternalPermission*/ true);
 	Data.bIsShooting = true;
 }
@@ -3749,6 +4517,15 @@ void FSTTask_ShooterPeek::StopShooting(FInstanceDataType& Data) const
 	if (Data.NPC)
 	{
 		Data.NPC->StopShooting();
+
+		if (AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(Data.NPC))
+		{
+			Coordinator->ReleaseAimedFire(Data.NPC);
+		}
+		if (UAIAccuracyComponent* const Accuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>())
+		{
+			Accuracy->SetPinFire(false);
+		}
 	}
 	Data.bIsShooting = false;
 }

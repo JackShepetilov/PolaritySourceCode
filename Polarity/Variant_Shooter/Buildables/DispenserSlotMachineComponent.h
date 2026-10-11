@@ -327,6 +327,13 @@ public:
 	/** Every attachment Character has: in the bag, or on any of their guns. */
 	static void GatherOwnedAttachments(const AShooterCharacter* Character, TArray<const UWeaponAttachmentDefinition*>& OutOwned);
 
+	/** An attachment card: a fresh attachment pickup flies into Taker's bag; what does not fit is put
+	 *  on the floor by the pickup itself. Static and public: the shop hands its goods over the same way. */
+	static void DeliverAttachment(UWeaponAttachmentDefinition* Attachment, AShooterCharacter* Taker);
+
+	/** A buff card: its effect, at once. */
+	static void ApplyBuff(const UDispenserBuffDefinition* Buff, AShooterCharacter* Taker);
+
 	/** The pool, loaded. */
 	const UDispenserUpgradePool* GetPool() const;
 
@@ -403,12 +410,6 @@ private:
 	void SpawnItems();
 	void DestroyItems();
 	FTransform BoxTransform(int32 Index) const;
-	/** An attachment card: a fresh attachment pickup flies into Taker's bag; what does not fit is put
-	 *  on the floor by the pickup itself. */
-	void DeliverAttachment(UWeaponAttachmentDefinition* Attachment, AShooterCharacter* Taker) const;
-
-	/** A buff card: its effect, at once. */
-	void ApplyBuff(const UDispenserBuffDefinition* Buff, AShooterCharacter* Taker) const;
 	void Receipt(AShooterCharacter* Donor, const FString& Text) const;
 
 	/** What the last FireSpinEvents saw. */

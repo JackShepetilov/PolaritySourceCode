@@ -38,4 +38,13 @@ private:
 
 	/** World time the running bonus ends. */
 	float BonusEndTime = -1.0f;
+
+	/** The last kill paid for. One death is reported once per hit that was still in the air when it
+	 *  happened (every pellet of a shotgun blast), and it must pay once. */
+	TWeakObjectPtr<AActor> LastPaidKill;
+
+	/** Text under the crosshair and glow round the screen, on the owner's own machine only. */
+	void ShowFeedback(float Seconds);
+	void HideFeedback();
+	float LastPaidKillTime = -1.0f;
 };

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PolarityCharacter.h"
+#include "AI/BodySamples.h"
 #include "ApexMovementComponent.h"
 #include "MovementSettings.h"
 #include "CameraShakeComponent.h"
@@ -1031,6 +1032,10 @@ void APolarityCharacter::AccumulateFirstPersonPose(float DeltaTime, FVector& Loc
 	// jerks when crouching" was. Held here, the hands stay put, the eye stays put because it is
 	// parented to them, and both walk down together over CrouchDownTime.
 	Location.Z += CrouchCameraSmoothOffsetZ;
+
+	// And the eye inside the crouched capsule, on the same progress as the rest of the crouch.
+	// @see UMovementSettings::CrouchEyeDrop
+	Location.Z -= MovementSettings->CrouchEyeDrop * CrouchSlideProgress;
 }
 
 void APolarityCharacter::ApplyCameraManagerRoll()
@@ -1402,37 +1407,50 @@ UAISense_Sight::EVisibilityResult APolarityCharacter::CanBeSeenFrom(const FCanBe
 		return UAISense_Sight::EVisibilityResult::NotVisible;
 	}
 
-	// The same point the sense would have traced to, so nothing about WHERE a body is seen changes
-	// by taking the test over.
-	const FVector TargetLocation = GetActorLocation();
+	// A body is seen when any of it is: the waist first (the point the sense itself would have traced
+	// to, and the only trace in the open), then the head. One point at the waist made anybody standing
+	// behind a wall 1.2 m high invisible with their head and chest in plain view [author, 2026-10-10].
+	// The capsule is read live, so a crouched body offers a lower head and a low wall does hide it.
+	const FVector Waist = GetActorLocation();
+	const FVector Head = Waist + FVector(0.0f, 0.0f, FMath::Max(0.0f, GetSimpleCollisionHalfHeight() - 15.0f));
 
 	// Half one: the walls. This is UAISense_Sight's own default test, reproduced -- ECC_Visibility is
 	// what DefaultSightCollisionChannel resolves to for this project, and a hit only counts as
 	// blocking if it is something other than this body or a part of it.
 	const FCollisionQueryParams QueryParams(TEXT("AILineOfSightSmoke"), true, Context.IgnoreActor);
-	FHitResult Hit;
-	const bool bHit = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, TargetLocation,
-		ECC_Visibility, QueryParams);
-	++OutNumberOfLoSChecksPerformed;
 
-	if (bHit)
+	// And the camera: what a player sees from can be seen. @see BodySamples
+	BodySamples::FPoints BodyPoints;
+	BodySamples::Get(this, BodyPoints);
+
+	for (const FVector& TargetLocation : BodyPoints)
 	{
-		const AActor* HitActor = Hit.HitObjectHandle.FetchActor();
-		if (!HitActor || !HitActor->IsOwnedBy(this))
+		FHitResult Hit;
+		const bool bHit = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, TargetLocation,
+			ECC_Visibility, QueryParams);
+		++OutNumberOfLoSChecksPerformed;
+
+		if (bHit)
 		{
-			return UAISense_Sight::EVisibilityResult::NotVisible;
+			const AActor* HitActor = Hit.HitObjectHandle.FetchActor();
+			if (!HitActor || !HitActor->IsOwnedBy(this))
+			{
+				continue;
+			}
 		}
+
+		// Half two: the smoke. Geometry rather than a trace, because the clouds have no collision at
+		// all -- @see USmokeVisionSubsystem. Costs one emptiness check when nothing is burning, which
+		// is almost always.
+		if (USmokeVisionSubsystem::IsSightBlockedInWorld(World, Context.ObserverLocation, TargetLocation))
+		{
+			continue;
+		}
+
+		OutSeenLocation = TargetLocation;
+		OutSightStrength = 1.0f;
+		return UAISense_Sight::EVisibilityResult::Visible;
 	}
 
-	// Half two: the smoke. Geometry rather than a trace, because the clouds have no collision at all
-	// -- @see USmokeVisionSubsystem. Costs one emptiness check when nothing is burning, which is
-	// almost always.
-	if (USmokeVisionSubsystem::IsSightBlockedInWorld(World, Context.ObserverLocation, TargetLocation))
-	{
-		return UAISense_Sight::EVisibilityResult::NotVisible;
-	}
-
-	OutSeenLocation = TargetLocation;
-	OutSightStrength = 1.0f;
-	return UAISense_Sight::EVisibilityResult::Visible;
+	return UAISense_Sight::EVisibilityResult::NotVisible;
 }

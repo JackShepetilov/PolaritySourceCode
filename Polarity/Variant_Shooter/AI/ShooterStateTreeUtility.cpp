@@ -2,6 +2,7 @@
 
 
 #include "Variant_Shooter/AI/ShooterStateTreeUtility.h"
+#include "AI/BodySamples.h"
 #include "StateTreeExecutionContext.h"
 #include "ShooterNPC.h"
 #include "Camera/CameraComponent.h"
@@ -9,6 +10,10 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "ShooterAIController.h"
 #include "AI/SmokeVisionSubsystem.h"
+#include "AI/FactionContactMemory.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "AI/Coordination/AICombatCoordinator.h"
+#include "Variant_Shooter/AI/SquadSpawn/Squad.h"
 #include "StateTreeAsyncExecutionContext.h"
 #include "Variant_Shooter/Siege/SiegeCampGuard.h"
 #include "Variant_Shooter/Siege/SiegeCampSite.h"
@@ -49,6 +54,42 @@ namespace SenseLeash
 		}
 		const ASiegeCampSite* const Camp = CampGuard->GetCamp();
 		return !Camp || FVector::DistSquared2D(Where, Camp->GetActorLocation()) <= FMath::Square(CampGuard->LeashRadius);
+	}
+}
+
+namespace SenseSight
+{
+	/** Can Observer's eyes see Target's body: the waist, or failing that the head.
+	 *
+	 *  The sense task used to ask this with one ray from the observer's WAIST to the target's waist,
+	 *  so a wall 1.2 m high between them hid everything: an enemy standing at its own low cover never
+	 *  acquired anybody, and a player behind one could not be acquired, both with heads and chests in
+	 *  plain view [author, 2026-10-10]. Eyes to body is what APolarityCharacter::CanBeSeenFrom answers
+	 *  for the sight sense, and the two must agree or the sense reports somebody this task then
+	 *  refuses. OutHit is the last blocking hit, for the log. */
+	bool SeesBody(const APawn* Observer, const AActor* Target, FHitResult& OutHit)
+	{
+		if (!Observer || !Target || !Observer->GetWorld())
+		{
+			return false;
+		}
+
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(Observer);
+		QueryParams.AddIgnoredActor(Target);
+
+		const FVector Eyes = Observer->GetPawnViewLocation();
+		BodySamples::FPoints Points;
+		BodySamples::Get(Target, Points);
+
+		for (const FVector& Point : Points)
+		{
+			if (!Observer->GetWorld()->LineTraceSingleByChannel(OutHit, Eyes, Point, ECC_Visibility, QueryParams))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 }
 
@@ -292,19 +333,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				if (Controller->IsHostileTo(SensedActor) && SenseLeash::Allows(Character, SensedActor))
 				{
 					// Run a line trace between the character and the sensed actor
-					FCollisionQueryParams QueryParams;
-					QueryParams.AddIgnoredActor(Character);
-					QueryParams.AddIgnoredActor(SensedActor);
-
 					FHitResult OutHit;
-
-					bool bHit = Character->GetWorld()->LineTraceSingleByChannel(
-						OutHit,
-						Character->GetActorLocation(),
-						SensedActor->GetActorLocation(),
-						ECC_Visibility,
-						QueryParams
-					);
+					const bool bHit = !SenseSight::SeesBody(Character, SensedActor, OutHit);
 					bool bDirectLOS = !bHit;
 
 					if (bDirectLOS)
@@ -411,18 +441,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::EnterState(FStateTreeExecutionCo
 				}
 
 				// Проверяем Line of Sight
-				FCollisionQueryParams QueryParams;
-				QueryParams.AddIgnoredActor(InstanceData.Character);
-				QueryParams.AddIgnoredActor(KnownActor);
-
 				FHitResult OutHit;
-				bool bHit = InstanceData.Character->GetWorld()->LineTraceSingleByChannel(
-					OutHit,
-					InstanceData.Character->GetActorLocation(),
-					KnownActor->GetActorLocation(),
-					ECC_Visibility,
-					QueryParams
-				);
+					const bool bHit = !SenseSight::SeesBody(InstanceData.Character, KnownActor, OutHit);
 
 				bool bDirectLOS = !bHit;
 
@@ -522,18 +542,8 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 					}
 
 					// Check Line of Sight
-					FCollisionQueryParams QueryParams;
-					QueryParams.AddIgnoredActor(InstanceData.Character);
-					QueryParams.AddIgnoredActor(KnownActor);
-
 					FHitResult OutHit;
-					bool bHit = InstanceData.Character->GetWorld()->LineTraceSingleByChannel(
-						OutHit,
-						InstanceData.Character->GetActorLocation(),
-						KnownActor->GetActorLocation(),
-						ECC_Visibility,
-						QueryParams
-					);
+					const bool bHit = !SenseSight::SeesBody(InstanceData.Character, KnownActor, OutHit);
 
 					UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL-LOS: candidate=%s LOSBlocked=%d (blocker=%s)"),
 						*GetNameSafe(InstanceData.Character),
@@ -557,6 +567,138 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 			{
 				UE_LOG(LogTemp, Verbose, TEXT("[SENSE_DEBUG] %s POLL: PerceptionComponent NULL!"),
 					*GetNameSafe(InstanceData.Character));
+			}
+
+			// Nobody in view and nothing to look into: go where the side last saw an enemy. An advancing
+			// squad only; one that holds stays where it was put. This is what an enemy with no target
+			// does instead of standing where it spawned [author, 2026-10-11].
+			InstanceData.TimeWithoutTarget = InstanceData.bHasTarget
+				? 0.0f : InstanceData.TimeWithoutTarget + InstanceData.PerceptionPollInterval;
+
+			// A squad on the defensive does not go looking: it was outnumbered when it last had somebody
+			// to fight, and losing sight of them has not changed that.
+			const AAICombatCoordinator* const PostureCoordinator = AAICombatCoordinator::GetCoordinator(InstanceData.Character);
+			const bool bDefending = PostureCoordinator
+				&& PostureCoordinator->GetPostureFor(InstanceData.Character) == ESquadPosture::Defense;
+
+			// Anybody with no target, whatever its squad is out to do.
+			if (!InstanceData.bHasTarget)
+			{
+				FFactionContact RadioContact;
+				const UFactionContactMemory* const RadioMemory = UFactionContactMemory::Get(InstanceData.Character);
+				if (RadioMemory && RadioMemory->FindNearestContact(InstanceData.Controller->GetGenericTeamId().GetId(),
+					InstanceData.Character->GetActorLocation(), RadioContact))
+				{
+					// Told on the radio where he is, and from here there is a clear line to him: that is
+					// seeing him. The sight sense alone would not: its radius is 35 m (the controller's
+					// blueprint), and an outpost is fought at 30 to 60. Recorded 2026-10-11: the soldier
+					// on the roof, 56 m from a player standing in the open, with nothing between them,
+					// had no target for the whole of three fights.
+					AActor* const Known = RadioContact.Enemy.Get();
+					FHitResult RadioHit;
+					if (Known && RadioContact.bCurrentlySeen && InstanceData.Controller->IsHostileTo(Known)
+						&& SenseLeash::Allows(InstanceData.Character, Known)
+						&& SenseSight::SeesBody(InstanceData.Character, Known, RadioHit))
+					{
+						InstanceData.Controller->SetCurrentTarget(Known);
+						InstanceData.TargetActor = Known;
+						InstanceData.bHasTarget = true;
+						InstanceData.bHasInvestigateLocation = false;
+						InstanceData.Character->SayTactic(TEXT("ON THE RADIO: in view from here"));
+						return EStateTreeRunStatus::Running;
+					}
+				}
+			}
+
+			if (!InstanceData.bHasTarget && !bDefending && InstanceData.Character->GetCombatTask() == ESquadTask::Advance)
+			{
+				// Where to look, refreshed on every poll rather than set once: the place the side saw an
+				// enemy last while that is fresh, and after HuntAfterSeconds of nothing, the nearest enemy
+				// alive. The second is not a sense, it is the squad knowing a fight is still on; the NPC
+				// still has to SEE somebody to get a target, this only walks it to where it can.
+				FVector Where = FVector::ZeroVector;
+				bool bHasWhere = false;
+				bool bHunting = false;
+
+				FFactionContact Contact;
+				const UFactionContactMemory* const Memory = UFactionContactMemory::Get(InstanceData.Character);
+				if (Memory && Memory->FindNearestContact(InstanceData.Controller->GetGenericTeamId().GetId(),
+					InstanceData.Character->GetActorLocation(), Contact))
+				{
+					Where = Contact.LastKnownLocation;
+					bHasWhere = true;
+				}
+
+				const bool bAtWhere = bHasWhere
+					&& FVector::Dist2D(Where, InstanceData.Character->GetActorLocation()) < 300.0f;
+				if ((!bHasWhere || bAtWhere) && InstanceData.TimeWithoutTarget >= InstanceData.HuntAfterSeconds)
+				{
+					const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(InstanceData.Character);
+					if (const APawn* const Nearest = Coordinator ? Coordinator->FindNearestHostile(InstanceData.Character) : nullptr)
+					{
+						Where = Nearest->GetActorLocation();
+						bHasWhere = true;
+						bHunting = true;
+					}
+				}
+
+				if (bHasWhere && SenseLeash::AllowsLocation(InstanceData.Character, Where)
+					&& (!InstanceData.bHasInvestigateLocation || FVector::Dist2D(Where, InstanceData.InvestigateLocation) > 200.0f))
+				{
+					InstanceData.InvestigateLocation = Where;
+					InstanceData.bHasInvestigateLocation = true;
+					InstanceData.Character->SayTactic(bHunting
+						? TEXT("NOBODY IN SIGHT: going to the nearest enemy")
+						: TEXT("NO TARGET, going to the last contact"));
+				}
+
+				// And walk there from here, not only through the tree. Its Investigate branch moves once
+				// and then sits in its Wait state whatever the location becomes: recorded 2026-10-11, a
+				// soldier said "going to the last contact" and stood for 191 s of a fight going on 20 m
+				// away. Only while nothing else is moving the pawn, and only when there is somewhere to
+				// go: an order to the spot it stands on makes it spin.
+				if (bHasWhere && SenseLeash::AllowsLocation(InstanceData.Character, Where)
+					&& FVector::Dist2D(Where, InstanceData.Character->GetActorLocation()) > 300.0f
+					&& InstanceData.Controller->GetMoveStatus() == EPathFollowingStatus::Idle)
+				{
+					InstanceData.Controller->MoveToLocation(Where, 150.0f);
+				}
+			}
+
+			// One told to hold that sees nobody while its side knows where the enemy is. It does not
+			// go to him; it goes to the edge of its own ground on his side, and along that edge a
+			// few metres at a time, until it has a line. Recorded 2026-10-11: the fifth man of an
+			// outpost stood behind a block in the middle of the yard for 23 to 37 s of each fight and
+			// never fired, so the five were four.
+			if (!InstanceData.bHasTarget && InstanceData.Character->GetCombatTask() == ESquadTask::Hold
+				&& InstanceData.Character->HasHoldArea() && InstanceData.TimeWithoutTarget >= 2.0f
+				&& InstanceData.Controller->GetMoveStatus() == EPathFollowingStatus::Idle)
+			{
+				FFactionContact Contact;
+				const UFactionContactMemory* const Memory = UFactionContactMemory::Get(InstanceData.Character);
+				if (Memory && Memory->FindNearestContact(InstanceData.Controller->GetGenericTeamId().GetId(),
+					InstanceData.Character->GetActorLocation(), Contact))
+				{
+					// Eight seconds of that and still nobody: its own ground has no line to the fight at
+					// all, and the whole place becomes its ground. Recorded 2026-10-11: with the attack
+					// from the south the three at the house said this once, went to the edge of their
+					// yard and stood there for 49 s each, a 7 man garrison fighting as 4.
+					// @see AShooterNPC::SetWideHoldArea
+					if (InstanceData.TimeWithoutTarget >= 8.0f && InstanceData.Character->CanWidenHoldArea())
+					{
+						InstanceData.Character->WidenHoldArea();
+						InstanceData.Character->SayTactic(TEXT("HOLD: my ground sees nobody, taking the whole place"));
+					}
+
+					// Left of the line, then right of it, four seconds each.
+					const float Side = FMath::Fmod(InstanceData.TimeWithoutTarget, 8.0f) < 4.0f ? 350.0f : -350.0f;
+					const FVector Where = InstanceData.Character->GetHoldPointToward(Contact.LastKnownLocation, Side);
+					if (FVector::Dist2D(Where, InstanceData.Character->GetActorLocation()) > 200.0f)
+					{
+						InstanceData.Controller->MoveToLocation(Where, 80.0f);
+						InstanceData.Character->SayTactic(TEXT("HOLD: no line from here, moving to the side the enemy is on"));
+					}
+				}
 			}
 		}
 	}

@@ -698,6 +698,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Melee")
 	bool StartAttack();
 
+	/** Start the HOLD attack: the same swing, flagged as one, playing Animation in place of the
+	 *  ordinary pick when Animation is given. Animation must outlive the swing (it lives on an
+	 *  upgrade's asset). @see FMeleeHoldAttack */
+	bool StartHoldAttack(const FMeleeAnimationData* Animation);
+
+	/** True while the swing in progress is a hold attack. */
+	UFUNCTION(BlueprintPure, Category = "Melee")
+	bool IsHoldAttack() const { return bIsHoldAttack; }
+
 	/**
 	 * Start a delegated dropkick (called by ShooterWeapon_Melee).
 	 * Handles only movement and hit detection — skips animations, mesh transitions, damage.
@@ -1151,6 +1160,20 @@ protected:
 
 	/** Currently selected animation data (chosen at attack start) */
 	const FMeleeAnimationData* SelectedAnimationData = nullptr;
+
+	/** Set by StartHoldAttack for the one StartAttack call it makes. */
+	bool bHoldAttackRequested = false;
+	const FMeleeAnimationData* RequestedHoldAnimation = nullptr;
+
+	/** True for the swing that StartHoldAttack started. */
+	bool bIsHoldAttack = false;
+
+	/** Set when this swing has knocked its own owner back: the lunge stops driving the owner for the
+	 *  rest of the swing, or it would carry them forward after the enemy and eat the shove. */
+	bool bLungeCutShort = false;
+
+	/** The owner takes the shove it just gave Target, the other way. @see GetMeleeSelfKnockbackScale */
+	void ApplySelfKnockback(const FVector& EnemyDirection, float EnemyDistance, float EnemyDuration, float Scale);
 
 	/** Default empty animation data for fallback */
 	FMeleeAnimationData DefaultAnimationData;

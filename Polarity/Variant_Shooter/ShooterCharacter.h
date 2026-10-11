@@ -16,6 +16,8 @@ class UInputAction;
 class UInputComponent;
 class UPawnNoiseEmitterComponent;
 class UWeaponRecoilComponent;
+class UPlayerSuppressionComponent;
+class UFieldCareComponent;
 class URecoilAnimationComponent;
 class URecoilData;
 class UHitMarkerComponent;
@@ -195,6 +197,20 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	/** Advanced weapon recoil component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UWeaponRecoilComponent* RecoilComponent;
+
+	/** What rounds passing close do to this player: the picture closes in, the sight is slower and
+	 *  sways. @see UPlayerSuppressionComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UPlayerSuppressionComponent> SuppressionComponent;
+
+	/** The medkit and the armour off a body, each on a held key. @see UFieldCareComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UFieldCareComponent> FieldCareComponent;
+
+	/** Held to use a medkit. Not bound while empty. Armour has no key of its own: it comes off a
+	 *  body on the take key (FetchAction), held. @see DoFetchPressed */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> MedkitAction;
 
 	/** PRAS, the FPS Animation Pack's recoil. Idle unless the weapon in hand names a recoil asset.
 	 *
@@ -495,7 +511,7 @@ protected:
 	FVector BaseCameraLocation = FVector::ZeroVector;
 	/** Max HP this character can have */
 	UPROPERTY(EditAnywhere, Category = "Health")
-	float MaxHP = 500.0f;
+	float MaxHP = 100.0f;
 
 	/** Fraction of MaxHP the character starts with (1.0 = full, 0.5 = half). */
 	UPROPERTY(EditAnywhere, Category = "Health", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
@@ -777,7 +793,7 @@ protected:
 
 	/** Maximum armor value */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Armor")
-	float MaxArmor = 250.0f;
+	float MaxArmor = 100.0f;
 
 	/** Current armor remaining (absorbs damage before health). Server-owned, like CurrentHP. */
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CurrentArmor, Category = "Armor")
@@ -790,7 +806,7 @@ protected:
 
 	/** If true, HP regenerates over time based on movement speed */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health|Regeneration")
-	bool bEnableRegeneration = true;
+	bool bEnableRegeneration = false;
 
 	/** Base HP regeneration rate when stationary (HP/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health|Regeneration", meta = (ClampMin = "0.0", EditCondition = "bEnableRegeneration"))
@@ -1514,6 +1530,9 @@ public:
 
 	virtual bool IsHiddenFromAI() const override { return bCloaked; }
 
+	virtual int32 GetMovementWeaponSlot() const override;
+	virtual const class UWeaponMovementProfile* GetWeaponMovementProfile(int32 Slot) const override;
+
 	/** Turn the cloak on for Duration, or off. Authority only. */
 	void SetCloaked(bool bNewCloaked, float Duration = 0.0f);
 
@@ -1531,10 +1550,11 @@ public:
 	 *  No-op outside a swing. */
 	void KeepHandsEmptyAfterMelee();
 
-	/** The swinger kicked itself back off a target. Applied locally at once by the caller; this
-	 *  moves the authority's copy so the two agree. */
+	/** A melee upgrade knocked the swinger back off its own hit, and the owning client has already
+	 *  launched itself. This launches the authority's copy so the two agree.
+	 *  @see UMeleeAttackComponent::ApplySelfKnockback */
 	UFUNCTION(Server, Reliable)
-	void Server_ApplyMeleeRecoil(FVector LaunchVelocity);
+	void Server_ApplyMeleeSelfKnockback(FVector LaunchVelocity);
 
 	/** For Blueprint to dress the cloak (material, sound). Runs on every machine. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Melee|Cloak", meta = (DisplayName = "On Cloak Changed"))
@@ -2039,6 +2059,44 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoMeleeReleased();
 
+	// ==================== Hold prompt ====================
+	// One key at a time can be "held towards something": the melee key winding up a hold attack, the
+	// ability key on its way from a tap to an aimed throw. The HUD's hold slot shows it. Local.
+
+	/** Start showing Action as being held for Duration, labelled Label. */
+	void BeginHoldPrompt(const UInputAction* Action, const FText& Label, float Duration);
+
+	/** Stop showing it, if Action is the one being shown. */
+	void EndHoldPrompt(const UInputAction* Action);
+
+	/** What is being held right now: the key as the player's bindings have it, what holding it
+	 *  does, and how far along (0..1). False when nothing is, or once the hold has run its time. */
+	bool GetHoldPrompt(FText& OutKey, FText& OutLabel, float& OutProgress) const;
+
+protected:
+	/** The swing itself, after every gate. bHoldAttack plays the owned upgrade's hold attack. */
+	void PerformMeleeSwing(bool bHoldAttack);
+
+	/** Once a frame: fire the hold attack when the melee key has been down long enough. */
+	void UpdateMeleeHold();
+
+	/** True from the melee key going down until this press has been answered (by a tap's swing on
+	 *  release, or by the hold attack). */
+	bool bMeleeHoldPending = false;
+
+	/** True once this press has been answered, until the key comes up. Stops the Triggered pulses
+	 *  of a key that is still down from starting swing after swing. */
+	bool bMeleePressAnswered = false;
+
+	float MeleeHoldStartTime = 0.0f;
+
+	TWeakObjectPtr<const UInputAction> HoldPromptAction;
+	FText HoldPromptLabel;
+	float HoldPromptStartTime = 0.0f;
+	float HoldPromptDuration = 0.0f;
+
+public:
+
 	/** Called on ability button press (ETriggerEvent::Started). Calls AbilityComponent->TryActivate(). */
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void DoAbilityPressed();
@@ -2175,14 +2233,15 @@ public:
 
 	// ==================== Weapon hotkey slots ====================
 	//
-	// Two equal slots, Apex-style [author, 2026-09-29]. The weapon the run starts with is not special
-	// and owns no slot: it can be thrown away, fed to a turret or the dispenser, or replaced.
+	// Three equal slots, any weapon class in any of them [author, 2026-10-07; two until then, Apex-style,
+	// 2026-09-29]. The weapon the run starts with is not special and owns no slot: it can be thrown
+	// away, fed to a turret or the dispenser, or replaced.
 	//
 	//   An arriving weapon takes the first empty slot.
-	//   Both taken: it replaces the one in hand, and that one goes on the floor.
+	//   All taken: it replaces the one in hand, and that one goes on the floor.
 
 	/** How many weapons the player carries. Slot N is key N+1 (WeaponSwitchActions[N]). */
-	static constexpr int32 WeaponSlotCount = 2;
+	static constexpr int32 WeaponSlotCount = 3;
 
 	/** Where a weapon arriving now would go: the first empty slot, else the slot of the weapon in
 	 *  hand. Safe on any machine (reads replicated state), which is what lets the loot card say what
@@ -2206,12 +2265,22 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_DropWeaponFromInventory(AShooterWeapon* Weapon);
 
-	/** The inventory screen dragged one weapon panel onto the other: the two trade slots (keys).
-	 *  With one gun, it moves to the other slot. Server only; the screen asks through the RPC. */
-	void SwapWeaponSlots();
+	/** The gun in hand fired its last round, magazine and reserve both: it is thrown away and
+	 *  vanishes (ADroppedRangedWeapon::VanishIfEmpty). Called on the machine that fired. */
+	void NotifyWeaponRanDry(AShooterWeapon* Weapon);
 
 	UFUNCTION(Server, Reliable)
-	void Server_SwapWeaponSlots();
+	void Server_DiscardEmptyWeapon(AShooterWeapon* Weapon);
+
+	/** Server. Tries again a little later while the hands are busy with a switch. */
+	void DiscardEmptyWeapon(AShooterWeapon* Weapon, int32 TriesLeft);
+
+	/** The inventory screen dragged one weapon panel onto another: the two slots trade what they hold
+	 *  (keys). Onto an empty slot, the gun moves there. Server only; the screen asks through the RPC. */
+	void SwapWeaponSlots(int32 SlotA, int32 SlotB);
+
+	UFUNCTION(Server, Reliable)
+	void Server_SwapWeaponSlots(int32 SlotA, int32 SlotB);
 
 	/** The owned weapon currently sitting in Slot, or null. */
 	AShooterWeapon* FindOwnedWeaponInHotkeySlot(int32 Slot) const;
@@ -2805,8 +2874,12 @@ protected:
 	void StartItemFetch(AActor* Drop);
 	void FinishItemFetch();
 
-	/** Called on the fetch key press. */
+	/** Called on the fetch key press. The take key: the item the brackets are on, and with nothing
+	 *  bracketed, the armour of a body at hand (held). */
 	void DoFetchPressed();
+
+	/** The take key let go: armour that was still coming off stays on the body. */
+	void DoFetchReleased();
 
 	/** Authority: the hooked item WatchGrappleFetch is waiting on, and its poll. */
 	TWeakObjectPtr<AActor> WatchedFetch;

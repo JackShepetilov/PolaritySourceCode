@@ -14,6 +14,7 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "Variant_Shooter/Shield/ShieldFieldComponent.h"
+#include "Components/PanelWidget.h"
 #include "Components/ProgressBar.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"

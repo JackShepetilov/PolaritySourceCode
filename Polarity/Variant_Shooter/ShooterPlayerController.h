@@ -13,6 +13,8 @@ class AShooterWeapon;
 class UUpgradeChoiceWidget;
 class UInventoryScreenWidget;
 class UMapScreenWidget;
+class UShopScreenWidget;
+class ABuildableActor;
 class UHudLayoutAsset;
 
 /** Tells run-HUD widgets to show/hide (e.g. for cutscenes).
@@ -72,6 +74,14 @@ protected:
 	/** Pointer to the inventory overlay. Created hidden and toggled by ToggleInventoryScreen. */
 	UPROPERTY(Transient)
 	TObjectPtr<UInventoryScreenWidget> InventoryScreen;
+
+	/** Type of shop screen to spawn (WBP_ShopScreen). Unset: the feed key at a dispenser falls back
+	 *  to the old menu of guns. */
+	UPROPERTY(EditAnywhere, Category = "Shooter|UI")
+	TSubclassOf<UShopScreenWidget> ShopScreenClass;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UShopScreenWidget> ShopScreen;
 
 	/** Type of map screen to spawn. Leave unset and the map key does nothing; set it to a Blueprint
 	 *  subclass of UMapScreenWidget to restyle without touching code. */
@@ -159,6 +169,18 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Shooter|UI")
 	bool IsInventoryScreenOpen() const;
+
+	// ==================== Shop screen ====================
+
+	/** Show the shop of the dispenser the player stands at. False when there is no shop screen (the
+	 *  class is unset), so the caller can fall back. Local only. */
+	bool OpenShopScreen(ABuildableActor* Dispenser);
+
+	UFUNCTION(BlueprintCallable, Category = "Shooter|UI")
+	void CloseShopScreen();
+
+	UFUNCTION(BlueprintPure, Category = "Shooter|UI")
+	bool IsShopScreenOpen() const;
 
 	/** Show or hide the map. Local only, same as the inventory: it is a picture of state the client
 	 *  already has, and it sends nothing anywhere. */

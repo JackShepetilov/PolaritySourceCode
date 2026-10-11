@@ -10,7 +10,10 @@
 
 #include "CoreMinimal.h"
 #include "UpgradeDefinition.h"
+#include "Variant_Shooter/MeleeAttackComponent.h"
 #include "UpgradeDefinition_MeleeKit.generated.h"
+
+class UMaterialInterface;
 
 // ==================== Momentum ====================
 
@@ -40,7 +43,9 @@ public:
 // ==================== Kick push ====================
 
 /**
- * A kick that lands shoves the enemy and the player apart along the line of the hit.
+ * A kick that lands knocks the player back exactly as it knocks the enemy back: the same shove,
+ * the other way. No numbers of its own, on purpose: whatever the kick does to the enemy is what it
+ * does to the player.
  */
 UCLASS(BlueprintType)
 class POLARITY_API UUpgradeDefinition_KickPush : public UUpgradeDefinition
@@ -48,17 +53,9 @@ class POLARITY_API UUpgradeDefinition_KickPush : public UUpgradeDefinition
 	GENERATED_BODY()
 
 public:
-	/** Multiplier on how far the kicked enemy is thrown. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kick Push", meta = (ClampMin = "1.0", ClampMax = "10.0"))
-	float EnemyKnockbackMultiplier = 2.5f;
-
-	/** Speed the player leaves at, back along the line of the hit. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kick Push", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float SelfPushSpeed = 1100.0f;
-
-	/** Upward speed added to the player's push, so it carries instead of scraping the floor. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kick Push", meta = (ClampMin = "0.0", Units = "cm/s"))
-	float SelfPushLift = 350.0f;
+	/** How much of the enemy's shove comes back onto the player. 1 = the same. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kick Push", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float SelfKnockbackScale = 1.0f;
 };
 
 // ==================== Disarm ====================
@@ -80,9 +77,10 @@ public:
 // ==================== Cloak ====================
 
 /**
- * A swing made with the melee key HELD that lands puts the weapon away and cloaks the player,
- * after the Spy in TF2. The cloak ends on drawing a weapon, on swinging again, or on its timer.
- * The swing made from inside the cloak shoves and does no damage.
+ * Hold the melee key for HoldTime and a hold attack comes out by itself; if it lands, the weapon
+ * stays away and the player is cloaked, after the Spy in TF2. The cloak ends on equipping a weapon,
+ * on swinging again, or on its timer. The swing made from inside the cloak shoves and does no
+ * damage.
  */
 UCLASS(BlueprintType)
 class POLARITY_API UUpgradeDefinition_MeleeCloak : public UUpgradeDefinition
@@ -92,4 +90,19 @@ class POLARITY_API UUpgradeDefinition_MeleeCloak : public UUpgradeDefinition
 public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Cloak", meta = (ClampMin = "0.5", Units = "s"))
 	float CloakDuration = 6.0f;
+
+	/** How long the melee key has to stay down for the hold attack to fire. Let go sooner and the
+	 *  ordinary swing comes out instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Cloak|Hold Attack", meta = (ClampMin = "0.1", ClampMax = "2.0", Units = "s"))
+	float HoldTime = 0.35f;
+
+	/** The hold attack's own animation, in place of the ordinary swing's. Montage left empty = the
+	 *  ordinary swing is played. Weight is not used. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Cloak|Hold Attack")
+	FMeleeAnimationData HoldAttackAnimation;
+
+	/** Worn by the melee mesh from the moment the hold attack lands to the end of the swing, so the
+	 *  player sees themselves going. A see-through material. Unset = the mesh is left alone. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melee Cloak|Feedback")
+	TObjectPtr<UMaterialInterface> CloakMeleeMaterial;
 };

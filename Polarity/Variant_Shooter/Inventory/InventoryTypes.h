@@ -47,7 +47,12 @@ enum class EInventorySlotKind : uint8
 
 	/** A mech part from a forest camp (UMechPartDefinition). Never stacks. Kept through death: the
 	 *  respawned body gets it back (AShooterPlayerController::OnPawnDestroyed). */
-	MechPart
+	MechPart,
+
+	/** A medkit. Stacks. Used by holding a key (UFieldCareComponent), not by picking it up: health
+	 *  comes back only from these [author, 2026-10-11], so the means to heal cost the run a cell.
+	 *  Added at the end: the numbers of the kinds before it are saved in assets. */
+	Medkit
 };
 
 /**
@@ -124,7 +129,7 @@ struct FInventorySlot
 	/** Currency and ammo merge into a partial cell of the same thing; the others never do. */
 	bool IsStackable() const
 	{
-		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo;
+		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit;
 	}
 
 	bool HasRoom() const { return !IsEmpty() && IsStackable() && Count < StackMax; }
@@ -179,6 +184,6 @@ struct FInventoryItem
 
 	bool IsStackable() const
 	{
-		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo;
+		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit;
 	}
 };

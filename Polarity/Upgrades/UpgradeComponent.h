@@ -11,6 +11,7 @@ class AShooterCharacter;
 class AShooterWeapon;
 class ADroppedRangedWeapon;
 struct FJumpSlotParams;
+struct FMeleeHoldAttack;
 
 /**
  * Base class for all upgrade logic components.
@@ -163,6 +164,19 @@ public:
 	 * replay, so it must be a pure read of the level data. @see FJumpSlotParams
 	 */
 	virtual bool GetJumpSlotParams(FJumpSlotParams& Out) const { return false; }
+
+	/**
+	 * How much of the shove a melee hit gives Target comes back onto the owner, the other way. 0 =
+	 * none (the default), 1 = the owner is knocked back exactly as if the same hit had landed on
+	 * them. Asked by UMeleeAttackComponent on the machine that swung, as the hit lands.
+	 */
+	virtual float GetMeleeSelfKnockbackScale(AActor* Target) const { return 0.0f; }
+
+	/**
+	 * Melee slot: does holding the melee key do something of this upgrade's own? Return true and
+	 * fill Out. Asked by the character on the machine that holds the key. @see FMeleeHoldAttack
+	 */
+	virtual bool GetMeleeHoldAttack(FMeleeHoldAttack& Out) const { return false; }
 
 	/**
 	 * Slide slot: may this shot come out of the reserve instead of the magazine? Asked by the weapon

@@ -2,9 +2,12 @@
 
 #include "Upgrade_MeleeCloak.h"
 #include "UpgradeDefinition_MeleeKit.h"
+#include "MeleeHoldAttack.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/MeleeAttackComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Pawn.h"
+#include "Materials/MaterialInterface.h"
 
 UUpgrade_MeleeCloak::UUpgrade_MeleeCloak()
 {
@@ -19,18 +22,24 @@ float UUpgrade_MeleeCloak::GetCloakDuration() const
 	return Def ? Def->CloakDuration : 0.0f;
 }
 
-void UUpgrade_MeleeCloak::OnUpgradeActivated()
+bool UUpgrade_MeleeCloak::GetMeleeHoldAttack(FMeleeHoldAttack& Out) const
 {
-	AShooterCharacter* const Character = GetShooterCharacter();
-	if (!Character)
+	const UUpgradeDefinition_MeleeCloak* const Def = Cast<UUpgradeDefinition_MeleeCloak>(UpgradeDefinition);
+	if (!Def)
 	{
-		return;
+		return false;
 	}
 
-	Character->OnMeleeChargeHoldStarted.AddDynamic(this, &UUpgrade_MeleeCloak::HandleHoldStarted);
-	Character->OnMeleeChargeHoldReleased.AddDynamic(this, &UUpgrade_MeleeCloak::HandleHoldReleased);
+	Out.HoldTime = Def->HoldTime;
+	Out.Animation = Def->HoldAttackAnimation.AttackMontage ? &Def->HoldAttackAnimation : nullptr;
+	Out.Label = Def->DisplayName;
+	return true;
+}
 
-	CachedMeleeComp = Character->FindComponentByClass<UMeleeAttackComponent>();
+void UUpgrade_MeleeCloak::OnUpgradeActivated()
+{
+	const AShooterCharacter* const Character = GetShooterCharacter();
+	CachedMeleeComp = Character ? Character->FindComponentByClass<UMeleeAttackComponent>() : nullptr;
 	if (CachedMeleeComp.IsValid())
 	{
 		CachedMeleeComp->OnMeleeAttackStarted.AddDynamic(this, &UUpgrade_MeleeCloak::HandleAttackStarted);
@@ -41,10 +50,10 @@ void UUpgrade_MeleeCloak::OnUpgradeActivated()
 
 void UUpgrade_MeleeCloak::OnUpgradeDeactivated()
 {
+	RestoreMeleeMaterials();
+
 	if (AShooterCharacter* const Character = GetShooterCharacter())
 	{
-		Character->OnMeleeChargeHoldStarted.RemoveDynamic(this, &UUpgrade_MeleeCloak::HandleHoldStarted);
-		Character->OnMeleeChargeHoldReleased.RemoveDynamic(this, &UUpgrade_MeleeCloak::HandleHoldReleased);
 		if (Character->HasAuthority())
 		{
 			Character->SetCloaked(false);
@@ -56,16 +65,6 @@ void UUpgrade_MeleeCloak::OnUpgradeDeactivated()
 		CachedMeleeComp->OnMeleeAttackEnded.RemoveDynamic(this, &UUpgrade_MeleeCloak::HandleAttackEnded);
 		CachedMeleeComp->OnMeleeHit.RemoveDynamic(this, &UUpgrade_MeleeCloak::HandleMeleeHit);
 	}
-}
-
-void UUpgrade_MeleeCloak::HandleHoldStarted()
-{
-	bKeyHeld = true;
-}
-
-void UUpgrade_MeleeCloak::HandleHoldReleased()
-{
-	bKeyHeld = false;
 }
 
 void UUpgrade_MeleeCloak::HandleAttackStarted()
@@ -84,12 +83,14 @@ void UUpgrade_MeleeCloak::HandleAttackStarted()
 void UUpgrade_MeleeCloak::HandleAttackEnded()
 {
 	bSwingFromCloak = false;
+	RestoreMeleeMaterials();
 }
 
 void UUpgrade_MeleeCloak::HandleMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage)
 {
 	AShooterCharacter* const Character = GetShooterCharacter();
-	if (!Character || !Character->IsLocallyControlled() || !bKeyHeld || bSwingFromCloak || !Cast<APawn>(HitActor))
+	if (!Character || !Character->IsLocallyControlled() || bSwingFromCloak || !Cast<APawn>(HitActor)
+		|| !CachedMeleeComp.IsValid() || !CachedMeleeComp->IsHoldAttack())
 	{
 		return;
 	}
@@ -98,6 +99,44 @@ void UUpgrade_MeleeCloak::HandleMeleeHit(AActor* HitActor, const FVector& HitLoc
 	// the swing is decided on each machine separately.
 	Character->KeepHandsEmptyAfterMelee();
 	Character->Server_RequestMeleeCloak();
+	ApplyCloakMaterial();
+}
+
+void UUpgrade_MeleeCloak::ApplyCloakMaterial()
+{
+	const UUpgradeDefinition_MeleeCloak* const Def = Cast<UUpgradeDefinition_MeleeCloak>(UpgradeDefinition);
+	const AShooterCharacter* const Character = GetShooterCharacter();
+	USkeletalMeshComponent* const Mesh = Character ? Character->GetMeleeMesh() : nullptr;
+	if (!Def || !Def->CloakMeleeMaterial || !Mesh || SavedMeleeMaterials.Num() > 0)
+	{
+		return;
+	}
+
+	const int32 Count = Mesh->GetNumMaterials();
+	SavedMeleeMaterials.Reserve(Count);
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		SavedMeleeMaterials.Add(Mesh->GetMaterial(Index));
+		Mesh->SetMaterial(Index, Def->CloakMeleeMaterial);
+	}
+}
+
+void UUpgrade_MeleeCloak::RestoreMeleeMaterials()
+{
+	if (SavedMeleeMaterials.Num() == 0)
+	{
+		return;
+	}
+
+	const AShooterCharacter* const Character = GetShooterCharacter();
+	if (USkeletalMeshComponent* const Mesh = Character ? Character->GetMeleeMesh() : nullptr)
+	{
+		for (int32 Index = 0; Index < SavedMeleeMaterials.Num() && Index < Mesh->GetNumMaterials(); ++Index)
+		{
+			Mesh->SetMaterial(Index, SavedMeleeMaterials[Index]);
+		}
+	}
+	SavedMeleeMaterials.Reset();
 }
 
 float UUpgrade_MeleeCloak::GetMeleeDamageMultiplier(AActor* Target) const
@@ -118,11 +157,13 @@ void UUpgrade_MeleeCloak::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 
 	// A weapon in the hands, or on its way into them, ends it. The swing's own stow is neither: the
-	// cloak can arrive while the swing that earned it is still finishing.
+	// cloak can arrive while the swing that earned it is still finishing. A weapon merely flying in
+	// on the hook does not count either; it ends the cloak when it is equipped.
 	const EWeaponSwitchPhase HandsPhase = Character->GetWeaponSwitchPhase();
-	const bool bHandsEmpty = Character->IsWeaponHolsteredByPlayer() || HandsPhase == EWeaponSwitchPhase::StowedForMelee;
+	const bool bWeaponOut = Character->GetCurrentWeapon() != nullptr
+		&& (HandsPhase == EWeaponSwitchPhase::None || HandsPhase == EWeaponSwitchPhase::Drawing);
 	const bool bSwinging = CachedMeleeComp.IsValid() && CachedMeleeComp->IsAttacking();
-	if (!bSwinging && !bHandsEmpty && !bEndRequested)
+	if (!bSwinging && bWeaponOut && !bEndRequested)
 	{
 		bEndRequested = true;
 		Character->Server_EndMeleeCloak();

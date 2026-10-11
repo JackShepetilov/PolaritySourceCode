@@ -77,6 +77,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
 	int32 ConsumeAmmo(int32 Count);
 
+	/** Every medkit in the bag. @see EInventorySlotKind::Medkit */
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	int32 GetMedkitCount() const;
+
+	/** Spend medkits. Returns how many were taken. Server only, like ConsumeAmmo. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	int32 ConsumeMedkits(int32 Count);
+
+	/** Medkits in one cell. */
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	int32 GetMedkitStackSize() const { return FMath::Max(1, MedkitStackSize); }
+
+	/** The most medkits this player may carry. A medic carries twice as many [author, 2026-10-11];
+	 *  whatever makes a player a medic says so through SetMaxMedkits. */
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	int32 GetMaxMedkits() const { return FMath::Max(0, MaxMedkits); }
+
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Inventory")
+	void SetMaxMedkits(int32 NewMax) { MaxMedkits = FMath::Max(0, NewMax); }
+
 	/** How many attachments this player may mount without paying a cell for them. Per weapon, not
 	 *  per player: one free slot means one free attachment on the class weapon AND one on the
 	 *  looted one. Choosing which gun gets the only free slot would be a decision made mid-fight
@@ -86,6 +106,13 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	int32 GetMaxFreeAttachmentSlots() const { return MaxFreeAttachmentSlots; }
+
+	/** Every mount on a gun is free [author, 2026-10-07]: a fitted part lives on the gun and takes no
+	 *  cell. The paid-mount code stays for the debug command, nothing in the game reaches it. */
+	static constexpr int32 AllMountsFree = 16;
+
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	bool HasUnlimitedCells() const { return bUnlimitedCells; }
 
 	/** Units per cell for extraction currency. The pickup asks for this rather than carrying its
 	 *  own copy, so the stack size stays one number in one place. */
@@ -337,6 +364,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "1"))
 	int32 RoundsPerAmmoCell = 60;
 
+	/** Medkits in one cell. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "1"))
+	int32 MedkitStackSize = 3;
+
+	/** @see GetMaxMedkits. Server-side: it decides what TryAdd takes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "0"))
+	int32 MaxMedkits = 3;
+
+	/** Medkits in the bag when the player comes into the world. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "0"))
+	int32 StartingMedkits = 3;
+
 	UFUNCTION()
 	void OnRep_Slots();
 
@@ -355,6 +394,15 @@ protected:
 	 *  visible to the player, so it is tuned here on the component rather than assumed anywhere. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory", meta = (ClampMin = "1"))
 	int32 MaxSlotCount = 10;
+
+	/** The bag has no ceiling [author, 2026-10-07]: it starts at StartingSlotCount and opens
+	 *  CellGrowStep more whenever the last empty cell is taken. The screen scrolls. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory")
+	bool bUnlimitedCells = true;
+
+	/** One row of the screen's grid, so a new row appears whole. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory", meta = (ClampMin = "1", EditCondition = "bUnlimitedCells"))
+	int32 CellGrowStep = 5;
 
 	/** Free attachment slots at the start of the meta, per weapon. One rather than zero on purpose:
 	 *  an attachment and an ability upgrade cost the same cell but are worth wildly different
@@ -398,6 +446,10 @@ private:
 
 	/** Index of the first cell holding nothing, or INDEX_NONE. */
 	int32 FindEmptyCell() const;
+
+	/** The same, but a bag with no ceiling opens CellGrowStep new cells when every one is taken.
+	 *  Server only: what every writer asks instead of FindEmptyCell. */
+	int32 FindOrOpenEmptyCell();
 
 	/** True when a cell can merge with this item: same kind and same definition. Currency has no
 	 *  definition, so all currency merges with all currency. */

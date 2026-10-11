@@ -4,6 +4,7 @@
 #include "Variant_Shooter/Buildables/BuildableActor.h"
 #include "Variant_Shooter/Buildables/BuildableDefinition.h"
 #include "Variant_Shooter/Pickups/MetalPickup.h"
+#include "Variant_Shooter/Shop/ShopComponent.h"
 #include "Variant_Shooter/Pickups/LootDropComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "GameFramework/Pawn.h"
@@ -14,6 +15,7 @@
 
 AShooterPlayerState::AShooterPlayerState()
 {
+	Shop = CreateDefaultSubobject<UShopComponent>(TEXT("Shop"));
 }
 
 void AShooterPlayerState::BeginPlay()

@@ -808,9 +808,9 @@ void UDispenserSlotMachineComponent::FinishClose()
 	FireSpinEvents();
 }
 
-void UDispenserSlotMachineComponent::DeliverAttachment(UWeaponAttachmentDefinition* Attachment, AShooterCharacter* Taker) const
+void UDispenserSlotMachineComponent::DeliverAttachment(UWeaponAttachmentDefinition* Attachment, AShooterCharacter* Taker)
 {
-	UWorld* const World = GetWorld();
+	UWorld* const World = Taker ? Taker->GetWorld() : nullptr;
 	if (!World || !Attachment || !Taker)
 	{
 		return;
@@ -836,7 +836,7 @@ void UDispenserSlotMachineComponent::DeliverAttachment(UWeaponAttachmentDefiniti
 		bPulled ? TEXT("started") : TEXT("refused, left on the floor"));
 }
 
-void UDispenserSlotMachineComponent::ApplyBuff(const UDispenserBuffDefinition* Buff, AShooterCharacter* Taker) const
+void UDispenserSlotMachineComponent::ApplyBuff(const UDispenserBuffDefinition* Buff, AShooterCharacter* Taker)
 {
 	if (!Buff || !Taker)
 	{

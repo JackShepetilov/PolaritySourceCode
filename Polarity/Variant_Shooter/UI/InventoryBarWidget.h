@@ -70,6 +70,11 @@ protected:
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UPanelWidget> SecondWeaponAttachments;
 
+	/** Attachment squares beside the third weapon row. Optional so the Blueprint made for two rows
+	 *  still compiles. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ThirdWeaponAttachments;
+
 	// ==================== Classes (set in the WBP) ====================
 
 	/** 48x48 square used beside a weapon. Same C++ class as a grid cell, different Blueprint. */
@@ -100,7 +105,32 @@ protected:
 	void BP_SetWeaponRow(int32 RowIndex, AShooterWeapon* Weapon, int32 CurrentAmmo, int32 MagazineSize,
 		int32 ReserveAmmo, bool bInfiniteAmmo, bool bIsEquipped);
 
+	// The third row's colours, used until a real pair has been seen. The Blueprint paints rows 0 and
+	// 1 itself; whatever it gave the gun in hand and the gun put away is copied for the third, so the
+	// three segments never disagree. These are only what the third wears before that.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Bar|Third Row")
+	FLinearColor ThirdEquippedBgColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.9f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Bar|Third Row")
+	FLinearColor ThirdEquippedTextColor = FLinearColor(0.02f, 0.02f, 0.02f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Bar|Third Row")
+	FLinearColor ThirdIdleBgColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.35f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory Bar|Third Row")
+	FLinearColor ThirdIdleTextColor = FLinearColor(0.56f, 0.64f, 0.67f, 0.6f);
+
 private:
+
+	/** The third row, drawn here: the Blueprint's graph knows two rows and sends any other index down
+	 *  its second row's branch. Widgets are found by name (Slot3NameBg, Slot3NameText, and the big
+	 *  plate's WeaponIcon, AmmoTypeImage, AmmoText, ReserveText), so a Blueprint without them simply
+	 *  shows no third row. */
+	void DrawThirdRow(AShooterWeapon* Weapon, int32 Ammo, int32 Reserve, bool bInfinite, bool bIsEquipped);
+
+	/** Copy what the Blueprint just painted on row Row (0 or 1) as the equipped or the idle look. */
+	void LearnRowColors(int32 Row, bool bRowIsEquipped);
 
 	/** Rebuild everything. Both weapon rows are two squares and a plate, so a full rebuild costs
 	 *  less than working out what changed. */

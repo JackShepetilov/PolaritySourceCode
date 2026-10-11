@@ -96,6 +96,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppression", meta = (ClampMin = "5.0", ClampMax = "45.0"))
 	float MaxSuppressionSpread = 20.0f;
 
+	/** Past this range the cone stops opening: the spread in degrees is scaled down so that the
+	 *  miss at the target, in cm, stays what it is at this range (cm). 0: off, the cone is the same
+	 *  number of degrees at any range, which is how it was.
+	 *
+	 *  The spread numbers were set on arenas fought at 10 to 15 m. An outpost is fought at 30 to 60,
+	 *  and there the same cone is a circle 7 m across: measured 2026-10-11, 3 percent of rounds hit at
+	 *  25 to 35 m, 1.4 at 35 to 45, none past 45, and a player standing in the open in front of four
+	 *  or five guns at 31 to 51 m lived 11.6, 16.2 and 31.6 s.
+	 *
+	 *  The number wanted [author, 2026-10-11]: about 10 s for a player standing in full view of five
+	 *  at 40 m. From the three measurements that is twice the hits, so the cone at 40 m 0.7 of what
+	 *  it is: 30 m. Nearer than this nothing changes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Base Spread", meta = (ClampMin = "0.0", Units = "cm"))
+	float SpreadFullRange = 3000.0f;
+
 	// ==================== Suppressive Fire Settings ====================
 	// The OTHER half of suppression, and the two must not be confused. Everything above is about an
 	// NPC that IS being suppressed: somebody is shooting at it and its aim falls apart. This is an
@@ -111,6 +126,53 @@ public:
 	 *  enough to be read as aimed at the target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Suppressive Fire", meta = (ClampMin = "1.0", ClampMax = "45.0"))
 	float MaxSuppressiveFireSpread = 9.0f;
+
+	// ==================== Settling on a target ====================
+	// How the shooter gives ground to whoever it shoots at. A fresh string of fire opens with a round
+	// that misses on purpose (the warning: "you are being shot at, move") and starts loose; the spread
+	// tightens the longer the string runs. So a target that keeps breaking the line is shot at badly,
+	// and one that stands in the open is shot at well.
+
+	/** The first round of a fresh string of fire misses on purpose. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling")
+	bool bFirstShotMisses = true;
+
+	/** Spread multiplier at the start of a string of fire. 1 disables the ramp. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float UnsettledSpreadMultiplier = 3.0f;
+
+	/** Seconds of sustained fire at one target until the multiplier above is gone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling", meta = (ClampMin = "0.0", Units = "s"))
+	float AimSettleSeconds = 1.5f;
+
+	/** A pause in the fire longer than this starts a new string. Above the burst cooldown, or every
+	 *  burst would be a new string. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling", meta = (ClampMin = "0.0", Units = "s"))
+	float AimSettleResetSeconds = 2.5f;
+
+	/** A deliberate miss is not allowed to hit anything this close to the shooter (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling", meta = (ClampMin = "0.0"))
+	float OwnCoverClearDistance = 400.0f;
+
+	/** How much the current string of fire is widening the spread. 1 when settled. */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Settling")
+	float GetSettleSpreadMultiplier() const;
+
+	/** The gun is held on Target without firing: watching the place it went down behind. The string
+	 *  goes on settling, so the one who pops up where he went down is met by a settled aim and not
+	 *  by a first round that misses on purpose [author, 2026-10-11: a player crouched behind cover,
+	 *  came up every few seconds and was shot at as if seen for the first time each time]. */
+	void NoteAiming(AActor* Target);
+
+	// ==================== Pin fire ====================
+
+	/** Shoot near the target instead of at it: this NPC has no aimed-fire slot from the coordinator
+	 *  (AAICombatCoordinator::RequestAimedFire), so it keeps the target under fire without adding to
+	 *  the damage. Same ring as suppressive fire, a flag of its own because that one has other owners
+	 *  (the squad's withdraw role, the tree's task) and two owners of one flag switch each other off. */
+	void SetPinFire(bool bEnabled) { bPinFire = bEnabled; }
+
+	bool IsPinFire() const { return bPinFire; }
 
 	// ==================== Runtime State ====================
 
@@ -242,6 +304,12 @@ protected:
 	 */
 	FVector ApplyDonutSpread(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const;
 
+	/** ApplyDonutSpread for the misses that are MEANT (pin fire, the warning round, suppressive fire):
+	 *  the same ring, but a miss that would land on something within OwnCoverClearDistance of the
+	 *  shooter is rolled again. A round meant to pass the target's ear must not go into the corner the
+	 *  shooter is leaning round, which is where a few degrees off puts it [author, 2026-10-11]. */
+	FVector ApplyDonutSpreadClearOfOwnCover(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const;
+
 private:
 	/** True when NPC is in suppression state (forced misses) */
 	bool bIsSuppressed = false;
@@ -258,4 +326,12 @@ private:
 
 	/** @see SetDazzleSpreadMultiplier */
 	float DazzleSpreadMultiplier = 1.0f;
+
+	/** @see SetPinFire */
+	bool bPinFire = false;
+
+	/** The current string of fire: who at, when it started, when the last round of it was aimed. */
+	TWeakObjectPtr<AActor> SettleTarget;
+	float SettleStartTime = -1000.0f;
+	float LastAimTime = -1000.0f;
 };

@@ -2,6 +2,7 @@
 
 #include "Variant_Shooter/UI/InventoryScreenWidget.h"
 
+#include "Components/Image.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
@@ -20,13 +21,6 @@
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
 #include "Variant_Shooter/Siege/MechPartDefinition.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
-
-namespace
-{
-	/** The grid is always two rows tall and grows sideways: 2x5 at a ceiling of ten. Two rows is
-	 *  the shape Apex uses, and it keeps every cell within one glance of the cursor. */
-	constexpr int32 GridRowCount = 2;
-}
 
 void UInventoryScreenWidget::InitializeFor(AShooterCharacter* InCharacter)
 {
@@ -235,13 +229,14 @@ bool UInventoryScreenWidget::NativeOnDrop(const FGeometry& InGeometry, const FDr
 		{
 			if (PanelWeapon != Dragged->DraggedWeapon)
 			{
+				const int32 FromSlot = Dragged->DraggedWeapon->GetHotkeySlot();
 				if (Character->HasAuthority())
 				{
-					Character->SwapWeaponSlots();
+					Character->SwapWeaponSlots(FromSlot, Panel);
 				}
 				else
 				{
-					Character->Server_SwapWeaponSlots();
+					Character->Server_SwapWeaponSlots(FromSlot, Panel);
 				}
 			}
 			return true;
@@ -351,6 +346,7 @@ void UInventoryScreenWidget::Rebuild()
 
 	RebuildAttachmentSlots(FirstWeaponAttachments, GetWeaponInPanel(0), FreeSlots);
 	RebuildAttachmentSlots(SecondWeaponAttachments, GetWeaponInPanel(1), FreeSlots);
+	RebuildAttachmentSlots(ThirdWeaponAttachments, GetWeaponInPanel(2), FreeSlots);
 }
 
 AShooterWeapon* UInventoryScreenWidget::GetWeaponInPanel(int32 PanelIndex) const
@@ -361,8 +357,8 @@ AShooterWeapon* UInventoryScreenWidget::GetWeaponInPanel(int32 PanelIndex) const
 
 int32 UInventoryScreenWidget::FindPanelUnder(const FVector2D& ScreenPosition) const
 {
-	const UWidget* const Panels[2] = { WeaponPanel1.Get(), WeaponPanel2.Get() };
-	for (int32 Index = 0; Index < 2; ++Index)
+	const UWidget* const Panels[AShooterCharacter::WeaponSlotCount] = { WeaponPanel1.Get(), WeaponPanel2.Get(), WeaponPanel3.Get() };
+	for (int32 Index = 0; Index < AShooterCharacter::WeaponSlotCount; ++Index)
 	{
 		if (Panels[Index] && Panels[Index]->IsVisible() && Panels[Index]->GetCachedGeometry().IsUnderLocation(ScreenPosition))
 		{
@@ -375,7 +371,7 @@ int32 UInventoryScreenWidget::FindPanelUnder(const FVector2D& ScreenPosition) co
 void UInventoryScreenWidget::GatherAttachmentSquares(TArray<UInventorySlotWidget*>& OutSquares) const
 {
 	OutSquares.Reset();
-	for (const UPanelWidget* const Container : { FirstWeaponAttachments.Get(), SecondWeaponAttachments.Get() })
+	for (const UPanelWidget* const Container : { FirstWeaponAttachments.Get(), SecondWeaponAttachments.Get(), ThirdWeaponAttachments.Get() })
 	{
 		if (!Container)
 		{
@@ -476,10 +472,9 @@ void UInventoryScreenWidget::RebuildWeaponPanels(const UInventoryComponent& Inve
 	// stay put. bIsEquipped is what says which one is in hand.
 	const AShooterWeapon* Equipped = Character->GetCurrentWeapon();
 
-	AShooterWeapon* Panels[2] = { GetWeaponInPanel(0), GetWeaponInPanel(1) };
-	for (int32 Index = 0; Index < 2; ++Index)
+	for (int32 Index = 0; Index < AShooterCharacter::WeaponSlotCount; ++Index)
 	{
-		AShooterWeapon* Weapon = Panels[Index];
+		AShooterWeapon* Weapon = GetWeaponInPanel(Index);
 
 		// Same rule as the corner: a weapon that owns no cells has no reserve to show, whether it
 		// never reloads or reloads from an endless one.
@@ -496,11 +491,21 @@ void UInventoryScreenWidget::RebuildWeaponPanels(const UInventoryComponent& Inve
 			Reserve = FMath::Max(0, Inventory.GetAmmo() - Weapon->GetBulletCount());
 		}
 
-		BP_SetWeaponPanel(Index, Weapon,
-			Weapon ? Weapon->GetBulletCount() : 0,
-			Weapon ? Weapon->GetMagazineSize() : 0,
-			Reserve, bInfinite,
-			Weapon && Weapon == Equipped);
+		// The Blueprint draws panels 0 and 1 only; any other index lands in its panel 1 branch and
+		// would paint over the second gun. The third is drawn here.
+		if (Index < 2)
+		{
+			BP_SetWeaponPanel(Index, Weapon,
+				Weapon ? Weapon->GetBulletCount() : 0,
+				Weapon ? Weapon->GetMagazineSize() : 0,
+				Reserve, bInfinite,
+				Weapon && Weapon == Equipped);
+		}
+		else
+		{
+			DrawThirdPanel(Weapon, Weapon ? Weapon->GetBulletCount() : 0, Weapon ? Weapon->GetMagazineSize() : 0,
+				Reserve, bInfinite, Weapon && Weapon == Equipped);
+		}
 	}
 }
 
@@ -517,13 +522,17 @@ void UInventoryScreenWidget::RebuildGrid(const UInventoryComponent& Inventory)
 	// changing shape under the cursor every time capacity is bought.
 	const TArray<FInventorySlot>& Slots = Inventory.GetSlots();
 	const int32 OwnedCount = Slots.Num();
-	const int32 CellCount = FMath::Max(OwnedCount, Inventory.GetMaxSlotCount());
-	const int32 ColumnCount = FMath::Max(1, FMath::DivideAndRoundUp(CellCount, GridRowCount));
+	const int32 CellCount = Inventory.HasUnlimitedCells() ? OwnedCount : FMath::Max(OwnedCount, Inventory.GetMaxSlotCount());
 
-	// Capacity changing moves every square: at four cells the grid is two columns wide, at six it
-	// is three, so square 2 belongs on the bottom row in one and the top row in the other. Reusing
-	// squares across that would leave them in their old cells, so the whole grid is rebuilt when
-	// the count changes and only reused when it did not.
+	// Rows of GridColumnCount, growing DOWN [author, 2026-10-07: the bag has no ceiling]. A fixed
+	// width keeps every cell where it was when a row is added. GridVisibleRows of them are on screen
+	// and the wheel moves the window; a row outside it is collapsed and the ones inside are numbered
+	// from zero, so the panel never grows.
+	const int32 ColumnCount = FMath::Max(1, GridColumnCount);
+	const int32 TotalRows = FMath::DivideAndRoundUp(CellCount, ColumnCount);
+	const int32 VisibleRows = FMath::Max(1, GridVisibleRows);
+	GridScrollRow = FMath::Clamp(GridScrollRow, 0, FMath::Max(0, TotalRows - VisibleRows));
+
 	if (GridSquares.Num() != CellCount)
 	{
 		GridContainer->ClearChildren();
@@ -572,6 +581,15 @@ void UInventoryScreenWidget::RebuildGrid(const UInventoryComponent& Inventory)
 			continue;
 		}
 
+		const int32 Row = Index / ColumnCount - GridScrollRow;
+		const bool bOnScreen = Row >= 0 && Row < VisibleRows;
+		if (UUniformGridSlot* const GridSlot = Cast<UUniformGridSlot>(Square->Slot))
+		{
+			GridSlot->SetRow(bOnScreen ? Row : 0);
+		}
+		// Visible, not SelfHitTestInvisible: see the note where the squares are made.
+		Square->SetVisibility(bOnScreen ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+
 		if (Index < OwnedCount)
 		{
 			Square->SetFromSlot(Slots[Index], IconForSlot(Slots[Index]));
@@ -583,6 +601,83 @@ void UInventoryScreenWidget::RebuildGrid(const UInventoryComponent& Inventory)
 			Square->SetCell(EInventoryCellVisual::Locked, EInventorySlotKind::Empty, nullptr, 0, 0);
 		}
 	}
+
+	UpdateScrollMark(GridScrollRow, VisibleRows, TotalRows);
+	BP_OnGridScrolled(GridScrollRow, VisibleRows, TotalRows);
+}
+
+void UInventoryScreenWidget::UpdateScrollMark(int32 FirstRow, int32 VisibleRows, int32 TotalRows)
+{
+	UWidget* const Mark = GetWidgetFromName(TEXT("GridScroll"));
+	if (!Mark)
+	{
+		return;
+	}
+	const bool bScrolls = TotalRows > VisibleRows;
+	Mark->SetVisibility(bScrolls ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	if (!bScrolls)
+	{
+		return;
+	}
+
+	// The thumb is as tall as the track in the designer. Squashed from its top edge to the share of
+	// the rows on screen, then moved down by the share of the rows above them.
+	if (UWidget* const Thumb = GetWidgetFromName(TEXT("GridScrollThumb")))
+	{
+		const float Share = static_cast<float>(VisibleRows) / static_cast<float>(TotalRows);
+		const float Above = static_cast<float>(FirstRow) / static_cast<float>(TotalRows);
+		Thumb->SetRenderTransformPivot(FVector2D(0.5f, 0.0f));
+		Thumb->SetRenderScale(FVector2D(1.0f, Share));
+		Thumb->SetRenderTranslation(FVector2D(0.0f, Above * GridScrollTrackHeight));
+	}
+}
+
+void UInventoryScreenWidget::DrawThirdPanel(AShooterWeapon* Weapon, int32 Ammo, int32 MagazineSize, int32 Reserve, bool bInfinite, bool bIsEquipped)
+{
+	// Copies what panel 2 shows for its own gun, field by field, so the two read the same whatever
+	// the Blueprint's formats are: the texts are written here, the look is the designer's.
+	if (UTextBlock* const Name = Cast<UTextBlock>(GetWidgetFromName(TEXT("Panel3NameText"))))
+	{
+		Name->SetText(Weapon ? Weapon->GetWeaponDisplayName() : FText::GetEmpty());
+	}
+	if (UTextBlock* const AmmoLabel = Cast<UTextBlock>(GetWidgetFromName(TEXT("Panel3AmmoText"))))
+	{
+		AmmoLabel->SetText(Weapon ? FText::FromString(FString::FromInt(Ammo)) : FText::GetEmpty());
+	}
+	if (UTextBlock* const ReserveLabel = Cast<UTextBlock>(GetWidgetFromName(TEXT("Panel3ReserveText"))))
+	{
+		ReserveLabel->SetText(Weapon && !bInfinite ? FText::FromString(FString::FromInt(Reserve)) : FText::GetEmpty());
+	}
+	if (UImage* const Icon = Cast<UImage>(GetWidgetFromName(TEXT("Panel3Icon"))))
+	{
+		if (Weapon && Weapon->GetIcon())
+		{
+			Icon->SetBrushFromTexture(Weapon->GetIcon(), false);
+		}
+		Icon->SetRenderOpacity(Weapon && Weapon->GetIcon() ? (bIsEquipped ? 1.0f : 0.6f) : 0.0f);
+	}
+}
+
+FReply UInventoryScreenWidget::NativeOnMouseWheel(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (!bIsOpen)
+	{
+		return Super::NativeOnMouseWheel(InGeometry, InMouseEvent);
+	}
+
+	// Wheel down shows the rows below. Swallowed even at either end: the wheel also switches weapons
+	// in the game underneath, and a scroll that ran out must not start doing that.
+	const int32 Before = GridScrollRow;
+	GridScrollRow += (InMouseEvent.GetWheelDelta() < 0.0f) ? 1 : -1;
+	if (const AShooterCharacter* const Character = BoundCharacter.Get())
+	{
+		if (const UInventoryComponent* const Inventory = Character->GetInventoryComponent())
+		{
+			RebuildGrid(*Inventory);
+		}
+	}
+	UE_LOG(LogTemp, Verbose, TEXT("[INV_DEBUG] grid scroll %d -> %d"), Before, GridScrollRow);
+	return FReply::Handled();
 }
 
 void UInventoryScreenWidget::RebuildAttachmentSlots(UPanelWidget* Container, AShooterWeapon* Weapon, int32 FreeSlots)
@@ -777,13 +872,36 @@ void UInventoryScreenWidget::RebuildActionSlots()
 		}
 	}
 
+	// The passives the player owns, in layout order. A slot that is not exclusive has no square of
+	// its own; each upgrade owned out of it gets one, so the player can see what they carry.
+	TArray<TWeakObjectPtr<UUpgradeDefinition>> OwnedPassives;
+	TArray<FText> OwnedPassiveLabels;
+	for (const FDispenserUpgradeSlot& LayoutSlot : Layout->Slots)
+	{
+		if (LayoutSlot.bExclusive)
+		{
+			continue;
+		}
+		for (const FDispenserUpgradeEntry& Entry : LayoutSlot.Upgrades)
+		{
+			if (Entry.Upgrade && Upgrades->GetUpgradeLevel(Entry.Upgrade->UpgradeTag) > 0)
+			{
+				OwnedPassives.Add(Entry.Upgrade);
+				OwnedPassiveLabels.Add(LayoutSlot.DisplayName);
+			}
+		}
+	}
+
 	// Same rule as the grid: rebuilt only when the shape changes, otherwise the squares are reused
 	// and only their contents move.
-	if (ActionSquareSlotIndices != SlotIndices || ActionSquares.Num() != SlotIndices.Num())
+	if (ActionSquareSlotIndices != SlotIndices || ActionSquares.Num() != SlotIndices.Num()
+		|| PassiveSquareUpgrades != OwnedPassives)
 	{
 		ActionSlots->ClearChildren();
 		ActionSquares.Reset();
 		ActionSquareSlotIndices = SlotIndices;
+		PassiveSquares.Reset();
+		PassiveSquareUpgrades = OwnedPassives;
 
 		for (const int32 SlotIndex : SlotIndices)
 		{
@@ -819,6 +937,56 @@ void UInventoryScreenWidget::RebuildActionSlots()
 			Square->OnUpgradeEquip.BindUObject(this, &UInventoryScreenWidget::HandleUpgradeEquip);
 			ActionSquares.Add(Square);
 		}
+
+		// The owned passives, after the action slots, under their slot's name.
+		for (int32 Index = 0; Index < OwnedPassives.Num(); ++Index)
+		{
+			UVerticalBox* Column = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass());
+			UTextBlock* Label = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+			UInventorySlotWidget* Square = CreateWidget<UInventorySlotWidget>(this, SquareClass);
+			if (!Column || !Label || !Square)
+			{
+				PassiveSquares.Add(nullptr);
+				continue;
+			}
+
+			Label->SetText(OwnedPassiveLabels[Index].ToUpper());
+			Label->SetJustification(ETextJustify::Center);
+			FSlateFontInfo Font = Label->GetFont();
+			Font.Size = 10;
+			Label->SetFont(Font);
+			Label->SetColorAndOpacity(FSlateColor(FLinearColor(0.75f, 0.78f, 0.80f, 1.0f)));
+
+			if (UVerticalBoxSlot* LabelSlot = Column->AddChildToVerticalBox(Label))
+			{
+				LabelSlot->SetHorizontalAlignment(HAlign_Center);
+				LabelSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 4.0f));
+			}
+			if (UVerticalBoxSlot* SquareSlot = Column->AddChildToVerticalBox(Square))
+			{
+				SquareSlot->SetHorizontalAlignment(HAlign_Center);
+			}
+			ActionSlots->AddChild(Column);
+
+			// Looked at, never dragged.
+			Square->SetVisibility(ESlateVisibility::HitTestInvisible);
+			PassiveSquares.Add(Square);
+		}
+	}
+
+	for (int32 Index = 0; Index < PassiveSquares.Num(); ++Index)
+	{
+		UInventorySlotWidget* Square = PassiveSquares[Index].Get();
+		UUpgradeDefinition* Owned = PassiveSquareUpgrades.IsValidIndex(Index) ? PassiveSquareUpgrades[Index].Get() : nullptr;
+		if (!Square || !Owned)
+		{
+			continue;
+		}
+
+		const int32 Level = Upgrades->GetUpgradeLevel(Owned->UpgradeTag);
+		UTexture2D* Icon = Owned->Icon ? Owned->Icon.Get() : AbilityUpgradeIcon.Get();
+		Square->SetRarityTint(true, Owned->GetLevelRarity(Level));
+		Square->SetCell(EInventoryCellVisual::Filled, EInventorySlotKind::AbilityUpgrade, Icon, Level, Level);
 	}
 
 	for (int32 Index = 0; Index < ActionSquares.Num(); ++Index)

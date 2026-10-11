@@ -7,6 +7,8 @@
 #include "GameFramework/Actor.h"
 #include "AICombatCoordinator.generated.h"
 
+class AShooterNPC;
+
 // ==================== Enums ====================
 
 /** Type of attack token (determines which pool the NPC draws from) */
@@ -36,6 +38,19 @@ enum class EBattleRing : uint8
 	Inner,    // 400-600cm, melee/aggressive
 	Middle,   // 600-1200cm, shooters
 	Outer     // 1200-2000cm, drones/snipers
+};
+
+/** What a squad is doing about the enemies in front of it, from how the two compare in number.
+ *  @see AAICombatCoordinator::UpdatePostures, Docs/Infantry_Combat_Design_2026-10-11.md */
+UENUM(BlueprintType)
+enum class ESquadPosture : uint8
+{
+	/** Outnumbered: nobody leaves their position. */
+	Defense,
+	/** About even: fight from positions, take a better one when this one stops working. */
+	Firefight,
+	/** Three to one or better: half stay and fire, half go in, from the front and both sides. */
+	Assault
 };
 
 // ==================== Structs ====================
@@ -128,6 +143,17 @@ struct FRegisteredNPCData
 
 	// Role/Pressure
 	float AngleToPlayerFacing = 0.0f;
+
+	/** World time until which this NPC fights in the open at its hurt target. @see WantsRush */
+	float RushUntil = -1.0f;
+
+	/** Index into the coordinator's posture records, or INDEX_NONE. Rewritten on every posture pass. */
+	int32 PostureIndex = INDEX_NONE;
+
+	/** The posture this NPC's squad was in when it last had somebody to fight. What it goes by while
+	 *  it has no target: a soldier of an outnumbered squad that lost sight of the enemy is still a
+	 *  soldier of an outnumbered squad, and must not go looking for him. */
+	ESquadPosture LastPosture = ESquadPosture::Firefight;
 };
 
 /** Cached player state for pressure system */
@@ -171,6 +197,13 @@ struct FTargetGroup
 	FTokenPool Ranged;
 	FTokenPool Melee;
 	FTokenPool Special;
+
+	/** Who is allowed to shoot AT this target; the rest of the group shoots near it.
+	 *  @see AAICombatCoordinator::RequestAimedFire */
+	FTokenPool Aimed;
+
+	/** World time of the last bound granted in this group. @see AAICombatCoordinator::RequestAssaultMove */
+	float LastBoundTime = -1000.0f;
 
 	/** This player's health, armour, speed and facing, for the role and pressure system. */
 	FTargetStateCache State;
@@ -500,6 +533,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
 	APawn* FindNearestHostile(APawn* Asker) const;
 
+	/** Closest pawn Asker fights that it can shoot right now (AShooterNPC::HasLineOfSightTo), within
+	 *  MaxEngagementDistance. For an NPC whose own target is out of sight while somebody else is not:
+	 *  the one who walked round the back. Traces, so not for every tick of every NPC. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Targeting")
+	APawn* FindVisibleHostile(APawn* Asker) const;
+
 	// --- Decoys ---
 
 	/** Start pulling enemies within Radius onto Decoy for Duration seconds.
@@ -580,7 +619,7 @@ public:
 	/** Is this spot inside somebody else's claim? Asker is excluded so an NPC is never blocked by
 	 *  its own corner when re-covering nearby. */
 	UFUNCTION(BlueprintPure, Category = "Coordination|Cover")
-	bool IsCoverBlocked(const FVector& Location, const AActor* Asker) const;
+	bool IsCoverBlocked(const FVector& Location, const AActor* Asker, float RadiusOverride = -1.0f) const;
 
 	/** How much room a claimed corner reserves. Must be comfortably larger than the cover
 	 *  component's PeekStepDistance, or two NPCs end up on opposite sides of one corner. */
@@ -633,6 +672,147 @@ public:
 	 *  as its expected time. A runner that gets stuck must not pin its coverers in the open forever. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Squad", meta = (ClampMin = "0.5"))
 	float MaxSuppressionSeconds = 4.0f;
+
+	// ==================== One job at a time [author, 2026-10-10] ====================
+	//
+	// A fighter in a cover fight does one of two things: it shoots, or it moves. The squad makes
+	// sure somebody is doing the first while somebody does the second, and that is the whole of the
+	// tactics here. Three questions, each asked by the behaviour and answered from what this object
+	// already knows about the group around one target:
+	//
+	//   RequestAimedFire  may I shoot AT the target, or only near it
+	//   RequestAssaultMove  may I, one of the going half of an assault, go now, and toward where
+	//   WantsRush         is the target hurt enough that I should leave cover and close
+	//
+	// The flank is measured against the AXIS OF THE FIGHT (from the target out to the middle of the
+	// group), never against where the target is looking: a player can spin the camera, the fight
+	// cannot turn round with it.
+
+	/** Take one of the group's aimed-fire slots. False means: fire, but to pin (the caller switches
+	 *  UAIAccuracyComponent::SetPinFire on). An NPC with no group yet, or a target that is not a pawn,
+	 *  is always told yes. */
+	bool RequestAimedFire(APawn* NPC);
+
+	void ReleaseAimedFire(APawn* NPC);
+
+	/** One of the going half of an assault asks for its next move: may it go now, and toward where.
+	 *  Yes while its side has a mover slot free (MaxSimultaneousRelocations: the going half goes two
+	 *  at a time, the rest of it waits its turn) and the group's last move is BoundInterval old. A yes
+	 *  takes the slot at once, which is also what makes its mates cover it (GetSuppressionTarget);
+	 *  the caller gives it back with EndRelocation when it arrives or gives up. Each of the going
+	 *  half has a lane: the front, the left or the right of the enemy, measured from the axis of the
+	 *  fight (from the enemy out to the middle of the squad), never from where the enemy is looking. */
+	bool RequestAssaultMove(APawn* NPC, FVector& OutPreferredPoint, bool& bOutFlank);
+
+	/** Is somebody of this NPC's side, in its group, firing at their target right now. What decides
+	 *  whether a run across ground the target can see is a run or a walk with the gun up. */
+	bool HasCoveringMate(APawn* NPC) const;
+
+	/** True while this NPC should fight in the open: its target is a player below LowHPThreshold and
+	 *  it is one of the MaxRushers nearest of its group. Held for RushHoldSeconds once given, so the
+	 *  tree does not flip between its two fights on a health bar hovering at the line. */
+	bool WantsRush(APawn* NPC);
+
+	/** polarity.ai.suppressall: suppress every NPC that fights the players, for the bench. */
+	void DebugSuppressAllAgainstPlayers(float Seconds);
+
+	// ==================== Squad posture: are we stronger ====================
+	//
+	// A side counts itself against the enemies it is fighting and does one of three things about it.
+	// "Ours" is the side's soldiers fighting somebody in one knot of enemies, the suppressed ones left
+	// out; "theirs" is every enemy standing in that knot (EnemyGroupRadius). So a player who walks away
+	// from the team is a knot of one, and five soldiers on him are five to one.
+
+	UFUNCTION(BlueprintPure, Category = "Coordination|Posture")
+	ESquadPosture GetPostureFor(APawn* NPC) const;
+
+	/** Ours over theirs, as last counted. 1 for an NPC with no posture yet. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Posture")
+	float GetForceRatioFor(APawn* NPC) const;
+
+	/** Is this NPC one of the half that goes in while the squad assaults. */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Posture")
+	bool IsInAssaultElement(APawn* NPC) const;
+
+	UFUNCTION(BlueprintPure, Category = "Coordination|Posture")
+	bool IsSquadCommander(APawn* NPC) const;
+
+	/** For the log and the bench: "ASSAULT 3.0 (9 v 3)". */
+	UFUNCTION(BlueprintPure, Category = "Coordination|Posture")
+	FString DescribePostureFor(APawn* NPC) const;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.2", Units = "s"))
+	float PostureInterval = 1.0f;
+
+	/** Enemies within this of each other are one knot (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "100.0"))
+	float EnemyGroupRadius = 1500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "1.0"))
+	float AssaultRatio = 3.0f;
+
+	/** Below this an assault is called off. Under AssaultRatio, so one casualty does not flip it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.5"))
+	float AssaultExitRatio = 2.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.1"))
+	float DefenseRatio = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.1"))
+	float DefenseExitRatio = 1.2f;
+
+	/** A posture is kept at least this long, whatever the count does. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.0", Units = "s"))
+	float PostureMinHoldSeconds = 6.0f;
+
+	/** How long the count is eased over before it decides anything (s). Recorded 2026-10-11: on the
+	 *  raw count a 9 v 10 changed posture 83 times in 164 s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.0", Units = "s"))
+	float RatioSmoothingSeconds = 5.0f;
+
+	/** With its commander dead a squad cannot assault for this long; then the next one takes over. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.0", Units = "s"))
+	float CommanderLossSeconds = 8.0f;
+
+	/** How close to the enemy an assault's corner may be (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Posture", meta = (ClampMin = "0.0"))
+	float AssaultStandOff = 500.0f;
+
+	/** How many of a group shoot AT its target at once. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0", ClampMax = "10"))
+	int32 MaxAimedShooters = 2;
+
+	/** Seconds between two bounds in one group: the stagger that keeps two movers from leaving on
+	 *  the same frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0.0", Units = "s"))
+	float BoundInterval = 1.0f;
+
+	/** How long a granted bound holds its mover slot before the runner has reported anything (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0.5", Units = "s"))
+	float BoundSlotSeconds = 4.0f;
+
+	/** How far forward one bound reaches (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "100.0"))
+	float BoundAdvanceStep = 600.0f;
+
+	/** A bound never aims closer to the target than this (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0.0"))
+	float BoundMinTargetDistance = 1100.0f;
+
+	/** Angle off the axis of the fight that a flank aims for, and (at 0.6 of it) the angle from
+	 *  which a member counts as already holding the flank. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "20.0", ClampMax = "150.0"))
+	float FlankAngleDeg = 70.0f;
+
+	/** A flank needs at least this many of its side in the group besides the flanker. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "1"))
+	int32 FlankMinMates = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0"))
+	int32 MaxRushers = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coordination|Jobs", meta = (ClampMin = "0.5", Units = "s"))
+	float RushHoldSeconds = 5.0f;
 
 	// ==================== Positional threat ====================
 
@@ -726,6 +906,47 @@ private:
 	};
 
 	TArray<FRelocation> ActiveRelocations;
+
+	/** One side against one knot of its enemies: how they compare, and what the side does about it.
+	 *
+	 *  Keyed by side and by PLACE (where the enemies it is fighting stand), not by a target actor:
+	 *  the squad's members each fight their own target, and the question "are we stronger" is about
+	 *  the group those targets stand in. Slots are reused and never removed, so the index an NPC
+	 *  holds stays good between passes. */
+	struct FPostureRecord
+	{
+		uint8 Team = 255;
+		FVector AnchorLocation = FVector::ZeroVector;
+		FVector AnchorSum = FVector::ZeroVector;
+		int32 AnchorCount = 0;
+
+		ESquadPosture Posture = ESquadPosture::Firefight;
+		float Ratio = 1.0f;
+
+		/** Ratio, eased over RatioSmoothingSeconds. What the posture is decided on: in a fight spread
+		 *  over a field the raw count of one knot jumps between 1 v 2 and 3 v 2 as targets change. */
+		float SmoothedRatio = 1.0f;
+		bool bFresh = true;
+		int32 Ours = 0;
+		int32 Theirs = 0;
+
+		float ChangedTime = -1000.0f;
+		float LastSeenTime = -1000.0f;
+		float NoAssaultUntil = -1000.0f;
+		bool bSeenThisPass = false;
+		bool bHadCommander = false;
+
+		TWeakObjectPtr<AShooterNPC> Commander;
+		TArray<TWeakObjectPtr<AShooterNPC>> Members;
+		TArray<TWeakObjectPtr<AShooterNPC>> AssaultElement;
+	};
+
+	TArray<FPostureRecord> Postures;
+	float TimeSincePostures = 0.0f;
+
+	void UpdatePostures();
+	const FPostureRecord* FindPostureFor(const APawn* NPC) const;
+	void DrawPostureDebug() const;
 
 	/** Corner count each player has taken away, refreshed on PositionalThreatInterval. Cached rather
 	 *  than computed on demand because GetThreatFor is called many times per frame and this

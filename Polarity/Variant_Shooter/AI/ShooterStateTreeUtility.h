@@ -284,6 +284,16 @@ struct FStateTreeSenseEnemiesInstanceData
 
 	/** Time since last perception poll */
 	float TimeSinceLastPoll = 0.0f;
+
+	/** With no target and no fresh contact for this long, an advancing NPC stops waiting to be shown
+	 *  an enemy and walks toward the nearest one alive. Measured 2026-10-11 on a recorded 9 v 10: the
+	 *  fight ended with five soldiers of two sides standing 15 m apart behind different walls, each
+	 *  with nobody in view and nothing left to investigate, for as long as the recording ran. */
+	UPROPERTY(EditAnywhere, Category = Parameter, meta = (ClampMin = "0.0", Units = "s"))
+	float HuntAfterSeconds = 4.0f;
+
+	/** Seconds this NPC has had no target. */
+	float TimeWithoutTarget = 0.0f;
 };
 
 /**

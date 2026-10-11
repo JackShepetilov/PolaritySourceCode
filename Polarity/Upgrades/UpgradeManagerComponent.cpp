@@ -9,6 +9,7 @@
 #include "Upgrades/Upgrade_Bandolier.h"
 #include "DispenserUpgradePool.h"
 #include "JumpSlotParams.h"
+#include "MeleeHoldAttack.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 
 UUpgradeManagerComponent::UUpgradeManagerComponent()
@@ -176,6 +177,47 @@ bool UUpgradeManagerComponent::BuildUpgradeCard(const UDispenserUpgradePool* Poo
 			break;
 		}
 	}
+	return true;
+}
+
+bool UUpgradeManagerComponent::BuildCardFor(const UDispenserUpgradePool* Pool, UUpgradeDefinition* Definition, FUpgradeOfferCard& OutCard) const
+{
+	if (!Pool || !Definition || !Definition->UpgradeTag.IsValid() || !Definition->ComponentClass)
+	{
+		return false;
+	}
+
+	const int32 SlotIndex = Pool->FindSlotOf(Definition);
+	int32 HeldLevel = 0;
+	UUpgradeDefinition* const Held = SlotIndex != INDEX_NONE ? GetOwnedInSlot(Pool, SlotIndex, HeldLevel) : nullptr;
+
+	const int32 Equipped = GetUpgradeLevel(Definition->UpgradeTag);
+	const int32 Bagged = GetBaggedLevel(Definition);
+	const int32 Owned = FMath::Max(Equipped, Bagged);
+	if (Owned == 0 && OwnsConflicting(Definition) && Definition != Held)
+	{
+		return false;
+	}
+	if (Owned >= Definition->MaxLevel)
+	{
+		return false;
+	}
+
+	FUpgradeOfferCard Card;
+	Card.Definition = Definition;
+	Card.FromLevel = Owned;
+	if (Equipped > 0 || !Held)
+	{
+		Card.Kind = Owned > 0 ? EUpgradeOfferKind::LevelUp : EUpgradeOfferKind::New;
+	}
+	else
+	{
+		Card.Kind = EUpgradeOfferKind::Replace;
+		Card.Replaces = Held;
+	}
+	Card.ToLevel = Owned + 1;
+	Card.Rarity = Definition->GetLevelRarity(Card.ToLevel);
+	OutCard = Card;
 	return true;
 }
 
@@ -1086,6 +1128,23 @@ float UUpgradeManagerComponent::GetCombinedMeleeDamageMultiplier(AActor* Target)
 	return Combined;
 }
 
+bool UUpgradeManagerComponent::GetMeleeHoldAttack(FMeleeHoldAttack& Out) const
+{
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value && Pair.Value->GetMeleeHoldAttack(Out))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UUpgradeManagerComponent::RaiseNotice(FName Key, FText Text, FGameplayTag ColorTag, float Duration)
+{
+	OnUpgradeNotice.Broadcast(Key, Text, ColorTag, Duration);
+}
+
 void UUpgradeManagerComponent::NotifyMeleeHitAuthority(AActor* Target)
 {
 	for (auto& Pair : ActiveUpgrades)
@@ -1095,6 +1154,21 @@ void UUpgradeManagerComponent::NotifyMeleeHitAuthority(AActor* Target)
 			Pair.Value->OnMeleeHitAuthority(Target);
 		}
 	}
+}
+
+float UUpgradeManagerComponent::GetMeleeSelfKnockbackScale(AActor* Target) const
+{
+	float Largest = 0.0f;
+
+	for (const auto& Pair : ActiveUpgrades)
+	{
+		if (Pair.Value)
+		{
+			Largest = FMath::Max(Largest, Pair.Value->GetMeleeSelfKnockbackScale(Target));
+		}
+	}
+
+	return Largest;
 }
 
 float UUpgradeManagerComponent::GetCombinedReloadSpeedMultiplier() const

@@ -56,6 +56,14 @@ public:
 	 *  line-of-sight checks that sit beside it. */
 	virtual bool IsHiddenFromAI() const { return false; }
 
+	/** The slot of the gun this character moves with right now, or INDEX_NONE (empty hands, an NPC).
+	 *  Read on the machine that controls the character; it rides the move to everybody else. */
+	virtual int32 GetMovementWeaponSlot() const { return INDEX_NONE; }
+
+	/** The movement profile of the gun in that slot, or null. Must answer the same on the server and
+	 *  on the owning client: slots are the server's and replicate. */
+	virtual const class UWeaponMovementProfile* GetWeaponMovementProfile(int32 Slot) const { return nullptr; }
+
 	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context,
 		FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested,
 		float& OutSightStrength, int32* UserData = nullptr,

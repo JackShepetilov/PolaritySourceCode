@@ -261,6 +261,15 @@ public:
 protected:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
+
+	/** A gun with no round in it and none in reserve is no use to anybody [author, 2026-10-07]: it
+	 *  cannot be taken and goes away after EmptyVanishDelay. Server; run one tick after BeginPlay,
+	 *  because every path that fills the two counts does it right after the spawn. */
+	void VanishIfEmpty();
+
+	/** How long an empty gun lies there before it is gone: long enough to see it thrown. */
+	UPROPERTY(EditDefaultsOnly, Category = "Pickup", meta = (ClampMin = "0.1", Units = "s"))
+	float EmptyVanishDelay = 1.2f;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UFUNCTION()

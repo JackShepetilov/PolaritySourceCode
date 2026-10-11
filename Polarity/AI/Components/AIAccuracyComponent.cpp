@@ -28,10 +28,10 @@ FVector UAIAccuracyComponent::CalculateAimDirection(const FVector& TargetLocatio
 	// Deliberate suppressive fire. Checked AFTER being suppressed, not before: an NPC that is itself
 	// under fire shoots worse than it means to, and the wider ring is the honest answer for that. The
 	// two states are unrelated and can both be true.
-	if (bSuppressiveFire)
+	if (bSuppressiveFire || bPinFire)
 	{
 		LastCalculatedSpread = MinSuppressiveFireSpread;
-		return ApplyDonutSpread(BaseDirection, MinSuppressiveFireSpread, MaxSuppressiveFireSpread);
+		return ApplyDonutSpreadClearOfOwnCover(BaseDirection, MinSuppressiveFireSpread, MaxSuppressiveFireSpread);
 	}
 
 	if (!Target)
@@ -42,8 +42,33 @@ FVector UAIAccuracyComponent::CalculateAimDirection(const FVector& TargetLocatio
 		return ApplySpreadToDirection(BaseDirection, BaseSpread);
 	}
 
+	// The string of fire. Only aimed rounds count: the rings above return before this, so an NPC that
+	// was pinning and then gets its aimed slot starts a fresh string, warning round included.
+	const UWorld* const World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+	const bool bNewString = SettleTarget.Get() != Target || Now - LastAimTime > AimSettleResetSeconds;
+	if (bNewString)
+	{
+		SettleTarget = Target;
+		SettleStartTime = Now;
+	}
+	LastAimTime = Now;
+
+	if (bNewString && bFirstShotMisses)
+	{
+		LastCalculatedSpread = MinSuppressiveFireSpread;
+		return ApplyDonutSpreadClearOfOwnCover(BaseDirection, MinSuppressiveFireSpread, MaxSuppressiveFireSpread);
+	}
+
 	// Calculate spread based on target state
-	const float Spread = GetCurrentSpread(Target);
+	float Spread = GetCurrentSpread(Target) * GetSettleSpreadMultiplier();
+
+	// Past SpreadFullRange the miss stays the size it is there. @see SpreadFullRange
+	const float Range = static_cast<float>(FVector::Dist(TargetLocation, AimOrigin));
+	if (SpreadFullRange > 0.0f && Range > SpreadFullRange)
+	{
+		Spread *= SpreadFullRange / Range;
+	}
 	LastCalculatedSpread = Spread;
 
 	return ApplySpreadToDirection(BaseDirection, Spread);
@@ -97,6 +122,37 @@ float UAIAccuracyComponent::GetCurrentSpread(AActor* Target) const
 	FinalSpread *= DazzleSpreadMultiplier;
 
 	return FinalSpread;
+}
+
+void UAIAccuracyComponent::NoteAiming(AActor* Target)
+{
+	const UWorld* const World = GetWorld();
+	if (!World || !Target)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	if (SettleTarget.Get() != Target || Now - LastAimTime > AimSettleResetSeconds)
+	{
+		SettleTarget = Target;
+		SettleStartTime = Now;
+	}
+	LastAimTime = Now;
+}
+
+float UAIAccuracyComponent::GetSettleSpreadMultiplier() const
+{
+	if (UnsettledSpreadMultiplier <= 1.0f || AimSettleSeconds <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	const UWorld* const World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+	const float Settled = FMath::Clamp((Now - SettleStartTime) / AimSettleSeconds, 0.0f, 1.0f);
+
+	return FMath::Lerp(UnsettledSpreadMultiplier, 1.0f, Settled);
 }
 
 float UAIAccuracyComponent::GetSelfMovementSpreadMultiplier() const
@@ -309,6 +365,39 @@ void UAIAccuracyComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 			ClearSuppression();
 		}
 	}
+}
+
+FVector UAIAccuracyComponent::ApplyDonutSpreadClearOfOwnCover(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const
+{
+	const UWorld* const World = GetWorld();
+	if (!World || OwnCoverClearDistance <= 0.0f)
+	{
+		return ApplyDonutSpread(BaseDirection, InnerSpread, OuterSpread);
+	}
+
+	FCollisionQueryParams Params(TEXT("AIMissOwnCover"), false, GetOwner());
+	const FVector Origin = GetAimOrigin();
+
+	// A fat ray rather than a line: the round leaves the muzzle, which sits lower and to the side of
+	// the eyes this is traced from.
+	const FCollisionShape Probe = FCollisionShape::MakeSphere(25.0f);
+
+	FVector Direction = BaseDirection;
+	for (int32 Try = 0; Try < 6; ++Try)
+	{
+		Direction = ApplyDonutSpread(BaseDirection, InnerSpread, OuterSpread);
+
+		FHitResult Hit;
+		if (!World->SweepSingleByChannel(Hit, Origin + Direction * 40.0f, Origin + Direction * OwnCoverClearDistance,
+			FQuat::Identity, ECC_Visibility, Probe, Params))
+		{
+			return Direction;
+		}
+	}
+
+	// Every side of the ring is wall: over the target's head, which is the one way that is open
+	// whenever the straight line is.
+	return (BaseDirection + FVector(0.0f, 0.0f, FMath::Tan(FMath::DegreesToRadians(InnerSpread)))).GetSafeNormal();
 }
 
 FVector UAIAccuracyComponent::ApplyDonutSpread(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const

@@ -3,6 +3,7 @@
 #include "ShootableButtonComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "GameFramework/Controller.h"
 
 UShootableButtonComponent::UShootableButtonComponent()
 {
@@ -17,12 +18,28 @@ UShootableButtonComponent::UShootableButtonComponent()
 	ButtonMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
 	ButtonMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	ButtonMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	// A round that flies is a sphere of type WorldDynamic moved by a sweep, and a sweep stops only
+	// where BOTH sides block. The button answered traces alone, so every flying round went through
+	// it [author, 2026-10-11]. Two halves:
+	//   the button blocks WorldDynamic (the round's type);
+	//   the button IS a PhysicsBody, because the pistol and SMG rounds are set in their blueprints
+	//   to ignore WorldDynamic (measured: BP_Bullet_Pistol, BP_Bullet_SMG) and every round blocks
+	//   PhysicsBody. The melee sweep looks for PhysicsBody too, so a punch still finds the button.
+	ButtonMesh->SetCollisionObjectType(ECC_PhysicsBody);
+	ButtonMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
 	ButtonMesh->SetGenerateOverlapEvents(false);
 }
 
 void UShootableButtonComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Again here: a button saved in a blueprint or on a level keeps the responses it was saved with.
+	if (ButtonMesh)
+	{
+		ButtonMesh->SetCollisionObjectType(ECC_PhysicsBody);
+		ButtonMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	}
 
 	AActor* Owner = GetOwner();
 	if (Owner)
@@ -115,6 +132,14 @@ void UShootableButtonComponent::SetEnabled(bool bNewEnabled)
 void UShootableButtonComponent::OnOwnerTakeAnyDamage(AActor* DamagedActor, float Damage,
 	const UDamageType* DamageType, AController* InstigatedBy, AActor* DamageCauser)
 {
+	// An enemy's stray round is not a press [author, 2026-10-11]: on the bench they shot the consoles
+	// in the middle of a fight, which cleared the fight they were in. Damage with nobody behind it
+	// (a script, a trap) still presses.
+	if (InstigatedBy && !InstigatedBy->IsPlayerController())
+	{
+		return;
+	}
+
 	Press(DamageCauser);
 }
 

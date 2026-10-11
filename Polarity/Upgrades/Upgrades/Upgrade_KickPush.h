@@ -9,11 +9,11 @@
 class UMeleeAttackComponent;
 
 /**
- * A kick (the swing made in the air) that lands throws the enemy further and kicks the owner back
- * the other way along the same line. @see UUpgradeDefinition_KickPush
+ * A kick (the swing made in the air) that lands knocks the owner back the way it knocks the enemy
+ * back, the other way. @see UUpgradeDefinition_KickPush
  *
- * The enemy's half rides the existing knockback multiplier, so it reaches the server the way every
- * shove already does. The owner's half is launched on the machine that swung and reported up.
+ * It owns no shove of its own. It answers one question, and UMeleeAttackComponent does the rest
+ * with the numbers it has already worked out for the enemy.
  */
 UCLASS(BlueprintType, meta = (DisplayName = "Kick Push"))
 class POLARITY_API UUpgrade_KickPush : public UUpgradeComponent
@@ -22,15 +22,8 @@ class POLARITY_API UUpgrade_KickPush : public UUpgradeComponent
 
 protected:
 	virtual void OnUpgradeActivated() override;
-	virtual void OnUpgradeDeactivated() override;
-	virtual float GetMeleeKnockbackDistanceMultiplier(AActor* Target) const override;
+	virtual float GetMeleeSelfKnockbackScale(AActor* Target) const override;
 
 private:
 	TWeakObjectPtr<UMeleeAttackComponent> CachedMeleeComp;
-
-	/** True when the swing in progress is a kick. */
-	bool IsKicking() const;
-
-	UFUNCTION()
-	void HandleMeleeHit(AActor* HitActor, const FVector& HitLocation, bool bHeadshot, float Damage);
 };

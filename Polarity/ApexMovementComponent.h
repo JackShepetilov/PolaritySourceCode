@@ -8,6 +8,7 @@
 #include "ApexMovementComponent.generated.h"
 
 class UMovementSettings;
+class UWeaponMovementProfile;
 class IVelocityModifier;
 class ANitroGate;
 
@@ -254,6 +255,11 @@ struct FCharacterNetworkMoveData_Polarity : public FCharacterNetworkMoveData
 
 	uint32 PolarityFlags = 0;
 
+	/** The hotkey slot of the gun the client moved with, 255 for none. The server looks the gun's
+	 *  movement profile up by it: it owns the slots, so the client names a slot and not a profile.
+	 *  @see UApexMovementComponent::MoveWeaponSlot */
+	uint8 WeaponSlot = 255;
+
 	/** Where the melee lunge is flying, in world space. On the wire only while MeleeLungeHoming is
 	 *  set — that flag is its presence bit, so it costs nothing at all the rest of the time. */
 	FVector_NetQuantize10 MeleeLungeTarget = FVector::ZeroVector;
@@ -495,6 +501,9 @@ public:
 	/** The flags from the move currently being unpacked. Server side only, valid for the length of
 	 *  one ServerMove_PerformMovement call. */
 	uint32 PendingPolarityFlags = 0;
+
+	/** The weapon slot from that same move. */
+	uint8 PendingWeaponSlot = 255;
 
 	/** The lunge target from that same move. Applied together with the flags in MoveAutonomous. */
 	FVector PendingMeleeLungeTarget = FVector::ZeroVector;
@@ -751,6 +760,14 @@ public:
 	 *  component tick. */
 	void StartSlideToPoint(const FVector& WorldPoint, float SteerRateDeg);
 
+	/** A slide to a point (an NPC's) ends this close to it (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide|To Point", meta = (ClampMin = "0.0", Units = "cm"))
+	float SlideToPointArriveTolerance = 40.0f;
+
+	/** And after this long whatever is left of the way (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide|To Point", meta = (ClampMin = "0.1", Units = "s"))
+	float MaxSlideToPointDuration = 2.5f;
+
 	/** Move the committed point while the slide is already running. */
 	void UpdateSlideTargetPoint(const FVector& WorldPoint);
 
@@ -818,7 +835,21 @@ public:
 	 *  once per frame, and that folded value is what the server received. Testing it again would
 	 *  let the local answer drift from the one the move was packed with. */
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
-	bool IsSprinting() const { return bWantsToSprint && !bIsSliding && !IsCrouching() && IsMovingOnGround(); }
+	bool IsSprinting() const;
+
+	/** The movement profile this move is simulated with: the gun in MoveWeaponSlot, or null. */
+	const UWeaponMovementProfile* GetMoveWeaponProfile() const;
+
+	/** The speed a slide may start at right now: SlideMinStartSpeed, lowered for a slow gun
+	 *  (SlideStartSprintFraction) and dropped to SlideMinSpeed on a downhill. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetSlideStartSpeed() const;
+
+	/** The hotkey slot of the gun in the hands for the move being simulated, 255 for none. Written
+	 *  by the controlling machine each frame, carried to the server inside the move, restored on a
+	 *  replay from the saved move. Never read the character's weapon from inside the simulation:
+	 *  the server hears of a switch later than the client that made it. */
+	uint8 MoveWeaponSlot = 255;
 
 	/** World time sprinting last ended, for whoever needs to measure from it (the weapon raise
 	 *  gate does). Far in the past when the character has never sprinted. */
@@ -1516,6 +1547,9 @@ public:
 	/** Everything the character decided to do during this move, as the flags that go on the wire.
 	 *  @see EPolarityMoveFlag */
 	uint32 SavedPolarityFlags;
+
+	/** @see UApexMovementComponent::MoveWeaponSlot */
+	uint8 SavedWeaponSlot = 255;
 
 	/** The melee lunge's destination for this move. Unlike everything below this line it is not just
 	 *  replay state: it travels to the server too, because a lunge target is the one piece of geometry

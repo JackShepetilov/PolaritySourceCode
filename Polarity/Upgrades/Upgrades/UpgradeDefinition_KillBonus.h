@@ -6,6 +6,8 @@
 #include "UpgradeDefinition.h"
 #include "UpgradeDefinition_KillBonus.generated.h"
 
+class UMaterialInterface;
+
 /** What a kill pays. One asset per kind; they stack as separate upgrades. */
 UENUM(BlueprintType)
 enum class EKillBonusKind : uint8
@@ -51,6 +53,29 @@ public:
 	/** Per-level tuning. Index 0 = level 1. MaxLevel on parent should equal array size. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Levels")
 	TArray<FKillBonusLevelData> LevelData;
+
+	// ==================== Feedback ====================
+	// Both are optional and independent: a line of text under the crosshair, a glow round the screen.
+
+	/** The line shown under the crosshair while the bonus runs. Empty = no line. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Feedback")
+	FText NoticeText;
+
+	/** Palette colour of that line. Unset = the notice slot's own. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Feedback", meta = (Categories = "Palette"))
+	FGameplayTag NoticeColorTag;
+
+	/** Post-process material for the glow round the screen edges (takes Color and Intensity).
+	 *  Unset = no glow. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Feedback")
+	TObjectPtr<UMaterialInterface> ScreenEdgeMaterial;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Feedback")
+	FLinearColor ScreenEdgeColor = FLinearColor(0.2f, 1.0f, 0.4f, 1.0f);
+
+	/** How long the feedback stays for a bonus that is over at once (the cooldown cut). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kill Bonus|Feedback", meta = (ClampMin = "0.1", Units = "s"))
+	float InstantFeedbackTime = 1.2f;
 
 	const FKillBonusLevelData& GetLevelData(int32 Level) const
 	{
