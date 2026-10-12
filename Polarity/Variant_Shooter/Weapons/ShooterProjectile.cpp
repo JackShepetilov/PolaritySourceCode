@@ -1112,8 +1112,13 @@ void AShooterProjectile::ApplyDirectHit(AActor* HitActor, UPrimitiveComponent* H
 	// standing target, because an ordinary bullet's shove is below the threshold that lifts anyone.
 	if (AShooterWeapon* Weapon = SourceWeapon)
 	{
+		// The plain base UDamageType is this class's default and says nothing about the round, so it
+		// must not override the gun's own type: it did, on every bullet, and the gun's type (and with
+		// it how hard the round bites armour, UDamageType_Ranged::ArmorDamageScale) never arrived.
+		// Only a round that names a type of its own (fire, blast) overrides.
+		const TSubclassOf<UDamageType> OwnType = (HitDamageType == UDamageType::StaticClass()) ? nullptr : HitDamageType;
 		Weapon->ApplyWeaponHit(Hit, FinalDamage, HitDirection, PhysicsForce,
-			Weapon->GetShotDamageMultiplierAgainst(HitActor), HitDamageType, bDamageOwner);
+			Weapon->GetShotDamageMultiplierAgainst(HitActor), OwnType, bDamageOwner);
 		return;
 	}
 

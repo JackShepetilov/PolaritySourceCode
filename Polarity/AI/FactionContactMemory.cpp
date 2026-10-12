@@ -4,6 +4,17 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarAITargetKnowledge(
+	TEXT("polarity.ai.targetknowledge"),
+	1,
+	TEXT("1: a side acts on what it knows of its enemies (sight in a cone, sound, the radio; the place he was last seen at once nobody sees him). 0: everybody knows where everybody is."));
+
+bool UFactionContactMemory::IsKnowledgeOn()
+{
+	return CVarAITargetKnowledge.GetValueOnAnyThread() != 0;
+}
 
 UFactionContactMemory* UFactionContactMemory::Get(const UObject* WorldContext)
 {
@@ -19,10 +30,77 @@ float UFactionContactMemory::Now() const
 
 bool UFactionContactMemory::IsFresh(const FFactionContact& Contact, float CurrentTime) const
 {
-	// Somebody looking at it keeps it alive regardless of age: a contact under observation cannot be
-	// stale by definition, and a long firefight would otherwise expire the target being shot at.
-	return Contact.Enemy.IsValid()
-		&& (Contact.bCurrentlySeen || CurrentTime - Contact.LastSeenTime <= ContactLifetime);
+	// By age alone. Whoever has it in view reports it again every fraction of a second, so a contact
+	// under observation is never old; and "somebody is looking" as a flag outlived the one who set
+	// it whenever that one died or was not the last to report.
+	return Contact.Enemy.IsValid() && CurrentTime - Contact.LastSeenTime <= ContactLifetime;
+}
+
+bool UFactionContactMemory::IsSeenNow(const FFactionContact& Contact, float CurrentTime) const
+{
+	return Contact.bCurrentlySeen && CurrentTime - Contact.LastSeenTime <= SeenNowGrace;
+}
+
+bool UFactionContactMemory::GetKnownPlace(uint8 Team, const AActor* Enemy, FVector& OutPlace) const
+{
+	if (!Enemy)
+	{
+		return false;
+	}
+	if (!IsKnowledgeOn() || !Enemy->IsA<APawn>())
+	{
+		OutPlace = Enemy->GetActorLocation();
+		return true;
+	}
+
+	const TArray<FFactionContact>* const Contacts = ContactsByTeam.Find(Team);
+	if (!Contacts)
+	{
+		return false;
+	}
+
+	const float CurrentTime = Now();
+	for (const FFactionContact& Contact : *Contacts)
+	{
+		if (Contact.Enemy.Get() == Enemy && IsFresh(Contact, CurrentTime))
+		{
+			OutPlace = IsSeenNow(Contact, CurrentTime) ? Enemy->GetActorLocation() : Contact.LastKnownLocation;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UFactionContactMemory::TryClaimSearch(uint8 Team, const AActor* Enemy, APawn* Who)
+{
+	if (!Enemy || !Who)
+	{
+		return false;
+	}
+
+	SearchClaims.RemoveAll([](const FSearchClaim& Claim) { return !Claim.Enemy.IsValid() || !Claim.Searcher.IsValid(); });
+
+	for (const FSearchClaim& Claim : SearchClaims)
+	{
+		if (Claim.Team == Team && Claim.Enemy.Get() == Enemy)
+		{
+			return Claim.Searcher.Get() == Who;
+		}
+	}
+
+	FSearchClaim& Claim = SearchClaims.AddDefaulted_GetRef();
+	Claim.Team = Team;
+	Claim.Enemy = Enemy;
+	Claim.Searcher = Who;
+	return true;
+}
+
+void UFactionContactMemory::ReleaseSearch(uint8 Team, const APawn* Who)
+{
+	SearchClaims.RemoveAll([Team, Who](const FSearchClaim& Claim)
+	{
+		return Claim.Team == Team && Claim.Searcher.Get() == Who;
+	});
 }
 
 void UFactionContactMemory::ReportContact(uint8 ReporterTeam, AActor* Enemy, const FVector& Location, APawn* Reporter, bool bSeenNow)
@@ -92,7 +170,8 @@ void UFactionContactMemory::GetContacts(uint8 Team, TArray<FFactionContact>& Out
 	{
 		if (IsFresh(Contact, CurrentTime))
 		{
-			OutContacts.Add(Contact);
+			FFactionContact& Out = OutContacts.Add_GetRef(Contact);
+			Out.bCurrentlySeen = IsSeenNow(Contact, CurrentTime);
 		}
 	}
 
@@ -116,6 +195,7 @@ bool UFactionContactMemory::GetContact(uint8 Team, const AActor* Enemy, FFaction
 		if (Contact.Enemy.Get() == Enemy && IsFresh(Contact, CurrentTime))
 		{
 			OutContact = Contact;
+			OutContact.bCurrentlySeen = IsSeenNow(Contact, CurrentTime);
 			return true;
 		}
 	}
@@ -150,6 +230,7 @@ bool UFactionContactMemory::FindNearestContact(uint8 Team, const FVector& Locati
 		{
 			NearestDistSq = DistSq;
 			OutContact = Contact;
+			OutContact.bCurrentlySeen = IsSeenNow(Contact, CurrentTime);
 			bFound = true;
 		}
 	}

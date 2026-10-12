@@ -18,6 +18,7 @@
 // For EWeaponAttachmentType. Included rather than forward declared because UHT needs the complete
 // enum to build the TMap property below.
 #include "Variant_Shooter/Weapons/WeaponAttachmentDefinition.h"
+#include "Curves/CurveFloat.h"
 #include "ShooterWeapon.generated.h"
 
 class IShooterWeaponHolder;
@@ -236,6 +237,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0.0", Units = "s"))
 	float AIAimHoldSeconds = 0.0f;
 
+	/** The hold by range: X is the distance to the target in METRES, Y the seconds held. A far shot
+	 *  is aimed for long and a near one quickly [author, 2026-10-12]. With keys in it this replaces
+	 *  AIAimHoldSeconds; with none the hold is AIAimHoldSeconds at any range. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use")
+	FRuntimeFloatCurve AIAimHoldByDistance;
+
+	/** Seconds an enemy holds this gun on a target this far away (cm) before the pull. */
+	float GetAIAimHold(float DistanceCm) const;
+
+	/** True when an enemy holds this gun on its target before it fires, at some range at least. */
+	bool HasAIAimHold() const;
+
+	/** How far an enemy with this gun picks a player out by itself, in front of it and with a clear
+	 *  line (cm). 0: only the enemy's own sight sense, which reaches 35 m. A scope sees further than
+	 *  an eye: recorded 2026-10-12, a soldier alone on a nest with the bolt rifle did not notice a
+	 *  player standing in the open 57 m in front of it for the whole of the fight. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0.0", Units = "cm"))
+	float AISightRange = 0.0f;
+
 	/** Damage to a PLAYER when an enemy fires this gun, as a share of what it does. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use", meta = (ClampMin = "0.0"))
 	float AIDamageScale = 1.0f;
@@ -243,6 +263,19 @@ public:
 	/** True while an enemy is holding this gun on its target before a shot. For whatever shows it. */
 	UPROPERTY(BlueprintReadOnly, Category = "AI Use")
 	bool bAIAimHolding = false;
+
+	/** World time the hold began on this machine, and how long it is to last. */
+	UPROPERTY(BlueprintReadOnly, Category = "AI Use")
+	float AIAimHoldStartTime = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AI Use")
+	float AIAimHoldDuration = 0.0f;
+
+	/** What the hold looks like to the one it is held on: the scope's glint. Set, and the gun has no
+	 *  UAimGlintComponent of its own: one is made with the component's defaults at the first hold.
+	 *  Empty and no component: the hold is not shown. @see UAimGlintComponent */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI Use")
+	TObjectPtr<UMaterialInterface> AIAimGlintMaterial;
 
 	/** The aim hold began or ended, on every machine. Seconds: how long it will last (0 on the end). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "AI Use")
@@ -1718,6 +1751,8 @@ protected:
 
 	// ==================== Perception ====================
 
+	/** How far the AI hears a shot from this gun, cm. What is on the muzzle multiplies it.
+	 *  @see GetShotNoiseRange, UWeaponAttachmentDefinition::ShotNoiseRangeMultiplier */
 	UPROPERTY(EditAnywhere, Category = "Perception")
 	float ShotNoiseRange = 5000.0f;
 
@@ -2895,6 +2930,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	float GetShotHeadshotMultiplier() const;
 
+	/** The same against this target. A target that wears a helmet (UHelmetComponent) answers for
+	 *  its own head with a pool, so the multiplier is 1 there. What a hit on a body asks. */
+	float GetShotHeadshotMultiplierAgainst(const AActor* Target) const;
+
 	/**
 	 * Does one shot of this weapon ionize its target, and by how much.
 	 *
@@ -3067,6 +3106,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	int32 GetInstalledAttachmentCount() const { return InstalledAttachments.Num(); }
+
+	/** ShotNoiseRange with the muzzle attachment counted. */
+	float GetShotNoiseRange() const;
 
 	/** Apply a magnification to a field of view and get the zoomed-in field of view back.
 	 *

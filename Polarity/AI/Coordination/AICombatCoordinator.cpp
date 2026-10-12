@@ -2191,7 +2191,8 @@ void AAICombatCoordinator::UpdatePostures()
 
 		// A suppressed soldier is there, and is not strength.
 		const UAIAccuracyComponent* const Accuracy = NPC->FindComponentByClass<UAIAccuracyComponent>();
-		if (!Accuracy || !Accuracy->IsSuppressed())
+		// Neither is one lying on the ground from a hit in the head.
+		if ((!Accuracy || !Accuracy->IsSuppressed()) && !NPC->IsKnockedDown())
 		{
 			++Record.Ours;
 		}

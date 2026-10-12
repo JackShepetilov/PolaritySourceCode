@@ -9,6 +9,8 @@
 #include "../Components/AIAccuracyComponent.h"
 #include "../FactionContactMemory.h"
 #include "../../Variant_Shooter/Bench/FightRecorder.h"
+#include "../../Variant_Shooter/Weapons/ShooterWeapon.h"
+#include "../BodySamples.h"
 #include "../../EMFVelocityModifier.h"
 #include "../../Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "AI/PolarityTeams.h"
@@ -32,9 +34,84 @@ static TAutoConsoleVariable<int32> CVarAIDuckByReason(
 	1,
 	TEXT("1: a soldier out from behind cover gets down only for a reason (suppressed, reloading, hit hard). 0: on the old clock."));
 
+/** Where the one behind Controller thinks Who is; where Who stands when it has no such opinion.
+ *  @see AShooterAIController::GetKnownPlaceOf */
+static FVector KnownPlaceOf(const AAIController* Controller, const AActor* Who)
+{
+	FVector Place = Who ? Who->GetActorLocation() : FVector::ZeroVector;
+	if (const AShooterAIController* const Brain = Cast<AShooterAIController>(Controller))
+	{
+		Brain->GetKnownPlaceOf(Who, Place);
+	}
+	return Place;
+}
+
 // A reaction to being hit or pinned, into the record of the fight, EVERY time. The word the soldier
 // says goes through AShooterNPC::SayTactic, which drops a word said twice in a row, so a soldier
 // sent down twice running left one line and the second read as "did not react" (2026-10-12).
+// Dead ground: a target the soldier could SEE from a spot, standing, and could not SHOOT from it,
+// because the barrel aimed down at him goes into the top of the wall it is standing behind. Under
+// the wall of a nest, a roof, a tower. Measured 2026-10-12 on the sniper's nest: at 6 m the muzzle
+// of a standing soldier, aimed at the player, was 31 cm below the top of its own parapet, and the
+// soldier stood there looking at him with a trigger it could not pull.
+// The body is a model, the same one AShooterNPC::HasLineOfSightTo uses for a lowered gun: eyes 160
+// and shoulder 138 over the floor, the gun 105 long from the shoulder (all measured).
+static bool IsInDeadGroundFrom(const AShooterNPC* Who, const FVector& FloorSpot, const AActor* Target, bool bAskTheGun)
+{
+	const UWorld* const World = Who ? Who->GetWorld() : nullptr;
+	if (!World || !Target)
+	{
+		return false;
+	}
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DeadGround), false, Who);
+	Params.AddIgnoredActor(Target);
+
+	BodySamples::FPoints Points;
+	BodySamples::Get(Target, Points);
+
+	// Seen from where its eyes would be, standing on that spot.
+	const FVector Eyes = FloorSpot + FVector(0.0f, 0.0f, 160.0f);
+	bool bSeen = false;
+	for (const FVector& Point : Points)
+	{
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, Eyes, Point, ECC_Visibility, Params))
+		{
+			bSeen = true;
+			break;
+		}
+	}
+	if (!bSeen)
+	{
+		return false;   // not in view at all: that is hiding, not dead ground
+	}
+	if (!bAskTheGun)
+	{
+		return true;    // the caller has already found the gun has no line
+	}
+
+	// And the gun, as a model: it is pointed at the middle of the target (that is where the
+	// controller's focus puts it), from a shoulder taken 8 cm low so that a barrel which would clear
+	// the wall by a hair counts as one that does not. Standing up into "almost" is how a soldier ends
+	// up on its feet in view with a trigger it cannot pull.
+	const FVector Shoulder = FloorSpot + FVector(0.0f, 0.0f, 130.0f);
+	const FVector Muzzle = Shoulder + (Target->GetActorLocation() - Shoulder).GetSafeNormal() * 105.0f;
+	FHitResult BarrelHit;
+	if (World->LineTraceSingleByChannel(BarrelHit, Shoulder, Muzzle, ECC_Visibility, Params))
+	{
+		return true;
+	}
+	for (const FVector& Point : Points)
+	{
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, Muzzle, Point, ECC_Visibility, Params))
+		{
+			return false;   // it can be shot from here
+		}
+	}
+	return true;
+}
+
 static void NoteDuckReaction(const AShooterNPC* Who, const TCHAR* What)
 {
 	UFightRecorderSubsystem::NoteTactic(Who, FName(*FString::Printf(TEXT("DUCK: %s"), What)));
@@ -2840,6 +2917,10 @@ namespace
 	}
 }
 
+/** Inside this distance of a LOW hide point the NPC goes down while still walking to it. About the
+ *  length of a side peek's step out, so a return from the peek is crouched from its first step. */
+static constexpr float ShooterPeek_LowCoverDuckDistance = 350.0f;
+
 /** Multiple of ArriveRadius that still counts as having reached a cover point, once path following
  *  has stopped and the NPC is no longer closing.
  *
@@ -3007,6 +3088,29 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		Data.Controller->SetFocus(Data.SuppressionTarget);
 	}
 
+	// Nobody of the side has seen him for a while: one of them walks to the place he was lost at and
+	// looks round from there, the rest keep their guns on it. That one's legs and eyes are the
+	// controller's until somebody sees him again. @see AShooterAIController::TickSearchForTarget
+	if (AShooterAIController* const Brain = Cast<AShooterAIController>(Data.Controller))
+	{
+		if (Brain->TickSearchForTarget(!bSuppressing && !Data.bIsRelocating))
+		{
+			if (Data.bIsShooting)
+			{
+				StopShooting(Data);
+			}
+			if (Finder->HasCover())
+			{
+				Finder->ReleaseCover();
+			}
+			if (Data.Phase != EShooterPeekPhase::Seeking)
+			{
+				EnterPhase(Data, EShooterPeekPhase::Seeking);
+			}
+			return EStateTreeRunStatus::Running;
+		}
+	}
+
 	// A search that just finished. Counted on the falling edge and nowhere else, so a request the
 	// component refused on its cooldown never looks like a failure to find anything.
 	const bool bSearchingNow = Finder->IsSearching();
@@ -3122,7 +3226,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			Data.NPC->ClearRecentDamage();
 			Data.LegElapsed = 0.0f;
 			Data.LegSign = -Data.LegSign;
-			const FVector HitAway = (Data.NPC->GetActorLocation() - FireTarget->GetActorLocation()).GetSafeNormal2D();
+			const FVector HitAway = (Data.NPC->GetActorLocation() - KnownPlaceOf(Data.Controller, FireTarget)).GetSafeNormal2D();
 			const FVector HitSide = FVector::CrossProduct(FVector::UpVector, HitAway) * Data.LegSign;
 			FNavLocation HitNav;
 			UNavigationSystemV1* const HitNavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Data.NPC->GetWorld());
@@ -3169,7 +3273,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		if (!bOpenSees && FireTarget && !Data.NPC->IsReloadingWeapon() && bMayClose && Data.LegElapsed >= 1.0f)
 		{
 			Data.LegElapsed = 0.0f;
-			Data.bClosingToSee = TryMoveTo(Data, FireTarget->GetActorLocation());
+			Data.bClosingToSee = TryMoveTo(Data, KnownPlaceOf(Data.Controller, FireTarget));
 			Data.NPC->SayTactic(TEXT("NO COVER, NO ANGLE: closing to see the target"));
 		}
 		else if (!bOpenSees && FireTarget && !Data.NPC->IsReloadingWeapon() && Data.NPC->HasHoldArea()
@@ -3191,7 +3295,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			{
 				Data.NPC->SayTactic(TEXT("HOLD: no line from here, moving along my ground"));
 			}
-			TryMoveTo(Data, Data.NPC->GetHoldPointToward(FireTarget->GetActorLocation(), 300.0f * Data.LegSign));
+			TryMoveTo(Data, Data.NPC->GetHoldPointToward(KnownPlaceOf(Data.Controller, FireTarget), 300.0f * Data.LegSign));
 		}
 		else if (bOpenSees && Data.bClosingToSee)
 		{
@@ -3358,6 +3462,21 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 						break;
 					}
 				}
+			}
+		}
+
+		// Low cover hides a crouched body only, so the last steps to it are taken low [author,
+		// 2026-10-12]. Until now the crouch waited for AtHide: an NPC that ran dry out at the peek stood
+		// up (EnterPhase), walked back and did the first part of its reload standing over the wall.
+		// Not on a run: the sprint and the slide into cover own the pose there.
+		if (Spot.bLowCover && !Data.bIsRelocating && ToHideDistance <= ShooterPeek_LowCoverDuckDistance)
+		{
+			UApexMovementComponent* const DuckApex = Cast<UApexMovementComponent>(Data.NPC->GetCharacterMovement());
+			if (DuckApex && !DuckApex->IsSliding() && !DuckApex->IsCrouching())
+			{
+				DuckApex->StartCrouching();
+				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s ducks on the way back to low cover, %.0f left"),
+					*GetNameSafe(Data.NPC), ToHideDistance);
 			}
 		}
 
@@ -3567,9 +3686,19 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			}
 		}
 
-		const bool bHiddenLongEnough = bByReason
+		bool bHiddenLongEnough = bByReason
 			? (HideNow >= Data.DuckUntil && Data.PhaseElapsed >= Data.MinHideSeconds && !Finder->IsSearching())
 			: Data.PhaseElapsed >= Data.HideDuration;
+
+		// He is under my wall: coming up would be standing in his view with a gun that cannot reach
+		// him. It stays down until he is out of the dead ground [author, 2026-10-12]. Asked of the
+		// peek point as the floor it would stand on. @see IsInDeadGroundFrom
+		if (bHiddenLongEnough && Data.Target
+			&& IsInDeadGroundFrom(Data.NPC, Spot.PeekLocation, Data.Target, /*bAskTheGun*/ true))
+		{
+			bHiddenLongEnough = false;
+			Data.NPC->SayTactic(TEXT("DEAD GROUND: he is under my wall, staying down"));
+		}
 
 		if (bHiddenLongEnough && bWeaponReady)
 		{
@@ -3716,6 +3845,18 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		const bool bPoseSettled = Data.PhaseElapsed >= 0.3f && !(PeekApex && PeekApex->IsSliding());
 		if (bPoseSettled && !Opportunity && (!FireTarget || !Data.NPC->HasLineOfSightTo(FireTarget)))
 		{
+			// In plain view and out of reach of the gun: under the wall. Down, and it stays down until
+			// he comes out from under it (the hide end asks the same question before it comes up).
+			if (FireTarget && FireTarget == Data.Target
+				&& IsInDeadGroundFrom(Data.NPC, NPCLocation - FVector(0.0f, 0.0f, Data.NPC->GetSimpleCollisionHalfHeight()), FireTarget, /*bAskTheGun*/ false))
+			{
+				Data.BlindPeeks = 0;
+				Data.NPC->SayTactic(TEXT("DEAD GROUND: he is under my wall, staying down"));
+				EnterPhase(Data, EShooterPeekPhase::ToHide);
+				TryMoveTo(Data, Spot.HideLocation);
+				break;
+			}
+
 			// He is not in view. Is the place he went down behind? Then this corner is doing its job:
 			// the soldier stays out with the gun on that place, and its aim goes on settling. Going
 			// back and taking another corner is for a corner that looks at a wall, not for an enemy
@@ -3724,11 +3865,8 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 			// "this corner sees nobody: taking another". 17 to 33 corners thrown away a fight.
 			if (FireTarget && CVarAIDuckByReason.GetValueOnAnyThread() != 0)
 			{
-				FFactionContact WatchContact;
-				const UFactionContactMemory* const WatchMemory = UFactionContactMemory::Get(Data.NPC);
-				const FVector Place = (WatchMemory && WatchMemory->FindNearestContact(
-					PolarityTeams::GetTeam(Data.NPC), FireTarget->GetActorLocation(), WatchContact))
-					? WatchContact.LastKnownLocation : FireTarget->GetActorLocation();
+				// Where it thinks he is: the place the side last saw him at.
+				const FVector Place = KnownPlaceOf(Data.Controller, FireTarget);
 
 				FCollisionQueryParams WatchParams(SCENE_QUERY_STAT(PeekWatch), false, Data.NPC);
 				WatchParams.AddIgnoredActor(FireTarget);
@@ -3751,9 +3889,14 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 					if (!Data.NPC->IsReloadingWeapon() && !(WatchPinned && WatchPinned->IsSuppressed())
 						&& Data.NPC->GetRecentDamage() < Data.DuckDamageThreshold)
 					{
+						// A gun that is held on its target before the shot (a scope) does not fire at the
+						// place he went down behind: a round with no hold in front of it is the shot with no
+						// warning. It watches, and the hold starts when he shows.
+						const AShooterWeapon* const WatchGun = Data.NPC->GetWeapon();
+						const bool bHoldsAim = WatchGun && WatchGun->HasAIAimHold();
 						if (Data.PhaseElapsed < Data.WatchFireSeconds)
 						{
-							Data.bWatching = true;
+							Data.bWatching = !bHoldsAim;
 							Data.WatchPlace = Over;
 							Data.NPC->SayTactic(TEXT("WATCHING the place he went down"));
 							break;
@@ -3989,7 +4132,9 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 	// than that there is a wall in the way, which is exactly the situation this was written for.
 	// And for anybody at all, for WatchFireSeconds after he went down, while the place he went down
 	// behind is in view (bWatching): rounds go on arriving where he is going to come up.
-	const bool bWatchFire = Data.bWatching;
+	// Not while its head is turned to a shot or a shout from another side: the gun goes with the head.
+	const AShooterAIController* const FireBrain = Cast<AShooterAIController>(Data.Controller);
+	const bool bWatchFire = Data.bWatching && !(FireBrain && FireBrain->IsLookingAround());
 	Data.bWatching = false;
 	const bool bBlindFire = bWantsFire && !bSeesFireTarget
 		&& Data.Phase == EShooterPeekPhase::AtPeek
@@ -4112,7 +4257,7 @@ void FSTTask_ShooterPeek::StartStrafeLeg(FInstanceDataType& Data, const FVector&
 
 	const FVector Origin = Data.NPC->GetActorLocation();
 
-	FVector ToTarget = (Data.Target->GetActorLocation() - Origin).GetSafeNormal2D();
+	FVector ToTarget = (KnownPlaceOf(Data.Controller, Data.Target) - Origin).GetSafeNormal2D();
 	if (ToTarget.IsNearlyZero())
 	{
 		ToTarget = FVector::ForwardVector;

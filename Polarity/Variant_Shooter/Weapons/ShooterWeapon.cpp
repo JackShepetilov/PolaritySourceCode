@@ -13,6 +13,8 @@
 #include "Variant_Shooter/Bench/FightRecorder.h"
 #include "Variant_Shooter/ShootableButtonComponent.h"
 #include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
+#include "Variant_Shooter/Weapons/AimGlintComponent.h"
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "Engine/DataTable.h"
 #include "Sound/SoundBase.h"
 #include "UObject/FieldIterator.h"
@@ -63,6 +65,15 @@ static TAutoConsoleVariable<int32> CVarInfiniteAmmo(
 	TEXT("polarity.debug.infiniteammo"),
 	0,
 	TEXT("1 = player weapons do not spend rounds, cells or energy."),
+	ECVF_Cheat);
+
+// Debug: a player's gun has no spread at all, from the hip as well, so a shot lands on the point the
+// crosshair is on. For measuring where on a body a round arrives. Players only. Recoil is not
+// touched: one shot at a time is exact, a burst still climbs.
+static TAutoConsoleVariable<int32> CVarNoSpread(
+	TEXT("polarity.debug.nospread"),
+	0,
+	TEXT("1 = player weapons fire with zero spread in every state."),
 	ECVF_Cheat);
 
 namespace
@@ -124,6 +135,7 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "TracerSubsystem.h"
 #include "VFX/VFXVariantSequenceSubsystem.h"
 #include "Variant_Shooter/Shield/HitZoneComponent.h"
+#include "Variant_Shooter/Shield/HelmetComponent.h"
 
 namespace ZoneFeedback
 {
@@ -1767,6 +1779,11 @@ float AShooterWeapon::GetShotHeadshotMultiplier() const
 	return HeadshotMultiplier;
 }
 
+float AShooterWeapon::GetShotHeadshotMultiplierAgainst(const AActor* Target) const
+{
+	return UHelmetComponent::Find(Target) ? 1.0f : GetShotHeadshotMultiplier();
+}
+
 bool AShooterWeapon::GetShotIonization(float& OutChargePerHit) const
 {
 	OutChargePerHit = IonizationChargePerHit;
@@ -1857,6 +1874,22 @@ float AShooterWeapon::GetShotDamageMultiplierAgainst(AActor* Target) const
 	return HeatMult * ZFactorMult * TagMult * UpgradeMult * EnemyHandsMult;
 }
 
+float AShooterWeapon::GetAIAimHold(float DistanceCm) const
+{
+	const FRichCurve* const Curve = AIAimHoldByDistance.GetRichCurveConst();
+	if (Curve && Curve->GetNumKeys() > 0)
+	{
+		return FMath::Max(0.0f, Curve->Eval(DistanceCm / 100.0f));
+	}
+	return AIAimHoldSeconds;
+}
+
+bool AShooterWeapon::HasAIAimHold() const
+{
+	const FRichCurve* const Curve = AIAimHoldByDistance.GetRichCurveConst();
+	return AIAimHoldSeconds > 0.0f || (Curve && Curve->GetNumKeys() > 0);
+}
+
 void AShooterWeapon::Multicast_AIAimHold_Implementation(bool bHolding, float Seconds)
 {
 	UWorld* const World = GetWorld();
@@ -1865,6 +1898,20 @@ void AShooterWeapon::Multicast_AIAimHold_Implementation(bool bHolding, float Sec
 		World->GetTimerManager().ClearTimer(AIAimHoldTimer);
 	}
 	bAIAimHolding = bHolding;
+	if (bHolding)
+	{
+		AIAimHoldStartTime = World ? World->GetTimeSeconds() : 0.0f;
+		AIAimHoldDuration = Seconds;
+
+		// The glint, for a gun nobody gave one in its blueprint. Cosmetic: not on a dedicated server.
+		if (AIAimGlintMaterial && World && World->GetNetMode() != NM_DedicatedServer
+			&& !FindComponentByClass<UAimGlintComponent>())
+		{
+			UAimGlintComponent* const Glint = NewObject<UAimGlintComponent>(this, TEXT("AimGlint"));
+			Glint->SetupAttachment(GetRootComponent());
+			Glint->RegisterComponent();
+		}
+	}
 	OnAIAimHold(bHolding, bHolding ? Seconds : 0.0f);
 
 	if (bHolding && World)
@@ -1873,7 +1920,7 @@ void AShooterWeapon::Multicast_AIAimHold_Implementation(bool bHolding, float Sec
 		{
 			bAIAimHolding = false;
 			OnAIAimHold(false, 0.0f);
-		}), Seconds + 0.5f, false);
+		}), Seconds + 12.0f, false);	// the holder ends it (AShooterNPC::DropAimHoldIfAbandoned); this is the net under that
 	}
 }
 
@@ -3495,6 +3542,11 @@ float AShooterWeapon::GetCurrentSpreadDegrees() const
 		return 0.0f;
 	}
 
+	if (CVarNoSpread.GetValueOnGameThread() > 0 && PawnOwner && PawnOwner->IsPlayerControlled())
+	{
+		return 0.0f;
+	}
+
 	// An AI holding this weapon shoots at the plain base spread unless the weapon opts in: enemy
 	// accuracy is tuned through the NPC's own aim variance, and moving it from here would be a
 	// difficulty change wearing a crosshair feature's clothes.
@@ -3892,7 +3944,12 @@ void AShooterWeapon::Fire()
 	OnShotFired.Broadcast();
 
 	// make noise so the AI perception system can hear us
-	MakeNoise(ShotLoudness, PawnOwner, PawnOwner->GetActorLocation(), ShotNoiseRange, ShotNoiseTag);
+	const float NoiseRange = GetShotNoiseRange();
+	MakeNoise(ShotLoudness, PawnOwner, PawnOwner->GetActorLocation(), NoiseRange, ShotNoiseTag);
+
+	// And tell the soldiers directly: what they make of a shot does not wait for a hearing sense to
+	// be set up in a controller blueprint.
+	AShooterAIController::ReportShotNoise(this, PawnOwner, PawnOwner->GetActorLocation(), NoiseRange);
 
 	// are we full auto?
 	// Use current refire rate which factors in heat
@@ -5028,7 +5085,7 @@ void AShooterWeapon::PerformHitscan(const FVector& Start, const FVector& Directi
 		float AreaMultiplier = CalculateDamageMultiplier(TotalDistance, WaveRadiusAtTarget);
 
 		// Headshot check
-		float HeadshotMult = bBestIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
+		float HeadshotMult = bBestIsHeadshot ? GetShotHeadshotMultiplierAgainst(BestTarget) : 1.0f;
 
 		// Heat System multiplier
 		float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
@@ -5355,7 +5412,7 @@ float AShooterWeapon::ApplyWeaponHit(const FHitResult& Hit, float BaseDamage, co
 
 	// A??�A�A?A?a��A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� headshot
 	bool bIsHeadshot = (Hit.BoneName == FName("head") || Hit.BoneName == FName("Head"));
-	float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
+	float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplierAgainst(HitActor) : 1.0f;
 
 	// A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?
 	const float FinalDamage = BaseDamage * HeadshotMult * ExtraDamageMultiplier;
@@ -5727,7 +5784,20 @@ void AShooterWeapon::FireMounted(const FVector& TargetLocation)
 	OnShotFired.Broadcast();
 
 	// Loud enough for the AI to hear, from where the gun actually is.
-	MakeNoise(ShotLoudness, nullptr, GetActorLocation(), ShotNoiseRange, ShotNoiseTag);
+	MakeNoise(ShotLoudness, nullptr, GetActorLocation(), GetShotNoiseRange(), ShotNoiseTag);
+}
+
+float AShooterWeapon::GetShotNoiseRange() const
+{
+	float Range = ShotNoiseRange;
+	for (const UWeaponAttachmentDefinition* const Attachment : InstalledAttachments)
+	{
+		if (Attachment && Attachment->Type == EWeaponAttachmentType::Muzzle)
+		{
+			Range *= Attachment->ShotNoiseRangeMultiplier;
+		}
+	}
+	return Range;
 }
 
 void AShooterWeapon::PerformMountedHitscan(const FVector& Start, const FVector& Direction)
@@ -5897,7 +5967,7 @@ void AShooterWeapon::PerformClassicHitscan(const FVector& Start, const FVector& 
 		}
 
 		const bool bIsHeadshot = (PawnHit.BoneName == FName("head") || PawnHit.BoneName == FName("Head"));
-		const float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplier() : 1.0f;
+		const float HeadshotMult = bIsHeadshot ? GetShotHeadshotMultiplierAgainst(HitActor) : 1.0f;
 		const float HeatMult = bUseHeatSystem ? CalculateHeatDamageMultiplier() : 1.0f;
 
 		float ZFactorMult = 1.0f;
@@ -7634,7 +7704,7 @@ float AShooterWeapon::ResolveImpactScale(const FHitResult& Hit) const
 	float Damage = GetShotDamage();
 	if (Hit.BoneName == FName("head") || Hit.BoneName == FName("Head"))
 	{
-		Damage *= FMath::Max(GetShotHeadshotMultiplier(), 1.0f);
+		Damage *= FMath::Max(GetShotHeadshotMultiplierAgainst(Hit.GetActor()), 1.0f);
 	}
 
 	if (Damage <= 0.0f)

@@ -168,6 +168,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "10.0"))
 	float PeekStepDistance = 150.0f;
 
+	/** Shooting OVER low cover, the soldier stands this close to the wall (cm from the wall to the
+	 *  middle of its body), not CoverStandOff back from it. With the barrel a metre long and the
+	 *  body 75 cm back, the muzzle is over the top of the wall, and aimed down at somebody close it
+	 *  goes into it: measured 2026-10-12, a sniper on a nest 3 m up could not fire at a player
+	 *  nearer than about 15 m. At 40 the muzzle is past the wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0", Units = "cm"))
+	float PeekOverStandOff = 40.0f;
+
 	/** Never hide closer than this to the target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MinPeekDistance = 800.0f;
@@ -328,6 +336,13 @@ private:
 	 *  search: a single sweep can run close to two hundred traces, and rebuilding the list inside
 	 *  each of them turned an O(traces) job into O(traces x pawns) for no reason. */
 	bool HasLineOfSight(const FVector& From, const FVector& To, const FCollisionQueryParams& Params) const;
+
+	/** Where the owner thinks Enemy is. False when it knows nothing of him: nobody hides from
+	 *  somebody it does not know of. @see AShooterAIController::GetKnownPlaceOf */
+	bool GetKnownPlace(const AActor* Enemy, FVector& OutPlace) const;
+
+	/** The same for the target of the search, which is always somewhere. */
+	FVector GetTargetPlace(const AActor* Target) const;
 
 	/** Whether Player can see Point, treating the player as a volume rather than a point. One trace
 	 *  at their chest plus PlayerRingSamples around them at PlayerRingRadius; any hit counts as

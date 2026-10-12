@@ -223,6 +223,159 @@ public:
 	/** Returns the targeted enemy */
 	AActor* GetCurrentTarget() const { return TargetEnemy; };
 
+	// ==================== Knowledge ====================
+	// The NPC acts on what it knows, not on what is (Docs/Handoff_AI_TargetKnowledge_2026-10-12.md).
+	//
+	// Three things reach it. SIGHT: an enemy inside its view cone with a clear line from the eyes;
+	// that is a place and a name, and after CalloutDelay the whole side has it (the radio). SOUND: a
+	// shot that is not its own side's, heard inside the gun's ShotNoiseRange; that is a place and
+	// no name, and it turns heads. A HIT: a direction, and a place only when the shot was heard too.
+	//
+	// The target is an actor and an actor always has a position; what the NPC has is the place it
+	// THINKS the target is. While the target is in its view, or in the view of somebody of its side,
+	// that is where the target stands. Once nobody sees it, the place stays where it was last seen.
+	//
+	// One per NPC and kept here, next to the target, so the tasks, the cover search and the gun all
+	// ask the same thing. Switch: polarity.ai.targetknowledge (0 is the old rule).
+
+	/** Where this NPC thinks its current target is. Zero with no target. */
+	FVector GetBelievedTargetLocation() const;
+
+	/** Where this NPC thinks Enemy is, whoever he is: in its own view or its side's, where he
+	 *  stands; its target, the believed place; anybody else, what the side last knew. False when
+	 *  it knows nothing of him. Everything that hides from, walks round or aims off an enemy asks
+	 *  this and not the actor. */
+	bool GetKnownPlaceOf(const AActor* Enemy, FVector& OutPlace) const;
+
+	/** True while the target is in view of this NPC or of somebody on its side. */
+	bool IsTargetLocationKnown() const { return bTargetLocationKnown; }
+
+	/** Seconds since anybody of the side last saw the target, zero while it is in view. */
+	float GetSecondsTargetUnknown() const;
+
+	/** How far the target really is from where this NPC thinks it is, below zero with no target.
+	 *  For the record of a fight and for nothing else: behaviour must not read it. */
+	float GetTargetLocationError() const;
+
+	/** Focus on the target looks at where it is thought to be: a gun does not follow somebody
+	 *  through a wall. Every SetFocus(Target) in the tasks goes through this. */
+	virtual FVector GetFocalPointOnActor(const AActor* Actor) const override;
+
+	/** Inside the cone this NPC looks out of. Flat: nobody is hidden by standing higher. */
+	bool IsInViewCone(const FVector& Point) const;
+
+	/** May this NPC act on a clear line to Actor? Its target: while it knows where the target is.
+	 *  Anybody else: while he is inside the cone. A thing that is not a pawn: always.
+	 *  AShooterNPC::HasLineOfSightTo asks this first, so no task shoots somebody it has not seen. */
+	bool Notices(const AActor* Actor) const;
+
+	/** Has somebody hostile in view right now. */
+	bool SeesAnyEnemy() const { return SeenEnemies.Num() > 0; }
+
+	/** Turned towards a sound or a shout, and not yet seen who. */
+	bool IsLookingAround() const { return bLookingAround; }
+
+	/** A shot was fired at Location and carries Range. Everybody in reach who is not of the
+	 *  shooter's side hears it and knows the place; the nearest few with nobody in view turn to it.
+	 *  Called by the gun, so it does not depend on a hearing sense being set up in a blueprint. */
+	static void ReportShotNoise(const UObject* WorldContext, APawn* Shooter, const FVector& Location, float Range);
+
+	/** This NPC was hit by Source. It learns a direction; with the shot heard, the place. */
+	void NoteHitFrom(AActor* Source, float Damage);
+
+	/** Turn to Place for Seconds, or until somebody is in view. */
+	void LookTowards(const FVector& Place, float Seconds);
+
+	/** One of the side walks to the place the target was lost at and looks round from there, the
+	 *  rest keep their guns on it. True while this NPC is the one and this owns its legs: the task
+	 *  that called must then leave them alone. @see UFactionContactMemory::TryClaimSearch */
+	bool TickSearchForTarget(bool bAllowed);
+
+protected:
+
+	/** Refresh everything above. On a short clock rather than every tick: it costs line traces. */
+	void UpdateKnowledge(float DeltaTime);
+
+	/** Who is in the cone with a clear line, and the calls to the side that follow from it. */
+	void UpdateSeenEnemies(float Now);
+
+	/** Whom to fight, of those the side knows of. @see ETargetIntentSource::Coordinator */
+	void UpdateTargetChoice(float Now);
+
+	/** Eyes to body, with smoke and a cloak counted. */
+	bool SeesWithOwnEyes(const AActor* Target) const;
+
+	/** The nearest Count of this side with nobody in view turn to Place. */
+	void TurnMatesTowards(const FVector& Place, int32 Count);
+
+	/** Say it on the radio: it takes a moment, and a dead man does not finish the sentence (the
+	 *  controller dies with its pawn and the timer with the controller). */
+	void CallOutLater(float Delay, TFunction<void()> Call);
+
+	void EndSearchForTarget();
+
+	struct FSeenEnemy
+	{
+		TWeakObjectPtr<AActor> Enemy;
+		float FirstSeenTime = 0.0f;
+		FVector LastLocation = FVector::ZeroVector;
+		bool bCalledOut = false;
+		bool bSeenThisPass = false;
+	};
+
+	/** A foot soldier: has a cover finder. Only it is held to the knowledge rules. Set on possess. */
+	bool bInfantry = false;
+
+	/** Hostile pawns in view right now. A handful. */
+	TArray<FSeenEnemy> SeenEnemies;
+
+	struct FHurtRecord
+	{
+		TWeakObjectPtr<AActor> Source;
+		float Damage = 0.0f;
+		float Time = 0.0f;
+	};
+
+	/** Who hurt this NPC lately, one entry each. Read by the choice of target and forgotten there. */
+	TArray<FHurtRecord> HurtBy;
+
+	/** Who BelievedTargetLocation is about. A new target starts from what the side knows of it. */
+	TWeakObjectPtr<AActor> BelievedTarget;
+
+	FVector BelievedTargetLocation = FVector::ZeroVector;
+
+	/** World time BelievedTargetLocation was true at, below zero while there is none. */
+	float BelievedTime = -1.0f;
+
+	bool bSeesTargetMyself = false;
+
+	bool bTargetLocationKnown = false;
+
+	float KnowledgeTimer = 0.0f;
+
+	/** The last shot heard that was not this side's: whose, where, when. Whose is kept only to tie
+	 *  a hit to it; nothing else may read it, the listener does not know who fired. */
+	TWeakObjectPtr<AActor> HeardShooter;
+	FVector HeardPlace = FVector::ZeroVector;
+	float HeardTime = -1000.0f;
+
+	bool bLookingAround = false;
+	FVector LookPlace = FVector::ZeroVector;
+	float LookUntil = 0.0f;
+
+	float NextHitCalloutTime = 0.0f;
+
+	float TargetChoiceTimer = 0.0f;
+	TWeakObjectPtr<AActor> TargetContender;
+	int32 ContenderLeads = 0;
+
+	bool bSearchingForTarget = false;
+	bool bSearchArrived = false;
+	FVector SearchGoal = FVector::ZeroVector;
+	float SearchLegUntil = 0.0f;
+
+public:
+
 	// ==================== Distraction ====================
 	// A decoy is not something this NPC senses; it is something told to it. The coordinator owns the
 	// decision (it is the one place that knows every registered NPC and who each is fighting) and

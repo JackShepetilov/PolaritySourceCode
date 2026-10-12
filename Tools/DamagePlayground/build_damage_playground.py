@@ -246,6 +246,34 @@ def step_upgrades():
     hb["_les"]().save_current_level()
 
 
+TAG_PARTS = "DamagePlaygroundParts"
+PARTS_X = 600.0
+PARTS = (
+    (-600.0, "1 TORSO", "armor first, then hp\nbroken armor = 25% loot"),
+    (-200.0, "2 FOREARM / SHIN", "past armor, x0.7\narmor stays whole = 100% loot"),
+    (200.0, "3 HEAD", "50 = knockdown\n100 = helmet off\nthen any bullet kills"),
+    (600.0, "4 FREE", "anything"),
+)
+
+
+def step_parts():
+    """Ряд свежих грунтов вплотную к игроку, по одному на часть тела (броня зоной, каска, лут от
+    целости: план, раздел 8). ИИ выключен. Что сделало каждое попадание, пишет
+    polarity.debug.hitparts 1: подпись в точке попадания и строка [HITPART] в логе."""
+    hb["guard"]()
+    hb["_clear"](TAG_PARTS)
+    eas = hb["_eas"]()
+    cls = unreal.EditorAssetLibrary.load_blueprint_class(AI + "BP_ShooterNPC")
+    for i, (y, title, rule) in enumerate(PARTS):
+        act = eas.spawn_actor_from_class(cls, unreal.Vector(PARTS_X, y, 100.0), unreal.Rotator(roll=0.0, pitch=0.0, yaw=180.0))
+        hb["_tag"](act, TAG_PARTS, "DP_PARTS_{}".format(i + 1), "DamagePlayground/Targets")
+        _apply_variant(act, NORMAL)
+        _text("Label_PARTS_{}".format(i + 1), PARTS_X, y, 300.0, "{}\n{}".format(title, rule), size=26.0, tag=TAG_PARTS)
+        log("ADDED: PARTS {} at y={:.0f}".format(title, y))
+    _text("Label_PARTS_Hint", PARTS_X, 0.0, 430.0, "console: polarity.debug.hitparts 1", size=30.0, tag=TAG_PARTS)
+    hb["_les"]().save_current_level()
+
+
 def main():
     step_level()
     step_light()
@@ -253,4 +281,5 @@ def main():
     step_game()
     step_tank()
     step_upgrades()
+    step_parts()
     log("DONE: {}".format(LEVEL))

@@ -6,6 +6,7 @@
 // Coding does not run the check -- only a full rebuild does, which is a slow way to find out.
 #include "ShooterCharacter.h"
 
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "UObject/UnrealType.h"
 #include "HAL/IConsoleManager.h"
 #include "Curves/CurveVector.h"
@@ -1673,6 +1674,9 @@ void AShooterCharacter::Server_ReportWeaponFired_Implementation(AShooterWeapon* 
 		// this is the only moment the server hears about a client's shot. The host does not come
 		// through here at all - its own Fire() spends the round directly.
 		Weapon->SpendPooledRound();
+
+		// And the same for the sound of it: the soldiers hear a shot where the server learns of one.
+		AShooterAIController::ReportShotNoise(this, this, GetActorLocation(), Weapon->GetShotNoiseRange());
 	}
 }
 

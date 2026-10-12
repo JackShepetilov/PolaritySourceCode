@@ -99,6 +99,32 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Faction Memory")
 	void ForgetTeam(uint8 Team);
 
+	// ==================== Knowledge ====================
+	// The side acts on what it knows (Docs/Handoff_AI_TargetKnowledge_2026-10-12.md). These are the
+	// two questions everything else asks: is the rule on, and where does this side think he is.
+
+	/** polarity.ai.targetknowledge. Off is the old rule: everybody knows where everybody is. */
+	static bool IsKnowledgeOn();
+
+	/** A sighting older than this is not "somebody sees him now". Whoever has an enemy in view
+	 *  reports it several times inside this, so the claim lapses by itself when the eyes are gone:
+	 *  a reporter that died holding a sighting used to hold it for ever. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Faction Memory", meta = (ClampMin = "0.1", Units = "s"))
+	float SeenNowGrace = 0.4f;
+
+	/** Where Team thinks Enemy is: where he stands while somebody of the side has him in view, the
+	 *  place he was last seen at otherwise. False when the side knows nothing of him, and nothing
+	 *  is hidden from, searched for or walked round somebody the side does not know of. A thing
+	 *  that is not a pawn (a turret, the core) is always where it is. */
+	bool GetKnownPlace(uint8 Team, const AActor* Enemy, FVector& OutPlace) const;
+
+	/** One of the side goes to look at the place an enemy was lost at, the rest keep their guns on
+	 *  it. True when Who is, or has just become, that one. */
+	bool TryClaimSearch(uint8 Team, const AActor* Enemy, APawn* Who);
+
+	/** Who gives the job up: he found him, was killed, or was told to do something else. */
+	void ReleaseSearch(uint8 Team, const APawn* Who);
+
 private:
 	/** Contacts per team. A handful of entries per side, walked linearly: a map keyed by actor would
 	 *  cost more in bookkeeping than the walk saves at these sizes. */
@@ -108,4 +134,17 @@ private:
 	float Now() const;
 
 	bool IsFresh(const FFactionContact& Contact, float CurrentTime) const;
+
+	/** In view of somebody of the side at CurrentTime. @see SeenNowGrace */
+	bool IsSeenNow(const FFactionContact& Contact, float CurrentTime) const;
+
+	struct FSearchClaim
+	{
+		uint8 Team = 0;
+		TWeakObjectPtr<const AActor> Enemy;
+		TWeakObjectPtr<APawn> Searcher;
+	};
+
+	/** @see TryClaimSearch */
+	TArray<FSearchClaim> SearchClaims;
 };

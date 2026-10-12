@@ -51,6 +51,8 @@ for r in rows:
         r[k] = int(r.get(k) or 0)
     r["posture"] = (r.get("posture") or "").upper()
     r["z"] = float(r.get("z") or 0.0)
+    r["off"] = float(r.get("off") or -1.0)
+HAS_OFF = bool(rows) and "off" in rows[0]
 by = defaultdict(list)
 for r in rows:
     by[r["name"]].append(r)
@@ -90,9 +92,18 @@ hits = defaultdict(list)           # кто -> [(t, по кому, урон)]
 taken = defaultdict(list)          # кто -> [(t, от кого, урон)]
 deaths = {}                        # кто -> (t, кем)
 marks = []                         # (t, что случилось с боем: тревога, подмога)
+parts = []                         # (t, кто попал, в кого, {part, bone, dmg, hpdmg, armor, helmet}): куда пришло попадание
+last_hit = (None, "", "")          # (t, кто, в кого) последней строки hit: строка PART идёт сразу за своей
 scenario, outcome = "", ""
 for e in events:
-    if e["event"] == "tactic" and e["extra"].startswith("DUCK:"):
+    if e["event"] == "tactic" and e["extra"].startswith("PART:"):
+        rec = {}
+        for part in e["extra"][5:].split():
+            k, _eq, v = part.partition("=")
+            rec[k] = v if k in ("part", "bone") else float(v)
+        who = last_hit[1] if (last_hit[0] == e["t"] and last_hit[2] == e["who"]) else "?"
+        parts.append((e["t"], who, e["who"], rec))
+    elif e["event"] == "tactic" and e["extra"].startswith("DUCK:"):
         ducks[e["who"]].append((e["t"], e["extra"][5:].strip()))
     elif e["event"] == "tactic" and e["extra"].startswith("HURT:"):
         body, _sep, doing = e["extra"][5:].partition(" doing=")
@@ -108,6 +119,7 @@ for e in events:
     elif e["event"] == "shot":
         shots[e["who"]].append((e["t"], e["other"], e["value"] == "1"))
     elif e["event"] == "hit":
+        last_hit = (e["t"], e["who"], e["other"])
         hits[e["who"]].append((e["t"], e["other"], float(e["value"])))
         taken[e["other"]].append((e["t"], e["who"], float(e["value"])))
     elif e["event"] == "death":
@@ -433,6 +445,81 @@ if hurts:
     for key, v in sorted(table.items(), key=lambda kv: -kv[1][3]):
         out.append("  {:<34}{:>4}{:>4}{:>4}{:>4}".format(key, *v))
     out.append("  {:<34}{:>4}{:>4}{:>4}{:>4}".format("все", *[sum(v[i] for v in table.values()) for i in range(4)]))
+
+# Куда пришло каждое попадание по врагу и что оно сделало. Строки PART пишет воронка урона бойца
+# (AShooterNPC::TakeDamage) сразу за строкой hit. Нет строк PART: запись старая, раздела нет.
+if parts:
+    PART_RU = {"BODY": "тело без брони", "ARMOR": "броня", "ARMOR_BREAK": "броня сломана", "LIMB": "конечность мимо брони",
+               "HELMET": "каска", "KNOCKDOWN": "каска: упал", "HELMET_OFF": "каска слетела", "HEAD_KILL": "голова без каски: убит"}
+    nick = lambda n: short.get(n, "YOU" if is_player(n) else (n or "?"))
+    out.append("")
+    out.append("КУДА ПОПАДАЛИ. hp: урон в здоровье; броня и каска: сколько осталось после")
+    out.append("{:>6} {:<5}{:<5}{:<24}{:<12}{:>5}{:>5}{:>7}{:>6}".format("t", "кто", "кого", "что", "кость", "урон", "hp", "броня", "каска"))
+    summary = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))    # кто -> часть -> [попаданий, урон]
+    for t, who, victim, r in parts:
+        out.append("{:>6.1f} {:<5}{:<5}{:<24}{:<12}{:>5.0f}{:>5.0f}{:>7.0f}{:>6.0f}".format(
+            t, nick(who), nick(victim), PART_RU.get(r.get("part"), str(r.get("part"))), str(r.get("bone"))[:11],
+            r.get("dmg", 0.0), r.get("hpdmg", 0.0), r.get("armor", 0.0), r.get("helmet", 0.0)))
+        cell = summary[who][r.get("part")]
+        cell[0] += 1
+        cell[1] += r.get("dmg", 0.0)
+    out.append("")
+    out.append("ИТОГ ПО ЧАСТЯМ ТЕЛА: кто, что, попаданий, урон")
+    for who in sorted(summary):
+        for part, (n_hits, dmg) in sorted(summary[who].items(), key=lambda kv: -kv[1][0]):
+            out.append("  {:<5}{:<24}{:>4}{:>7.0f}".format(nick(who), PART_RU.get(part, str(part)), n_hits, dmg))
+
+# Знание о цели. Колонка off в track.csv: сколько см от настоящей цели до места, где боец думает, что она
+# (AShooterAIController::GetTargetLocationError). 0: цель на виду у стороны, меньше 0: цели нет. Нет колонки:
+# запись старая, раздела нет.
+if HAS_OFF:
+    OFF_WRONG = 500.0       # см: с этого места боец "ошибается"
+    OFF_STEP = 0.5          # с: период замера в track.csv
+    OPEN_GAP = 2.0          # с: тишина игрока по этому бойцу, после которой выстрел это "открыл огонь"
+    out.append("")
+    out.append("ЗНАНИЕ О ЦЕЛИ. Ошибся: думает, что цель дальше {:.0f} м от того места, где она есть".format(OFF_WRONG / 100.0))
+    out.append("{:<5}{:>9}{:>10}{:>10}".format("кто", "с целью", "ошибался", "макс, м"))
+    for n in names:
+        rs = [r for r in alive_rows(n) if r["off"] >= 0.0]
+        if not rs:
+            continue
+        wrong = [r for r in rs if r["off"] > OFF_WRONG]
+        out.append("{:<5}{:>8.1f}с{:>9.1f}с{:>10.0f}".format(
+            short[n], len(rs) * OFF_STEP, len(wrong) * OFF_STEP, max(r["off"] for r in rs) / 100.0))
+
+    # Сторона ошибалась: в этот замер у всех живых с целью ошибка больше порога.
+    side_at = defaultdict(lambda: defaultdict(list))        # сторона -> t -> [off]
+    for n in names:
+        for r in alive_rows(n):
+            if r["off"] >= 0.0:
+                side_at[r["team"]][r["t"]].append(r["off"])
+    for team in sorted(side_at):
+        blind = sum(1 for offs in side_at[team].values() if min(offs) > OFF_WRONG)
+        out.append("  сторона {}: вся сторона ошибалась {:.1f} с из {:.1f} с с целью".format(
+            team, blind * OFF_STEP, len(side_at[team]) * OFF_STEP))
+
+    # Игрок открыл огонь по бойцу, который в этот момент смотрел не на него (или думал, что он в другом месте).
+    # Считается по попаданиям: у выстрела игрока в записи цели нет.
+    for p in players:
+        fired = [(t, other, False) for t, other, _dmg in hits.get(p, ())]
+        last_at = {}
+        opened, unaware = 0, []
+        for t, other, _pin in sorted(fired):
+            if other not in by:
+                continue
+            gap = t - last_at.get(other, -1e9)
+            last_at[other] = t
+            if gap < OPEN_GAP:
+                continue
+            opened += 1
+            before = [r for r in by[other] if r["t"] <= t and not r["dead"]]
+            if not before:
+                continue
+            r = before[-1]
+            if r["focus"] != p or r["off"] > OFF_WRONG:
+                unaware.append("{} {:.1f}с".format(short.get(other, other), t))
+        out.append("  {} открыл огонь {} раз, из них по тому, кто смотрел не на него: {}{}".format(
+            short.get(p, p), opened, len(unaware), (" (" + ", ".join(unaware) + ")") if unaware else ""))
 
 out.append("")
 out.append("ЧТО ГОВОРИЛИ (весь бой, сколько раз):")

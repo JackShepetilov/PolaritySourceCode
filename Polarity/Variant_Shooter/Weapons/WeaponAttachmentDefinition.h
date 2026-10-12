@@ -248,6 +248,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides, ClampMin = "0.0", ClampMax = "4.0"))
 	float VerticalRecoilMultiplier = 1.0f;
 
+	/** Multiplies how far the gun's shot is heard by the AI (AShooterWeapon::ShotNoiseRange). A
+	 *  suppressor: 0.2 turns 50 m into 10. 1 leaves the gun as loud as it is. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides, ClampMin = "0.0", ClampMax = "4.0"))
+	float ShotNoiseRangeMultiplier = 1.0f;
+
 	/** Socket on THIS attachment's mesh where the muzzle flash and the tracer start (the end of the
 	 *  flash hider). None or missing = the first socket with "Muzzle" in its name, else the mesh's
 	 *  only socket, else the gun's own Muzzle socket. Shots themselves still leave from the gun. */

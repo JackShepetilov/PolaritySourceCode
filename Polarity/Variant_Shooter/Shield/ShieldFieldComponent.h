@@ -113,8 +113,17 @@ public:
 	 *
 	 *  Authority only: health is server-side, and this is called from AShooterNPC::TakeDamage, the
 	 *  one funnel every kind of damage passes through. A caller that must not be absorbed (the
-	 *  Wizard's opened window) simply does not call it. */
-	float AbsorbDamage(float InDamage, AActor* Instigator, UPrimitiveComponent* HitComponent);
+	 *  Wizard's opened window) simply does not call it.
+	 *
+	 *  ArmorScale is how hard this round bites armour (UDamageType_Ranged::ArmorDamageScale): the
+	 *  pool loses InDamage x ArmorScale, and what the pool could not hold comes back divided by it,
+	 *  so health is hurt in the round's own damage. */
+	float AbsorbDamage(float InDamage, AActor* Instigator, UPrimitiveComponent* HitComponent, float ArmorScale = 1.0f);
+
+	/** What a hit on a bone the armour does not cover is scaled by (a forearm, a shin). The head is
+	 *  not a limb and is not scaled. @see AShooterNPC::TakeDamage */
+	UFUNCTION(BlueprintPure, Category = "Shield")
+	float GetUncoveredDamageMultiplier() const { return UncoveredDamageMultiplier; }
 
 	/** An ionizing shot lands. Strips the pool by ShieldDamage and hands the shot's polarity to the
 	 *  field, which is what the owner's physics (push, pull, the grab's opposite-sign rule) reads.
@@ -197,6 +206,12 @@ protected:
 	 *  to health. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Coverage")
 	TArray<FName> CoveredBones;
+
+	/** A hit on a bone outside CoveredBones goes past the armour and is scaled by this: a limb is
+	 *  the way round the plate, and the price of it [author, 2026-10-12]. Only read while
+	 *  CoveredBones is not empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shield|Coverage", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float UncoveredDamageMultiplier = 0.7f;
 
 	// ==================== Shield recovery ====================
 

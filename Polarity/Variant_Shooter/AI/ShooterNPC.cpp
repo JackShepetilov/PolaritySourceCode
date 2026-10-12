@@ -40,6 +40,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Variant_Shooter/Shield/ShieldFieldComponent.h"
 #include "Variant_Shooter/Shield/HitZoneComponent.h"
+#include "Variant_Shooter/Shield/HelmetComponent.h"
+#include "../DamageTypes/DamageType_Ranged.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
@@ -76,6 +78,13 @@
 #include "CameraShakeComponent.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
+
+// polarity.debug.hitparts 1: every hit on a soldier writes to the log which part of the body took it
+// and what it did (armour, limb, helmet), tag [HITPART]. The record of a fight has the same line
+// always, as a PART event (UFightRecorderSubsystem). Nothing is drawn.
+static TAutoConsoleVariable<int32> CVarDebugHitParts(
+	TEXT("polarity.debug.hitparts"), 0,
+	TEXT("1: log every hit on an NPC with the body part and what the hit did. Log tag [HITPART]."));
 
 // ==================== Bench instrumentation (polarity.ai.bench) ====================
 //
@@ -626,6 +635,8 @@ void AShooterNPC::Tick(float DeltaTime)
 	// Store velocity BEFORE Super::Tick processes any movement/collisions
 	// This gives us the "pre-collision" velocity for impact damage calculation
 	PreviousTickVelocity = GetVelocity();
+
+	DropAimHoldIfAbandoned();
 
 	// Pin the off hand to the weapon, the same way the player's third person body does it. NPCs run
 	// the same anim blueprints, so the Two Bone IK node is already there; nothing was writing its
@@ -2581,7 +2592,178 @@ float AShooterNPC::AbsorbDamageWithShieldField(float Damage, struct FDamageEvent
 	}
 
 	AActor* const Attacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
-	return Shield->AbsorbDamage(Damage, Attacker, HitComponent);
+	return Shield->AbsorbDamage(Damage, Attacker, HitComponent, UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass));
+}
+
+float AShooterNPC::MeasureKnockdownRoom(const FVector& Direction, float Distance) const
+{
+	const UWorld* const World = GetWorld();
+	if (!World || Distance <= 0.0f || Direction.IsNearlyZero())
+	{
+		return 0.0f;
+	}
+
+	// Low, where the body will lie: a wall stops it, and so does cover that only reaches the knee.
+	static constexpr float BodyRadius = 25.0f;
+	const float FloorZ = GetActorLocation().Z - GetSimpleCollisionHalfHeight();
+	const FVector Start(GetActorLocation().X, GetActorLocation().Y, FloorZ + BodyRadius + 20.0f);
+	const FVector End = Start + Direction.GetSafeNormal2D() * Distance;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(KnockdownRoom), false, this);
+	FHitResult Hit;
+	if (!World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Pawn, FCollisionShape::MakeSphere(BodyRadius), Params))
+	{
+		return Distance;
+	}
+	return Hit.bStartPenetrating ? 0.0f : Hit.Distance;
+}
+
+bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Attacker)
+{
+	UWorld* const World = GetWorld();
+	UCharacterMovementComponent* const MoveComp = GetCharacterMovement();
+	if (!HasAuthority() || !World || !Helmet || !MoveComp || bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
+	{
+		return false;
+	}
+
+	// Which side the hit came from, in the plane.
+	const FVector ToAttacker = Attacker ? (Attacker->GetActorLocation() - GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
+	const bool bFromFront = ToAttacker.IsNearlyZero() || FVector::DotProduct(GetActorForwardVector(), ToAttacker) >= 0.0f;
+	UAnimMontage* const FallMontage = bFromFront ? Helmet->KnockdownMontageFront.Get() : Helmet->KnockdownMontageBack.Get();
+	const float Reach = bFromFront ? Helmet->KnockdownReachFront : Helmet->KnockdownReachBack;
+
+	// A fall needs a montage and must not start in the air; without either it is the stagger on the
+	// spot. Asked as "not falling", not "walking": a body nothing possesses (a bench target) has no
+	// movement mode at all, and it still falls, on the spot, because nothing carries its capsule.
+	bool bFall = FallMontage && GetMesh() && !MoveComp->IsFalling() && !MoveComp->IsFlying();
+	float FallYaw = GetActorRotation().Yaw;
+	float TravelScale = 1.0f;
+	if (bFall)
+	{
+		// From the front the body is turned to face the hit exactly, so it goes over straight back
+		// from it [author, 2026-10-12].
+		if (bFromFront && !ToAttacker.IsNearlyZero())
+		{
+			FallYaw = ToAttacker.Rotation().Yaw;
+		}
+
+		// Where the montage carries the capsule, in the actor's own frame (the mesh sits turned in it).
+		const FVector MeshTravel = FallMontage->ExtractRootMotionFromTrackRange(0.0f, FallMontage->GetPlayLength(), FAnimExtractContext()).GetTranslation();
+		FVector ActorTravel = GetMesh()->GetRelativeRotation().RotateVector(MeshTravel);
+		ActorTravel.Z = 0.0f;
+		const float Travel = ActorTravel.Size();
+		const FVector ActorDir = Travel > 1.0f ? ActorTravel / Travel : FVector(-1.0f, 0.0f, 0.0f);
+		const float Need = Travel + Reach;
+
+		// The way it wants to fall first, then turned aside by steps. The first with room for the
+		// whole fall wins; failing that, the one with the most room.
+		static constexpr float YawOffsets[] = { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f };
+		float BestFree = -1.0f;
+		float BestYaw = FallYaw;
+		for (const float Offset : YawOffsets)
+		{
+			const float Yaw = FallYaw + Offset;
+			const float Free = MeasureKnockdownRoom(FRotator(0.0f, Yaw, 0.0f).RotateVector(ActorDir), Need);
+			if (Free > BestFree)
+			{
+				BestFree = Free;
+				BestYaw = Yaw;
+			}
+			if (Free >= Need - 1.0f)
+			{
+				break;
+			}
+		}
+
+		// Not even room for the lying body: no fall here.
+		static constexpr float MinTravel = 10.0f;
+		if (BestFree < Reach + MinTravel)
+		{
+			bFall = false;
+		}
+		else
+		{
+			FallYaw = BestYaw;
+			TravelScale = Travel > 1.0f ? FMath::Clamp((BestFree - Reach) / Travel, 0.0f, 1.0f) : 1.0f;
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[HELMET_DEBUG] %s knockdown from %s: travel %.0f reach %.0f room %.0f yaw %.0f (asked %.0f) scale %.2f fall %d"),
+			*GetName(), bFromFront ? TEXT("front") : TEXT("behind"), Travel, Reach, BestFree, BestYaw,
+			bFromFront && !ToAttacker.IsNearlyZero() ? ToAttacker.Rotation().Yaw : GetActorRotation().Yaw, TravelScale, bFall ? 1 : 0);
+	}
+
+	UAnimMontage* const Chosen = bFall ? FallMontage : KnockbackMontage.Get();
+	const float Duration = bFall ? FallMontage->GetPlayLength() : Helmet->KnockdownDuration;
+	if (Duration <= 0.0f)
+	{
+		return false;
+	}
+
+	if (bFall)
+	{
+		SetActorRotation(FRotator(0.0f, FallYaw, 0.0f));
+		if (UAnimInstance* const AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+		}
+	}
+
+	// The existing stun does the freezing: fire, path, rotation, and lets go by itself. It plays the
+	// montage on this machine, at its own length for a fall; the clients get the same one below.
+	ApplyExplosionStun(Duration, Chosen);
+	if (!bIsInKnockback)
+	{
+		return false;
+	}
+
+	if (bFall)
+	{
+		// The stun switches movement off, and with it the root motion: the body would play the fall
+		// on the spot and the get-up, authored where the fall ends, would snap. Walking lets the
+		// movement component carry the capsule along the montage, over the ground and up to walls;
+		// while the montage's root motion is running nothing else can move it.
+		SetAnimRootMotionTranslationScale(TravelScale);
+		MoveComp->SetMovementMode(MOVE_Walking);
+	}
+
+	KnockdownEndTime = World->GetTimeSeconds() + Duration;
+	ApplyFireLock(Duration);
+	if (Chosen)
+	{
+		const float Length = Chosen->GetPlayLength();
+		Multicast_PlayKnockdown(Chosen, Length > 0.0f ? Length / Duration : 1.0f);
+	}
+
+	UFightRecorderSubsystem::NoteTactic(this, FName(TEXT("KNOCKED DOWN: hit in the head")));
+	UE_LOG(LogTemp, Log, TEXT("[HELMET_DEBUG] %s knocked down for %.1f s"), *GetName(), Duration);
+	return true;
+}
+
+bool AShooterNPC::IsKnockedDown() const
+{
+	const UWorld* const World = GetWorld();
+	return World && !bIsDead && World->GetTimeSeconds() < KnockdownEndTime;
+}
+
+void AShooterNPC::Multicast_PlayKnockdown_Implementation(UAnimMontage* Montage, float PlayRate)
+{
+	// The authority already plays it from the stun itself.
+	if (!Montage || HasAuthority() || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	if (USkeletalMeshComponent* const TPMesh = GetMesh())
+	{
+		if (UAnimInstance* const AnimInstance = TPMesh->GetAnimInstance())
+		{
+			// A fall carries root motion: taken out of the pose here as well, or the body would run
+			// ahead of the capsule the server is moving.
+			AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+			AnimInstance->Montage_Play(Montage, PlayRate);
+		}
+	}
 }
 
 void AShooterNPC::ReportDamageNumber(float Damage, float HealthDamage, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -2728,12 +2910,81 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		BodyDamage = Zone.BodyDamage;
 	}
 
+	// Which part of a soldier's body it was (Docs/Damage_Model_Rework_Plan_2026-10-03.md §8).
+	const bool bPointHit = DamageEvent.IsOfType(FPointDamageEvent::ClassID);
+	const FName HitBone = bPointHit ? static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName : FName(NAME_None);
+	UHelmetComponent* const Helmet = UHelmetComponent::Find(this);
+	const bool bHeadBone = Helmet ? Helmet->IsHeadBone(HitBone) : (HitBone == FName("head") || HitBone == FName("Head"));
+	const UShieldFieldComponent* const ArmourForHit = UShieldFieldStatics::GetShieldField(this);
+	const bool bArmourUpBefore = ArmourForHit && ArmourForHit->IsShieldUp();
+
+	// A limb the armour does not cover: the hit goes past the plate and pays for it. The whole hit
+	// is scaled, so the number the shooter sees is the number that landed.
+	bool bLimbHit = false;
+	if (BodyDamage > 0.0f && bPointHit && ArmourForHit && !bHeadBone && !ArmourForHit->CoversBone(HitBone))
+	{
+		const float LimbScale = ArmourForHit->GetUncoveredDamageMultiplier();
+		BodyDamage *= LimbScale;
+		Damage *= LimbScale;
+		bLimbHit = true;
+	}
+
+	// A head with a helmet. The hit itself is an ordinary one, straight to health (the body armour
+	// does not cover the head); the helmet only counts what the head has taken and adds its own
+	// events on top: the knockdown, coming off, and after that the kill [author, 2026-10-12].
+	FHelmetOutcome HeadHit;
+	if (Helmet && BodyDamage > 0.0f)
+	{
+		AActor* const HeadAttacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
+		HeadHit = Helmet->ProcessHit(BodyDamage, DamageEvent, HeadAttacker);
+	}
+
 	// Reduce HP: the shield field takes the hit first, what it could not hold goes on to health.
 	// Everything below still reads the full Damage (numbers, berserk, threat): the hit landed whole.
-	const float HealthDamage = BodyDamage > 0.0f
-		? AbsorbDamageWithShieldField(BodyDamage, DamageEvent, EventInstigator, DamageCauser) : 0.0f;
+	float HealthDamage = 0.0f;
+	if (HeadHit.bHandled)
+	{
+		// No helmet left and a bullet: dead, whatever is left of the health. Otherwise the whole hit
+		// goes to health, past the body armour.
+		HealthDamage = HeadHit.bLethal ? FMath::Max(CurrentHP, BodyDamage) : BodyDamage;
+	}
+	else if (BodyDamage > 0.0f)
+	{
+		HealthDamage = AbsorbDamageWithShieldField(BodyDamage, DamageEvent, EventInstigator, DamageCauser);
+	}
 	CurrentHP -= HealthDamage;
+
+	if (HeadHit.bKnockdown && CurrentHP > 0.0f)
+	{
+		ApplyHeadKnockdown(Helmet, (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser);
+	}
+
 	UFightRecorderSubsystem::NoteDamage(this, EventInstigator, DamageCauser, Damage, CurrentHP);
+
+	// Where on the body it landed and what that did, into the record of the fight, straight after
+	// the "hit" line it belongs to (that one names who fired). One word per outcome, no spaces: the
+	// analysis splits the line on them. polarity.debug.hitparts 1 prints the same line to the log.
+	if (Damage > 0.0f)
+	{
+		const TCHAR* Part = TEXT("BODY");
+		if (HeadHit.bLethal) { Part = TEXT("HEAD_KILL"); }
+		else if (HeadHit.bHelmetOff) { Part = TEXT("HELMET_OFF"); }
+		else if (HeadHit.bKnockdown) { Part = TEXT("KNOCKDOWN"); }
+		else if (HeadHit.bHandled) { Part = TEXT("HELMET"); }
+		else if (bLimbHit) { Part = TEXT("LIMB"); }
+		else if (bArmourUpBefore && HealthDamage <= 0.0f) { Part = TEXT("ARMOR"); }
+		else if (bArmourUpBefore) { Part = TEXT("ARMOR_BREAK"); }
+
+		const FString PartLine = FString::Printf(TEXT("PART: part=%s bone=%s dmg=%.0f hpdmg=%.0f armor=%.0f helmet=%.0f"),
+			Part, *HitBone.ToString(), Damage, HealthDamage,
+			ArmourForHit ? ArmourForHit->GetCurrentShield() : 0.0f,
+			Helmet ? Helmet->HelmetPool * Helmet->GetHelmetFraction() : 0.0f);
+		UFightRecorderSubsystem::NoteTactic(this, FName(*PartLine));
+		if (CVarDebugHitParts.GetValueOnGameThread() > 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[HITPART] %s %s hp=%.0f"), *GetName(), *PartLine, FMath::Max(CurrentHP, 0.0f));
+		}
+	}
 
 	// What it was hit for lately. @see GetRecentDamage
 	if (const UWorld* const DamageWorld = GetWorld())
@@ -2831,7 +3082,8 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		FVector DamageDirection = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
 		// 0-damage hits (e.g. the ionizer pistol) must not stagger/interrupt the current action —
 		// only real damage plays the flinch reaction.
-		if (Damage > 0.0f)
+		// A soldier on the ground from a head hit is playing that, and a flinch would cut it short.
+		if (Damage > 0.0f && !IsKnockedDown())
 		{
 			const bool bHeadHit = DamageEvent.IsOfType(FPointDamageEvent::ClassID)
 				&& (static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.BoneName == FName("head")
@@ -2946,10 +3198,12 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 		// room [author, 2026-10-11].
 		if (AActor* const Source = PolarityTeams::ResolveDamageSource(DamageCauser, EventInstigator))
 		{
+			// What it learns from the hit, and what it then tells the side, depends on whether it
+			// heard the shot. @see AShooterAIController::NoteHitFrom
 			AShooterAIController* const ShooterController = Cast<AShooterAIController>(GetController());
 			if (ShooterController && PolarityTeams::AreHostile(this, Source))
 			{
-				ShooterController->BroadcastContactAt(Source, Source->GetActorLocation(), /*bSeenNow*/ true);
+				ShooterController->NoteHitFrom(Source, Damage);
 			}
 		}
 
@@ -3093,7 +3347,11 @@ bool AShooterNPC::IsAimedAtTarget() const
 	// so folding it in would mean an NPC standing close to a target below or above it could never
 	// clear the gate and would simply stop shooting for ever: a worse bug than the one being fixed,
 	// and one that would look identical from outside.
-	const FVector Desired = (PolarityAim::ResolveAimPoint(Target) - From).GetSafeNormal2D();
+	// Firing at a place and not at him (he went down behind something): measured to that place.
+	const AShooterAIController* const Brain = Cast<AShooterAIController>(OwningController);
+	const bool bAtAPlace = Brain && Target == Brain->GetCurrentTarget() && !Brain->Notices(Target)
+		&& FAISystem::IsValidLocation(Brain->GetFocalPoint());
+	const FVector Desired = ((bAtAPlace ? Brain->GetFocalPoint() : PolarityAim::ResolveAimPoint(Target)) - From).GetSafeNormal2D();
 	if (Desired.IsNearlyZero() || Facing.IsNearlyZero())
 	{
 		return true;
@@ -3128,6 +3386,15 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 		// standing human and were handed to everything, which is why a drone got shot at below its
 		// own body and never took a round.
 		AimTarget = ResolveReachableAimPoint(Weapon, CurrentAimTarget.Get());
+
+		// Nobody of its side sees him: the rounds go where it is looking (the place he went down
+		// behind), not at him through the wall.
+		if (const AShooterAIController* const Brain = Cast<AShooterAIController>(GetController());
+			Brain && CurrentAimTarget.Get() == Brain->GetCurrentTarget() && !Brain->Notices(CurrentAimTarget.Get())
+			&& FAISystem::IsValidLocation(Brain->GetFocalPoint()))
+		{
+			AimTarget = Brain->GetFocalPoint();
+		}
 
 		// Use AccuracyComponent for spread calculation
 		if (AccuracyComponent)
@@ -3371,6 +3638,12 @@ void AShooterNPC::Die()
 	{
 		FDeathModeConfig ChosenConfig = ResolveDeathConfig();
 		ReplicatedDeathMode = bForceNextDeathDismemberment ? EDeathMode::Dismemberment : ChosenConfig.Mode;
+
+		// A body that is to lie there has to be a body.
+		if (CorpseSeconds > 0.0f && !bForceNextDeathDismemberment)
+		{
+			ReplicatedDeathMode = EDeathMode::Ragdoll;
+		}
 	}
 
 	// The half everybody performs. On a client this same call arrives through OnRep_IsDead.
@@ -3388,7 +3661,7 @@ void AShooterNPC::Die()
 	switch (ReplicatedDeathMode)
 	{
 	case EDeathMode::Ragdoll:
-		DeactivateForDeath(ResolveDeathConfig().RagdollDuration, /*bHideMesh=*/ false);
+		DeactivateForDeath(CorpseSeconds > 0.0f ? CorpseSeconds : ResolveDeathConfig().RagdollDuration, /*bHideMesh=*/ false);
 		break;
 
 	case EDeathMode::Dismemberment:
@@ -3838,10 +4111,70 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME_CONDITION(AShooterNPC, SelectedWeaponOption, COND_InitialOnly);
 }
 
+void AShooterNPC::KeepAimHold()
+{
+	const UWorld* const World = GetWorld();
+	if (!World || !Weapon || !Weapon->HasAIAimHold())
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+	if (AimHoldUntil < 0.0f)
+	{
+		// By how far the target is: the gun's own curve. @see AShooterWeapon::AIAimHoldByDistance
+		const AActor* const HoldTarget = CurrentAimTarget.Get();
+		const float HoldSeconds = Weapon->GetAIAimHold(HoldTarget
+			? static_cast<float>(FVector::Dist(GetActorLocation(), HoldTarget->GetActorLocation())) : 0.0f);
+		AimHoldUntil = Now + HoldSeconds;
+		Weapon->Multicast_AIAimHold(true, HoldSeconds);
+		SayTactic(TEXT("AIMING: holding on the target before the shot"));
+	}
+	AimHoldLastAsked = Now;
+}
+
+void AShooterNPC::DropAimHoldIfAbandoned()
+{
+	// Nobody has asked to shoot for half a second: the target is out of view, or the soldier went
+	// down or turned to something else. The hold is over, and the next one is a whole one, from the
+	// moment the target shows: a hold that stayed "ready" behind a wall would be a shot with no
+	// warning the instant the player stepped out, which is the thing the hold is there to prevent
+	// [author, 2026-10-12].
+	const UWorld* const World = GetWorld();
+	if (AimHoldUntil >= 0.0f && World && World->GetTimeSeconds() - AimHoldLastAsked > 0.5f)
+	{
+		AimHoldUntil = -1.0f;
+		if (Weapon)
+		{
+			Weapon->Multicast_AIAimHold(false, 0.0f);
+		}
+	}
+}
+
+void AShooterNPC::ForceWeapon(TSubclassOf<AShooterWeapon> GunClass)
+{
+	ForcedWeaponOption = INDEX_NONE;
+	for (int32 Index = 0; Index < WeaponOptions.Num() && Index < 127; ++Index)
+	{
+		if (WeaponOptions[Index].Weapon == GunClass)
+		{
+			ForcedWeaponOption = static_cast<int8>(Index);
+			return;
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[BENCH] %s: %s is not one of its WeaponOptions, the gun is rolled as usual"),
+		*GetName(), *GetNameSafe(GunClass));
+}
+
 void AShooterNPC::RollWeaponOption()
 {
 	if (!HasAuthority() || WeaponOptions.Num() == 0)
 	{
+		return;
+	}
+
+	if (WeaponOptions.IsValidIndex(ForcedWeaponOption))
+	{
+		SelectedWeaponOption = ForcedWeaponOption;
 		return;
 	}
 
@@ -4005,6 +4338,11 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 	{
 		Shield->ResetForReuse();
 	}
+	if (UHelmetComponent* const PooledHelmet = UHelmetComponent::Find(this))
+	{
+		PooledHelmet->ResetForReuse();
+	}
+	KnockdownEndTime = -1.0f;
 
 	// --- Combat state ---
 	bIsShooting = false;
@@ -4677,6 +5015,19 @@ void AShooterNPC::TryStartShooting()
 	{
 		static constexpr float MuzzleCoverCheckDistance = 250.0f;
 		const FVector Muzzle = Weapon->GetMuzzleWorldLocation();
+
+		// And the barrel itself is not through a wall. @see HasLineOfSightTo
+		FCollisionQueryParams BarrelParams(SCENE_QUERY_STAT(BarrelThroughWall), false, this);
+		BarrelParams.AddIgnoredActor(Weapon);
+		FHitResult BarrelHit;
+		if (GetWorld()->LineTraceSingleByChannel(BarrelHit, GetActorLocation() + FVector(0.0f, 0.0f, 50.0f), Muzzle,
+			ECC_Visibility, BarrelParams))
+		{
+			ReportShootGate(9, TEXT("BLOCKED muzzle against cover"));
+			GetWorldTimerManager().SetTimer(PermissionRetryTimer, this,
+				&AShooterNPC::TryStartShooting, 0.1f, false);
+			return;
+		}
 		const FVector ToAim = ResolveReachableAimPoint(Weapon, CurrentAimTarget.Get()) - Muzzle;
 		const float AimDistance = ToAim.Size();
 		// Stop short of the target itself, so a target standing inside the check is not its own wall.
@@ -4693,16 +5044,10 @@ void AShooterNPC::TryStartShooting()
 	// The gun says: hold on the target first. @see AShooterWeapon::AIAimHoldSeconds
 	// Not reset by StopShooting: the peek task closes and reopens the request every tick while the
 	// trigger is not down, and a hold cleared there would start over each time and never end.
-	if (Weapon && Weapon->AIAimHoldSeconds > 0.0f)
+	if (Weapon && Weapon->HasAIAimHold())
 	{
+		KeepAimHold();
 		const float HoldNow = GetWorld()->GetTimeSeconds();
-		if (AimHoldUntil < 0.0f || HoldNow - AimHoldLastAsked > 0.6f)
-		{
-			AimHoldUntil = HoldNow + Weapon->AIAimHoldSeconds;
-			Weapon->Multicast_AIAimHold(true, Weapon->AIAimHoldSeconds);
-			SayTactic(TEXT("AIMING: holding on the target before the shot"));
-		}
-		AimHoldLastAsked = HoldNow;
 		if (HoldNow < AimHoldUntil)
 		{
 			ReportShootGate(12, TEXT("BLOCKED aim hold (the gun's telegraph)"));
@@ -4943,6 +5288,17 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 		return false;
 	}
 
+	// A clear line to somebody this NPC does not know is there is not a line it can use: its target
+	// while nobody of its side sees him, anybody else outside the cone it looks out of. Asked here,
+	// in the one question every task asks before it fires. @see AShooterAIController::Notices
+	if (const AShooterAIController* const Brain = Cast<AShooterAIController>(GetController()))
+	{
+		if (!Brain->Notices(Target))
+		{
+			return false;
+		}
+	}
+
 	// Smoke is asked FIRST, before the weapon is asked whether its round would fit through the gap:
 	// a shell that can physically reach a target this NPC cannot see is not a shot, it is shooting
 	// through cover. @see USmokeVisionSubsystem
@@ -5000,11 +5356,54 @@ bool AShooterNPC::HasLineOfSightTo(AActor* Target) const
 		// 1.2 m high is a target, and so is one that can see over it. @see BodySamples
 		BodySamples::FPoints Points;
 		BodySamples::Get(Target, Points);
+
+		// The barrel is through a wall. A gun is a metre long and a parapet may be 20 cm thick: sat
+		// down behind one, the muzzle is on the far side of it, and every line asked from the muzzle is
+		// clear. Measured 2026-10-12: the sniper, crouched behind its parapet, shot a player 6 m below
+		// it through the parapet, five rounds a magazine. A muzzle that cannot be reached from the
+		// shoulder in a straight line is not a place a round can start from. From the shoulder and not
+		// from the middle of the body: the barrel of a standing soldier firing down over a parapet
+		// passes over its top, and the line from the waist to the muzzle goes through it.
+		const FVector Muzzle = Weapon->GetMuzzleWorldLocation();
+		FHitResult BarrelHit;
+		const bool bBarrelThroughWall = GetWorld()->LineTraceSingleByChannel(BarrelHit,
+			GetActorLocation() + FVector(0.0f, 0.0f, 50.0f), Muzzle, ECC_Visibility, QueryParams);
+
 		for (const FVector& Point : Points)
 		{
-			if (Weapon->CanShotReach(Point))
+			if (!bBarrelThroughWall && Weapon->CanShotReach(Point))
 			{
 				return true;
+			}
+		}
+
+		// The gun is down: working the bolt, changing the magazine, between two shots. The muzzle is
+		// then lower than it is when the gun is up, and behind a parapet it is BELOW the top of it, so
+		// "no line from the muzzle" was said of a target standing in plain view. Measured 2026-10-12 on
+		// the sniper's nest: muzzle 137 to 139 cm over the floor with the gun up and 113 with it down,
+		// parapet 115, and the line to a player standing still 16 m away went on and off all fight.
+		// So with the gun down the line is asked from where the muzzle will be when the gun comes up
+		// ONTO THE TARGET: the shoulder (50 cm over the middle of the body, measured), and the length
+		// of the gun out from it along the line to the point aimed at. Not a fixed height: aimed
+		// steeply down the muzzle comes down with the barrel, and from 70 cm behind a parapet it then
+		// goes into the parapet (measured the same day at 12 m: muzzle 109, parapet 115). That is a
+		// true "no line", and this has to say so, or the soldier stands "shooting" with a trigger its
+		// own muzzle check will never let go.
+		// This is "can I see to shoot", not the shot: the trigger still checks the real muzzle against
+		// cover (TryStartShooting).
+		const FVector Shoulder = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
+		const float GunLength = static_cast<float>(FVector::Dist2D(Muzzle, Shoulder));
+		if ((bBarrelThroughWall || Muzzle.Z < Shoulder.Z - 10.0f) && GunLength > 1.0f)
+		{
+			for (const FVector& Point : Points)
+			{
+				const FVector Raised = Shoulder + (Point - Shoulder).GetSafeNormal() * GunLength;
+				FHitResult RaisedHit;
+				if (!GetWorld()->LineTraceSingleByChannel(RaisedHit, Shoulder, Raised, ECC_Visibility, QueryParams)
+					&& !GetWorld()->LineTraceSingleByChannel(RaisedHit, Raised, Point, ECC_Visibility, QueryParams))
+				{
+					return true;
+				}
 			}
 		}
 		return false;
@@ -6583,6 +6982,9 @@ void AShooterNPC::EndKnockbackStun()
 	bStunnedByNPCImpact = false;
 	bShouldStunOnNPCImpact = false;
 
+	// A head knockdown may have shortened its fall to fit the room.
+	SetAnimRootMotionTranslationScale(1.0f);
+
 	// Stop the captured-style montage if a Tractor pull was active, and reset the style.
 	if (CurrentKnockbackStyle == EKnockbackStyle::Tractor && ActiveCapturedMontage)
 	{
@@ -7204,7 +7606,10 @@ void AShooterNPC::OnWeaponShotFired()
 	// The gun's own numbers when it has them. @see AShooterWeapon::AIBurstShotCount
 	const int32 ShotsThisPull = (Weapon && Weapon->AIBurstShotCount > 0) ? Weapon->AIBurstShotCount : BurstShotCount;
 	const float PauseAfterPull = (Weapon && Weapon->AIBurstCooldown >= 0.0f) ? Weapon->AIBurstCooldown : BurstCooldown;
-	if (CurrentBurstShots >= ShotsThisPull && DazzlePhase != EDazzlePhase::Retreating && !bDumpMagazine)
+	// A gun that is held on its target before each pull is never emptied without the hold, close
+	// fight or not: that was the one way left to be shot by it with no warning.
+	const bool bMayDump = bDumpMagazine && !(Weapon && Weapon->HasAIAimHold());
+	if (CurrentBurstShots >= ShotsThisPull && DazzlePhase != EDazzlePhase::Retreating && !bMayDump)
 	{
 		// Stop shooting and enter cooldown
 		if (Weapon)

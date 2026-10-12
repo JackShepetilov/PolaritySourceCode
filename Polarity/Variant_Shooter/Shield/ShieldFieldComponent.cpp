@@ -65,7 +65,7 @@ bool UShieldFieldComponent::CoversBone(FName BoneName) const
 	return BoneName.IsNone() || CoveredBones.Num() == 0 || CoveredBones.Contains(BoneName);
 }
 
-float UShieldFieldComponent::AbsorbDamage(float InDamage, AActor* Instigator, UPrimitiveComponent* HitComponent)
+float UShieldFieldComponent::AbsorbDamage(float InDamage, AActor* Instigator, UPrimitiveComponent* HitComponent, float ArmorScale)
 {
 	if (InDamage <= 0.0f)
 	{
@@ -78,8 +78,11 @@ float UShieldFieldComponent::AbsorbDamage(float InDamage, AActor* Instigator, UP
 		return InDamage;
 	}
 
-	const float Applied = FMath::Min(CurrentShield, InDamage);
-	const float Overflow = InDamage - Applied;
+	// The pool is hurt in armour terms, health in the round's own: a weak round needs more of
+	// itself to get through, and what does get through is not made weaker a second time.
+	const float Scale = FMath::Max(ArmorScale, 0.05f);
+	const float Applied = FMath::Min(CurrentShield, InDamage * Scale);
+	const float Overflow = FMath::Max(InDamage - Applied / Scale, 0.0f);
 	SetShieldLevel(CurrentShield - Applied, Instigator, HitComponent, Applied);
 
 	// One event per landed hit, with the break flagged on the shot that caused it - the shooter's

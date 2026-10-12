@@ -7,6 +7,7 @@
 #include "AI/FactionContactMemory.h"
 #include "AI/Coordination/AICombatCoordinator.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
@@ -106,6 +107,35 @@ void UCoverFinderComponent::SetSearchBias(const FVector& Point, float WeightPerM
 	SearchBiasWeightPerMetre = FMath::Max(0.0f, WeightPerMetre);
 	SearchBiasMinMove = FMath::Max(0.0f, MinMoveDistance);
 	SearchBiasMinTargetDistance = MinTargetDistance;
+}
+
+bool UCoverFinderComponent::GetKnownPlace(const AActor* Enemy, FVector& OutPlace) const
+{
+	if (!Enemy)
+	{
+		return false;
+	}
+
+	// The component sits on the pawn or on its controller (see RequestCover).
+	const APawn* const OwnerPawn = Cast<APawn>(GetOwner());
+	const AShooterAIController* const Brain = Cast<AShooterAIController>(
+		OwnerPawn ? OwnerPawn->GetController() : Cast<AController>(GetOwner()));
+	if (!Brain)
+	{
+		OutPlace = Enemy->GetActorLocation();
+		return true;
+	}
+	return Brain->GetKnownPlaceOf(Enemy, OutPlace);
+}
+
+FVector UCoverFinderComponent::GetTargetPlace(const AActor* Target) const
+{
+	FVector Place = FVector::ZeroVector;
+	if (Target && !GetKnownPlace(Target, Place))
+	{
+		Place = Target->GetActorLocation();
+	}
+	return Place;
 }
 
 bool UCoverFinderComponent::IsFlanked() const
@@ -213,7 +243,9 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	BuildTraceParams(TraceParams);
 
 	const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(GetOwner());
-	const FVector TargetLocation = Target->GetActorLocation();
+	// Where he is thought to be, not where he is: the corner is chosen against the place he was
+	// last seen at, and holds until somebody learns he is somewhere else.
+	const FVector TargetLocation = GetTargetPlace(Target);
 
 	// ---- Pass one: exposure, and the cheap rejections ----
 	//
@@ -477,6 +509,19 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		if (bPeekOver)
 		{
 			PeekLocation = Scored[Index].Location;
+
+			// Up to the wall to shoot over it. @see PeekOverStandOff
+			const float StepIn = CoverStandOff - PeekOverStandOff;
+			if (StepIn > 5.0f)
+			{
+				const FVector TowardWall = (TargetLocation - PeekLocation).GetSafeNormal2D();
+				FNavLocation AtWall;
+				UNavigationSystemV1* const PeekNav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+				if (PeekNav && PeekNav->ProjectPointToNavigation(PeekLocation + TowardWall * StepIn, AtWall, FVector(30.0f, 30.0f, 120.0f)))
+				{
+					PeekLocation = AtWall.Location;
+				}
+			}
 		}
 		else if (!ProbePeekLocation(Scored[Index].Location, Observers, TraceParams, PeekLocation))
 		{
@@ -533,7 +578,10 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		}
 		BestScore = Score;
 
-		Chosen.HideLocation = Scored[Index].Location;
+		// Over low cover the soldier sits where it stands to shoot: at the wall (PeekOverStandOff), not
+		// a step back from it. Two places 35 cm apart are one place to a walking body (it "arrives" at
+		// either from the other), and the step up to the wall was never taken.
+		Chosen.HideLocation = bPeekOver ? PeekLocation : Scored[Index].Location;
 		Chosen.PeekLocation = PeekLocation;
 		Chosen.Exposure = Scored[Index].Exposure;
 		Chosen.bLowCover = Scored[Index].bLow;
@@ -714,7 +762,15 @@ bool UCoverFinderComponent::CanPlayerSee(const APawn* Player, const FVector& Poi
 	float SideReach = 0.0f;
 	GetBodySampleHeights(bCrouched, Chest, Head, SideReach);
 
-	const FVector PlayerBase = Player->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight);
+	// From where he is thought to be. One the side knows nothing of sees nothing, as far as the
+	// one choosing a corner is concerned.
+	FVector KnownPlace = FVector::ZeroVector;
+	if (!GetKnownPlace(Player, KnownPlace))
+	{
+		return false;
+	}
+
+	const FVector PlayerBase = KnownPlace + FVector(0.0f, 0.0f, TargetChestHeight);
 	const FVector ChestPoint = Point + FVector(0.0f, 0.0f, Chest);
 
 	// The chest first, because in the open it answers immediately and nothing else runs.
@@ -820,7 +876,7 @@ bool UCoverFinderComponent::CanShootOverFrom(const FVector& HideLocation, const 
 	// The target is not its own obstacle (a building target is solid, and its chest sits inside it).
 	FCollisionQueryParams SeeTargetParams = Params;
 	SeeTargetParams.AddIgnoredActor(Target);
-	return HasLineOfSight(Muzzle, Target->GetActorLocation() + FVector(0.0f, 0.0f, TargetChestHeight), SeeTargetParams);
+	return HasLineOfSight(Muzzle, GetTargetPlace(Target) + FVector(0.0f, 0.0f, TargetChestHeight), SeeTargetParams);
 }
 
 bool UCoverFinderComponent::HasSolidCoverToward(const FVector& Point, const FVector& Toward, bool bCrouched,
@@ -913,7 +969,7 @@ bool UCoverFinderComponent::ProbePeekLocation(const FVector& HideLocation, const
 		return false;
 	}
 
-	const FVector TargetLocation = Target->GetActorLocation();
+	const FVector TargetLocation = GetTargetPlace(Target);
 	const FVector TargetChest = TargetLocation + FVector(0.0f, 0.0f, TargetChestHeight);
 
 	FVector ToTarget = (TargetLocation - HideLocation).GetSafeNormal2D();

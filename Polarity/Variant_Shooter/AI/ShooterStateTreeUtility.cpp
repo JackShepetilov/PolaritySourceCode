@@ -2,6 +2,7 @@
 
 
 #include "Variant_Shooter/AI/ShooterStateTreeUtility.h"
+#include "NavigationSystem.h"
 #include "AI/BodySamples.h"
 #include "StateTreeExecutionContext.h"
 #include "ShooterNPC.h"
@@ -18,6 +19,8 @@
 #include "Variant_Shooter/Siege/SiegeCampGuard.h"
 #include "Variant_Shooter/Siege/SiegeCampSite.h"
 #include "Variant_Shooter/Siege/SiegeLaneFollower.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
+#include "Coop/CoopPlayers.h"
 
 namespace SenseLeash
 {
@@ -610,6 +613,48 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 				}
 			}
 
+			// The gun's own reach: a scope picks out what the eye does not. In front of it only, and with
+			// a clear line. @see AShooterWeapon::AISightRange
+			if (!InstanceData.bHasTarget)
+			{
+				const AShooterWeapon* const Gun = InstanceData.Character->GetWeapon();
+				if (Gun && Gun->AISightRange > 0.0f)
+				{
+					TArray<APawn*> Players;
+					CoopPlayers::GetAll(InstanceData.Character->GetWorld(), Players);
+					const FVector Here = InstanceData.Character->GetActorLocation();
+					const FVector Facing = InstanceData.Character->GetActorForwardVector();
+					APawn* Spotted = nullptr;
+					float BestDistSq = FMath::Square(Gun->AISightRange);
+					for (APawn* const Player : Players)
+					{
+						if (!Player || !InstanceData.Controller->IsHostileTo(Player)
+							|| !SenseLeash::Allows(InstanceData.Character, Player))
+						{
+							continue;
+						}
+						const FVector To = Player->GetActorLocation() - Here;
+						const float DistSq = static_cast<float>(To.SizeSquared());
+						FHitResult ScopeHit;
+						if (DistSq < BestDistSq && FVector::DotProduct(To.GetSafeNormal2D(), Facing) > 0.0f
+							&& SenseSight::SeesBody(InstanceData.Character, Player, ScopeHit))
+						{
+							BestDistSq = DistSq;
+							Spotted = Player;
+						}
+					}
+					if (Spotted)
+					{
+						InstanceData.Controller->SetCurrentTarget(Spotted);
+						InstanceData.TargetActor = Spotted;
+						InstanceData.bHasTarget = true;
+						InstanceData.bHasInvestigateLocation = false;
+						InstanceData.Character->SayTactic(TEXT("SPOTTED through the scope"));
+						return EStateTreeRunStatus::Running;
+					}
+				}
+			}
+
 			if (!InstanceData.bHasTarget && !bDefending && InstanceData.Character->GetCombatTask() == ESquadTask::Advance)
 			{
 				// Where to look, refreshed on every poll rather than set once: the place the side saw an
@@ -631,7 +676,18 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 
 				const bool bAtWhere = bHasWhere
 					&& FVector::Dist2D(Where, InstanceData.Character->GetActorLocation()) < 300.0f;
-				if ((!bHasWhere || bAtWhere) && InstanceData.TimeWithoutTarget >= InstanceData.HuntAfterSeconds)
+				// At the last contact and nobody there: round that place. The side knows where he was,
+				// not where he is, and walking straight to him was walking by what nobody had seen.
+				bool bLookingRound = false;
+				FNavLocation Around;
+				UNavigationSystemV1* const SearchNav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(InstanceData.Character->GetWorld());
+				if (bAtWhere && UFactionContactMemory::IsKnowledgeOn() && InstanceData.TimeWithoutTarget >= InstanceData.HuntAfterSeconds
+					&& SearchNav && SearchNav->GetRandomReachablePointInRadius(Contact.LastKnownLocation, 1200.0f, Around))
+				{
+					Where = Around.Location;
+					bLookingRound = true;
+				}
+				else if ((!bHasWhere || bAtWhere) && InstanceData.TimeWithoutTarget >= InstanceData.HuntAfterSeconds)
 				{
 					const AAICombatCoordinator* const Coordinator = AAICombatCoordinator::GetCoordinator(InstanceData.Character);
 					if (const APawn* const Nearest = Coordinator ? Coordinator->FindNearestHostile(InstanceData.Character) : nullptr)
@@ -647,9 +703,11 @@ EStateTreeRunStatus FStateTreeSenseEnemiesTask::Tick(FStateTreeExecutionContext&
 				{
 					InstanceData.InvestigateLocation = Where;
 					InstanceData.bHasInvestigateLocation = true;
-					InstanceData.Character->SayTactic(bHunting
-						? TEXT("NOBODY IN SIGHT: going to the nearest enemy")
-						: TEXT("NO TARGET, going to the last contact"));
+					InstanceData.Character->SayTactic(bLookingRound
+						? TEXT("NOBODY AT THE LAST CONTACT: looking round it")
+						: (bHunting
+							? TEXT("NOBODY IN SIGHT: going to the nearest enemy")
+							: TEXT("NO TARGET, going to the last contact")));
 				}
 
 				// And walk there from here, not only through the tree. Its Investigate branch moves once

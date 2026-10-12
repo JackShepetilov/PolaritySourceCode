@@ -13,6 +13,7 @@
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 #include "AI/PolarityTeams.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "AIController.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Bench/FightRecorder.h"
@@ -203,6 +204,10 @@ int32 ABenchEncounter::SpawnGroup(const FBenchEncounterGroup& Group)
 		{
 			NPC->SetGenericTeamId(FGenericTeamId(Group.Team));
 			SidesSpawned.AddUnique(Group.Team);
+		}
+		if (Group.Weapon)
+		{
+			NPC->ForceWeapon(Group.Weapon);
 		}
 		NPC->FinishSpawning(SpawnTransform);
 		NPC->SetCombatTask(Group.Task);

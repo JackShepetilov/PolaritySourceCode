@@ -27,6 +27,8 @@ enum class EKnockbackStyle : uint8
 	Tractor,
 };
 
+class UHelmetComponent;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChargeUpdatedDelegate_NPC, float, ChargeValue, uint8, Polarity);
@@ -309,6 +311,39 @@ public:
 	/** World time the disarm ends. */
 	float FireLockEndTime = -1.0f;
 
+	/** Put on the ground by a hit in the head: cannot fire, move or turn until it is back up. Rides
+	 *  the explosion stun, so it is refused while that or a capture is already running. Authority.
+	 *  Returns whether it went down.
+	 *
+	 *  Hit from the front: turned to face Attacker exactly and falls over backwards, away from the
+	 *  hit (Helmet's front montage). Hit from behind: the back montage, not turned. The montage's
+	 *  root motion moves the capsule through the movement component, so the body walks the ground and
+	 *  stops at walls like any step. Before it starts the way is measured: no room for the whole
+	 *  fall and the travel is shortened; no room for the lying body either and the fall is turned
+	 *  aside to where there is; nowhere at all (or in the air, or no montage) and it staggers on the
+	 *  spot with KnockbackMontage instead of lying down inside a wall. */
+	bool ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Attacker);
+
+	/** Clear way for a falling body from here along Direction, up to Distance (cm). */
+	float MeasureKnockdownRoom(const FVector& Direction, float Distance) const;
+
+	/** True while a head knockdown is running. Authority (the squad's strength count reads it). */
+	UFUNCTION(BlueprintPure, Category = "AI|Knockdown")
+	bool IsKnockedDown() const;
+
+	/** World time the head knockdown ends. */
+	float KnockdownEndTime = -1.0f;
+
+	/** The knockdown montage for the clients; the authority plays its own from the stun. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayKnockdown(UAnimMontage* Montage, float PlayRate);
+
+	/** Above zero: the body is not cleared away at death. It falls as a ragdoll, whatever the death
+	 *  mode says, and lies there this long, so armour can be taken off it (UStrippableArmorComponent).
+	 *  A cinematic dismemberment still dismembers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death|Corpse", meta = (ClampMin = "0.0", Units = "s"))
+	float CorpseSeconds = 0.0f;
+
 	/** Inside Source's freezer cone: walk and turn slower, or for a flyer, run on slower time. Same
 	 *  source again replaces its numbers. */
 	void ApplyTacticalFreeze(AActor* Source, float MoveMultiplier, float TurnMultiplier, float FlyerTimeMultiplier,
@@ -423,6 +458,28 @@ protected:
 	 *  drops on death. Empty = WeaponClass as before, and nothing extra drops. */
 	UPROPERTY(EditAnywhere, Category = "Weapon|Options", meta = (TitleProperty = "Weapon"))
 	TArray<FEnemyWeaponOption> WeaponOptions;
+
+	/** This gun and no roll: for a bench, and for anything that places an enemy with a job (a sniper
+	 *  on a tower). Before BeginPlay, on the server. The class has to be a row of WeaponOptions,
+	 *  because the row's index is what travels to clients; one that is not is refused with a warning. */
+public:
+	void ForceWeapon(TSubclassOf<AShooterWeapon> GunClass);
+
+	/** The gun in its hands; null before it has one. */
+	AShooterWeapon* GetWeapon() const { return Weapon; }
+
+	/** The aim hold of the gun in its hands, begun if it is not running, and kept alive. Called
+	 *  while the soldier is trying to shoot at a target it has a line to, and only then: with the
+	 *  target out of view the hold ends (DropAimHoldIfAbandoned) and the next one starts from
+	 *  nothing. @see AShooterWeapon::AIAimHoldSeconds */
+	void KeepAimHold();
+
+protected:
+	/** @see ForceWeapon */
+	int8 ForcedWeaponOption = INDEX_NONE;
+
+	/** @see KeepAimHold. Called from Tick. */
+	void DropAimHoldIfAbandoned();
 
 	/** Which row of WeaponOptions was rolled; INDEX_NONE when none. The index travels, not the class:
 	 *  the array is the same on every machine, and each one spawns its own copy of the gun. */

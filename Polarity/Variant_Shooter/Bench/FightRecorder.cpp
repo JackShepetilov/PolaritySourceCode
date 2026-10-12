@@ -17,6 +17,7 @@
 #include "HAL/PlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
@@ -127,7 +128,7 @@ void UFightRecorderSubsystem::BeginFight(const FString& Scenario)
 	// Where the newest record is, for the tool that draws it.
 	FFileHelper::SaveStringToFile(Folder, *(Root / TEXT("last.txt")), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
-	PendingTrack = TEXT("wall,t,name,team,x,y,hp,dead,shooting,focus,los,crouch,speed,spread,posture,ratio,suppressed,element,commander,z,note\n");
+	PendingTrack = TEXT("wall,t,name,team,x,y,hp,dead,shooting,focus,los,crouch,speed,spread,posture,ratio,suppressed,element,commander,z,off,note\n");
 	PendingEvents = TEXT("t,event,who,other,value,extra\n");
 	PendingEvents += FString::Printf(TEXT("0.00,start,%s,,0,\n"), *Scenario);
 
@@ -332,6 +333,11 @@ void UFightRecorderSubsystem::Sample()
 		const bool bSight = !bDead && Focus && NPC->HasLineOfSightTo(Focus);
 		const float Speed = NPC->GetVelocity().Size();
 
+		// How far its target really is from where it thinks the target is, cm. Zero while the target
+		// is in view of its side, below zero with no target. @see AShooterAIController::GetTargetLocationError
+		const AShooterAIController* const ShooterController = Cast<AShooterAIController>(Controller);
+		const float TargetOff = (ShooterController && !bDead) ? ShooterController->GetTargetLocationError() : -1.0f;
+
 		FTally& Tally = TallyOf(NPC);
 		if (!bDead)
 		{
@@ -359,7 +365,7 @@ void UFightRecorderSubsystem::Sample()
 		}
 
 		PendingTrack += FString::Printf(
-			TEXT("%.2f,%.2f,%s,%d,%.0f,%.0f,%.0f,%d,%d,%s,%d,%d,%.0f,%.1f,%s,%.2f,%d,%d,%d,%.0f,%s\n"),
+			TEXT("%.2f,%.2f,%s,%d,%.0f,%.0f,%.0f,%d,%d,%s,%d,%d,%.0f,%.1f,%s,%.2f,%d,%d,%d,%.0f,%.0f,%s\n"),
 			Wall, Time, *Tally.Name, static_cast<int32>(Tally.Team), Location.X, Location.Y, NPC->CurrentHP,
 			bDead ? 1 : 0, bShooting ? 1 : 0, *NameOf(Focus), bSight ? 1 : 0,
 			Move && Move->IsCrouching() ? 1 : 0, Speed, Accuracy ? Accuracy->LastCalculatedSpread : 0.0f,
@@ -368,7 +374,7 @@ void UFightRecorderSubsystem::Sample()
 			Accuracy && Accuracy->IsSuppressed() ? 1 : 0,
 			Coordinator && Coordinator->IsInAssaultElement(NPC) ? 1 : 0,
 			Coordinator && Coordinator->IsSquadCommander(NPC) ? 1 : 0,
-			Location.Z, *NPC->GetTacticNote().ToString().Replace(TEXT(","), TEXT(";")));
+			Location.Z, TargetOff, *NPC->GetTacticNote().ToString().Replace(TEXT(","), TEXT(";")));
 	}
 
 	TArray<APawn*> Pawns;
@@ -400,7 +406,7 @@ void UFightRecorderSubsystem::Sample()
 		Tally.bHasLastLocation = true;
 
 		// The suppressed column carries the level in hundredths for a player (0..100).
-		PendingTrack += FString::Printf(TEXT("%.2f,%.2f,%s,%d,%.0f,%.0f,%.0f,%d,0,,0,%d,%.0f,0.0,,1.00,%d,0,0,%.0f,\n"),
+		PendingTrack += FString::Printf(TEXT("%.2f,%.2f,%s,%d,%.0f,%.0f,%.0f,%d,0,,0,%d,%.0f,0.0,,1.00,%d,0,0,%.0f,,\n"),
 			Wall, Time, *Tally.Name, static_cast<int32>(Tally.Team), Location.X, Location.Y, Health,
 			Health <= 0.0f ? 1 : 0, Move && Move->IsCrouching() ? 1 : 0, Speed, FMath::RoundToInt(Suppressed * 100.0f), Location.Z);
 	}

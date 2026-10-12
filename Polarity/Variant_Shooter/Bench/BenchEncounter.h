@@ -63,6 +63,11 @@ struct FBenchEncounterGroup
 	 *  wrong for a yard whose posts all stand along one wall. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Encounter")
 	TObjectPtr<AActor> HoldCentre;
+
+	/** Every one of the group comes out with this gun instead of rolling one. Empty: the roll.
+	 *  @see AShooterNPC::ForceWeapon */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter")
+	TSubclassOf<class AShooterWeapon> Weapon;
 };
 
 UCLASS()

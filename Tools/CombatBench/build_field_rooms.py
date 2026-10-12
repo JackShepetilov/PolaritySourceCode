@@ -41,6 +41,17 @@ PATROL_COVERS = (
 )
 PATROL_CONSOLES = (("PATROL x2", 2), ("PATROL x3", 3), ("PATROL x4", 4))
 
+# ---------------- SNIPER ----------------
+# Один снайпер на помосте в конце дорожки 57 м [автор, 2026-10-12: комната для проверки и отладки
+# блика и правил стрельбы ствола]. Ствол задан пультом, а не жребием. Укрытия игрока 120 см и стоят
+# широкой стороной к снайперу: от одного до другого 10-12 м по открытому.
+SX = (500.0, 7500.0)
+SY = (12400.0, 15100.0)
+NEST_H = 300.0
+NEST = (6600.0, 7400.0, 13250.0, 14250.0)      # x0, x1, y0, y1 помоста
+SNIPER_GUN = "/Game/Variant_Shooter/Blueprints/Pickups/Weapons/Kinemation/Marksman/BP_L96X"
+SNIPER_COVERS = ((1900, 13750), (3000, 13250), (3000, 14250), (4200, 13750), (5300, 13350), (5300, 14150))
+
 # ---------------- OUTPOST ----------------
 # Вторая версия [автор, 2026-10-11: первая была коробкой 20x20 м на одном уровне, все в одном
 # укрытии, одна граната на всех]. По образцу аванпостов Far Cry: несколько построек вразброс, три
@@ -89,6 +100,7 @@ STOPS = (
     ("PATROL", ((PX[0] + PX[1]) * 0.5, PY[0] + 700.0, -90.0, RIDGE_H + 100.0),
      ((PX[0] + PX[1]) * 0.5 + 900.0, PY[0] + 60.0, RIDGE_H + 130.0, 90.0)),
     ("OUTPOST", (CX, OY[0] + 700.0, -90.0, 100.0), (CX + 900.0, OY[0] + 60.0, 130.0, 90.0)),
+    ("SNIPER", (SX[0] + 600.0, SY[0] + 700.0, -90.0, 100.0), (SX[0] + 1500.0, SY[0] + 60.0, 130.0, 90.0)),
 )
 
 
@@ -109,7 +121,7 @@ def _console(tag, title, x, y, z, folder, groups, delay=None):
     return enc
 
 
-def _group(shooter, points, task, reinforcement=False, hold_radius=0.0, centre=None):
+def _group(shooter, points, task, reinforcement=False, hold_radius=0.0, centre=None, weapon=None):
     grp = unreal.BenchEncounterGroup()
     grp.set_editor_property("enemy_class", shooter)
     grp.set_editor_property("spawn_points", points)
@@ -118,6 +130,8 @@ def _group(shooter, points, task, reinforcement=False, hold_radius=0.0, centre=N
     grp.set_editor_property("hold_radius", hold_radius)
     if centre is not None:
         grp.set_editor_property("hold_centre", centre)
+    if weapon is not None:
+        grp.set_editor_property("weapon", weapon)      # этот ствол вместо жребия (AShooterNPC::ForceWeapon)
     return grp
 
 
@@ -298,6 +312,44 @@ def _outpost(shooter):
     log("DONE: OUTPOST")
 
 
+def _sniper(shooter):
+    tag, f = "CombatBenchSniper", "CombatBench/SNIPER"
+    hb["TAG_GEO"] = tag
+    hb["_clear"](tag)
+    gun = unreal.EditorAssetLibrary.load_blueprint_class(SNIPER_GUN)
+    if gun is None:
+        raise RuntimeError("нет ствола " + SNIPER_GUN)
+
+    _room_walls("Sniper", SX, SY, f)
+    x0, x1, y0, y1 = NEST
+    mid_y = (y0 + y1) * 0.5
+    box("Sniper_Nest", (x0 + x1) * 0.5, mid_y, 0.0, x1 - x0, y1 - y0, NEST_H, mat="structure", folder=f)
+    # Бруствер к игроку и с севера; с юга лестница (ступень 15 см, бойцы ходят).
+    # Толщина 20 см, а не 60: через толстый бруствер вниз не выстрелить. Замер 2026-10-12: плечо 138 см,
+    # бруствер 115, цель в 12 м и на 3 м ниже: линия проходит дальний край бруствера на 114 см, то есть
+    # упирается в него. При 20 см мёртвая зона начинается ближе 9 м от стрелка, под самой стеной.
+    box("Sniper_ParapetW", x0 + 10.0, mid_y, NEST_H, 20.0, y1 - y0, HIGH_SILL_H, mat="cover", folder=f + "/Covers")
+    box("Sniper_ParapetN", (x0 + x1) * 0.5, y1 - 10.0, NEST_H, x1 - x0, 20.0, HIGH_SILL_H, mat="cover", folder=f + "/Covers")
+    steps = int(NEST_H / STEP_RISE)
+    for s in range(steps - 1):
+        box("Sniper_Stair_{}".format(s), (x0 + x1) * 0.5, y0 - (s + 0.5) * STEP_RUN, 0.0, 300.0, STEP_RUN,
+            NEST_H - STEP_RISE * (s + 1), mat="structure", folder=f + "/Stairs")
+
+    for k, (cx, cy) in enumerate(SNIPER_COVERS):
+        box("Sniper_Cover{}".format(k), cx, cy, 0.0, 60.0, 300.0, 120.0, mat="cover", folder=f + "/Covers")
+
+    post = _point(tag, "Sniper_S0", x0 + 62.0, mid_y, NEST_H + cb["S_Z"], 180.0, f + "/SpawnPoints")
+    centre = _point(tag, "Sniper_centre", (x0 + x1) * 0.5, mid_y, NEST_H + cb["S_Z"], 0.0, f + "/SpawnPoints")
+
+    hb["text"]("Sniper_Title", SX[0] + 600.0, SY[0] + 80.0, 430.0,
+               "SNIPER\none bolt rifle on the nest, 57 m: it holds on you before the shot", size=45.0,
+               yaw=90.0, folder=f, tag=tag)
+    _console(tag, "SNIPER x1", SX[0] + 600.0, SY[0] + 60.0, 130.0, f,
+             [_group(shooter, [post], unreal.SquadTask.HOLD, hold_radius=450.0, centre=centre, weapon=gun)])
+    log("ADDED: SNIPER x1")
+    log("DONE: SNIPER")
+
+
 def step_field():
     hb["guard"]()
     shooter = unreal.EditorAssetLibrary.load_blueprint_class(cb["SHOOTER"])
@@ -305,4 +357,5 @@ def step_field():
         raise RuntimeError("нет класса " + cb["SHOOTER"])
     _patrol(shooter)
     _outpost(shooter)
+    _sniper(shooter)
     hb["_les"]().save_current_level()
