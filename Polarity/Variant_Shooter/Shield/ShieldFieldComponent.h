@@ -107,6 +107,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Shield")
 	bool CoversBone(FName BoneName) const;
 
+	/** The armour leaves part of the body open (a vest, not a whole-body field): what fragments find.
+	 *  @see UDamageType_Fragmentation */
+	bool HasPartialCover() const { return CoveredBones.Num() > 0; }
+
 	// ==================== The two ways damage enters ====================
 
 	/** Take InDamage against the pool and return what is LEFT OVER for health.

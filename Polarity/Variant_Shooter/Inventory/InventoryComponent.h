@@ -28,6 +28,7 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInventoryChanged);
 
 class AInventoryPickup;
+class UGrenadeDefinition;
 
 UCLASS(ClassGroup = (Polarity), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UInventoryComponent : public UActorComponent
@@ -88,6 +89,17 @@ public:
 	/** Medkits in one cell. */
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	int32 GetMedkitStackSize() const { return FMath::Max(1, MedkitStackSize); }
+
+	/** Grenades of this type in the bag; null counts every grenade. @see EInventorySlotKind::Grenade */
+	UFUNCTION(BlueprintPure, Category = "Inventory")
+	int32 GetGrenadeCount(const UGrenadeDefinition* Definition) const;
+
+	/** Spend grenades of this type. Returns how many were taken. Server only, like ConsumeAmmo. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	int32 ConsumeGrenades(const UGrenadeDefinition* Definition, int32 Count);
+
+	/** Every type of grenade in the bag, each once, in the order of the cells. */
+	void GetGrenadeTypes(TArray<UGrenadeDefinition*>& OutTypes) const;
 
 	/** The most medkits this player may carry. A medic carries twice as many [author, 2026-10-11];
 	 *  whatever makes a player a medic says so through SetMaxMedkits. */

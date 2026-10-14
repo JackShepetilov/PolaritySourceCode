@@ -33,7 +33,7 @@ void UInventorySlotWidget::SetCell(EInventoryCellVisual InVisual, EInventorySlot
 	// An upgrade shows its level instead: two copies of the same upgrade at two levels are two
 	// different decisions.
 	const bool bShowCount =
-		(InKind == EInventorySlotKind::Currency || InKind == EInventorySlotKind::Ammo
+		(InKind == EInventorySlotKind::Currency || InKind == EInventorySlotKind::Ammo || InKind == EInventorySlotKind::Grenade
 			|| InKind == EInventorySlotKind::AbilityUpgrade) && InCount > 0;
 
 	// Whatever parts the Blueprint supplied get driven from here first, then the Blueprint gets its

@@ -40,7 +40,7 @@ public static class BenchModal {
 
 $deadline = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $deadline) {
-    $h = [BenchModal]::Find("Compilation Errors")
+    $h = [BenchModal]::Find("Compilation Error")
     if ($h -ne [IntPtr]::Zero) {
         $r = New-Object BenchModal+RECT
         [void][BenchModal]::GetWindowRect($h, [ref]$r)
@@ -52,7 +52,7 @@ while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 300
         [BenchModal]::Click($r.Left + [int]($w * 517 / 656), $r.Top + [int]($hh * 170 / 192))
         Start-Sleep -Milliseconds 800
-        if ([BenchModal]::Find("Compilation Errors") -eq [IntPtr]::Zero) {
+        if ([BenchModal]::Find("Compilation Error") -eq [IntPtr]::Zero) {
             Write-Output "MODAL DISMISSED (${w}x${hh})"
             exit 0
         }

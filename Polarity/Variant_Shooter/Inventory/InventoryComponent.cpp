@@ -13,6 +13,7 @@
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Upgrades/UpgradeManagerComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogInventory, Log, All);
 
@@ -186,6 +187,71 @@ int32 UInventoryComponent::ConsumeMedkits(int32 Count)
 		OnInventoryChanged.Broadcast();
 	}
 	return Consumed;
+}
+
+int32 UInventoryComponent::GetGrenadeCount(const UGrenadeDefinition* Definition) const
+{
+	int32 Total = 0;
+	for (const FInventorySlot& Slot : Slots)
+	{
+		if (Slot.Kind == EInventorySlotKind::Grenade && (!Definition || Slot.Payload == Definition))
+		{
+			Total += Slot.Count;
+		}
+	}
+	return Total;
+}
+
+int32 UInventoryComponent::ConsumeGrenades(const UGrenadeDefinition* Definition, int32 Count)
+{
+	// Server only, for the reason ConsumeAmmo gives.
+	if (!Definition || Count <= 0 || GetOwnerRole() != ROLE_Authority)
+	{
+		return 0;
+	}
+
+	// From the last cell of the type backwards: a half-used stack goes before a full one is opened.
+	int32 Remaining = Count;
+	for (int32 Index = Slots.Num() - 1; Index >= 0 && Remaining > 0; --Index)
+	{
+		FInventorySlot& Slot = Slots[Index];
+		if (Slot.Kind != EInventorySlotKind::Grenade || Slot.Payload != Definition)
+		{
+			continue;
+		}
+
+		const int32 Taken = FMath::Min(Slot.Count, Remaining);
+		Slot.Count -= Taken;
+		Remaining -= Taken;
+
+		// The last one out frees the cell.
+		if (Slot.Count <= 0)
+		{
+			Slot = FInventorySlot();
+		}
+	}
+
+	const int32 Consumed = Count - Remaining;
+	if (Consumed > 0)
+	{
+		OnInventoryChanged.Broadcast();
+	}
+	return Consumed;
+}
+
+void UInventoryComponent::GetGrenadeTypes(TArray<UGrenadeDefinition*>& OutTypes) const
+{
+	OutTypes.Reset();
+	for (const FInventorySlot& Slot : Slots)
+	{
+		if (Slot.Kind == EInventorySlotKind::Grenade && Slot.Count > 0)
+		{
+			if (UGrenadeDefinition* const Type = Cast<UGrenadeDefinition>(Slot.Payload))
+			{
+				OutTypes.AddUnique(Type);
+			}
+		}
+	}
 }
 
 int32 UInventoryComponent::GetAmmoCellCount() const
@@ -1391,6 +1457,7 @@ namespace InventoryDebug
 		case EInventorySlotKind::AbilityUpgrade: return TEXT("AbilityUpgrade");
 		case EInventorySlotKind::Attachment:     return TEXT("Attachment");
 		case EInventorySlotKind::Medkit:         return TEXT("Medkit");
+		case EInventorySlotKind::Grenade:        return TEXT("Grenade");
 		default:                                 return TEXT("Empty");
 		}
 	}

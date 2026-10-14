@@ -28,6 +28,7 @@ enum class EKnockbackStyle : uint8
 };
 
 class UHelmetComponent;
+class AGrenadeProjectile;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNPCDeath, AShooterNPC*, DeadNPC);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FPolarityChangedDelegate_NPC, uint8, NewPolarity, float, ChargeValue);
@@ -337,6 +338,91 @@ public:
 	/** The knockdown montage for the clients; the authority plays its own from the stun. */
 	UFUNCTION(NetMulticast, Reliable)
 	void Multicast_PlayKnockdown(UAnimMontage* Montage, float PlayRate);
+
+	/** One fall: where the hit came from and what each side of it plays. @see ApplyKnockdownFrom */
+	struct FKnockdownRequest
+	{
+		bool bHasSource = false;
+		FVector SourceLocation = FVector::ZeroVector;
+		UAnimMontage* FrontMontage = nullptr;
+		UAnimMontage* BackMontage = nullptr;
+		float ReachFront = 0.0f;
+		float ReachBack = 0.0f;
+		float FallbackDuration = 2.0f;
+		const TCHAR* Reason = TEXT("KNOCKED DOWN");
+	};
+
+	/** The fall itself, whatever put it there (the head, a blast): everything ApplyHeadKnockdown
+	 *  describes, with the montages and the side of the hit handed in. Authority. */
+	bool ApplyKnockdownFrom(const FKnockdownRequest& Request);
+
+	/** Put on the ground by a blast at Origin (a frag grenade), and up again. A montage at random out
+	 *  of the pool for the side the blast came from. Authority. Returns whether it went down. */
+	bool ApplyBlastKnockdown(const FVector& Origin, AActor* Attacker);
+
+	/** Falls from a blast in front: the body faces the blast and goes over backwards, away from it.
+	 *  Each montage is the fall, the lying and the getting up in one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Knockdown")
+	TArray<TObjectPtr<UAnimMontage>> BlastKnockdownMontagesFront;
+
+	/** Falls from a blast behind: forwards, away from it. Empty = the front pool. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Knockdown")
+	TArray<TObjectPtr<UAnimMontage>> BlastKnockdownMontagesBack;
+
+	/** Room the lying body needs past the end of the fall's travel. @see MeasureKnockdownRoom */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Knockdown", meta = (ClampMin = "0.0", Units = "cm"))
+	float BlastKnockdownReach = 90.0f;
+
+	/** No room to fall (or no montage): a stagger on the spot this long instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Knockdown", meta = (ClampMin = "0.1", Units = "s"))
+	float BlastKnockdownFallbackDuration = 1.5f;
+
+	// ==================== Flashbang ====================
+	// Docs/Grenades_Plan_2026-10-14.md. Authority.
+
+	/** Blinded by a flashbang for Duration. A foot soldier is stunned on the spot (a FlashStunMontages
+	 *  montage: Start, Loop for as long as it lasts, End) and forgets its target. A drone, a turret,
+	 *  a tank shoot blind with their spread multiplied, as under a tactical light. */
+	void ApplyFlashbang(float Duration, float BlindSpreadMultiplier, AActor* Thrower);
+
+	/** Stunned for Duration with a montage of three sections, Start, Loop and End: the loop plays
+	 *  for as long as it takes for End to finish on time. Rides the explosion stun (the freeze, the
+	 *  fire lock), and is seen on every machine. Authority. Returns whether it took. */
+	bool ApplySectionedStun(float Duration, UAnimMontage* Montage);
+
+	/** Picked from at random by ApplyFlashbang. Sections must be named Start, Loop, End. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Stun")
+	TArray<TObjectPtr<UAnimMontage>> FlashStunMontages;
+
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlaySectionedStun(UAnimMontage* Montage, float Duration);
+
+	// ==================== Grenades ====================
+	// Docs/Grenades_Plan_2026-10-14.md §4. Authority.
+
+	/** A grenade is about to go off at Center, hurting within Radius, in TimeLeft. Told a few times a
+	 *  second by the grenade itself to everybody near. Whether this soldier notices (sees it, hears
+	 *  it land, or is shouted at by its side) and where it runs is decided here. */
+	void NotifyGrenadeThreat(AGrenadeProjectile* Grenade, const FVector& Center, float Radius, float TimeLeft);
+
+	/** True from noticing a grenade to it having gone off. */
+	UFUNCTION(BlueprintPure, Category = "AI|Grenade")
+	bool IsEscapingGrenade() const { return GrenadeEscapePhase != EGrenadeEscapePhase::Inactive; }
+
+	/** Off: this enemy ignores grenades (a turret, a scripted guard). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Grenade")
+	bool bEscapesGrenades = true;
+
+	/** Seconds from noticing to moving, picked between these. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Grenade", meta = (ClampMin = "0.0", Units = "s"))
+	float GrenadeReactionMin = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Grenade", meta = (ClampMin = "0.0", Units = "s"))
+	float GrenadeReactionMax = 0.6f;
+
+	/** How far past the grenade's radius a spot in the open has to be to count as safe. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Grenade", meta = (ClampMin = "0.0", Units = "cm"))
+	float GrenadeEscapeMargin = 150.0f;
 
 	/** Above zero: the body is not cleared away at death. It falls as a ragdoll, whatever the death
 	 *  mode says, and lies there this long, so armour can be taken off it (UStrippableArmorComponent).
@@ -668,6 +754,38 @@ protected:
 	void EndDazzle();
 
 	/** Freezer cones this enemy is standing in, with the overlay each wants shown. */
+	enum class EGrenadeEscapePhase : uint8
+	{
+		Inactive,
+		Reacting,	// Noticed it; the reaction time is running.
+		Running,	// Sprinting to the spot it chose.
+		Holding,	// There, down, until it goes off.
+	};
+	EGrenadeEscapePhase GrenadeEscapePhase = EGrenadeEscapePhase::Inactive;
+
+	TWeakObjectPtr<AGrenadeProjectile> EscapeGrenade;
+	FVector EscapeCenter = FVector::ZeroVector;
+	float EscapeRadius = 0.0f;
+	FVector EscapeGoal = FVector::ZeroVector;
+	float EscapeMoveAt = 0.0f;
+	float EscapeGiveUpAt = 0.0f;
+	float EscapeScanTimer = 0.0f;
+
+	/** Drive the escape. Called from Tick, before the dazzle. */
+	void TickGrenadeEscape(float DeltaTime);
+
+	/** Back to the tree, whatever phase it is in. */
+	void EndGrenadeEscape();
+
+	/** Where to run: out of the radius, or behind a wall from it, whichever it reaches soonest. */
+	bool ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) const;
+
+	/** Each machine's own playing of a sectioned stun. @see ApplySectionedStun */
+	void PlaySectionedStunLocal(UAnimMontage* Montage, float Duration);
+	void JumpSectionedStunToEnd();
+	FTimerHandle SectionedStunTimer;
+	TWeakObjectPtr<UAnimMontage> SectionedStunMontage;
+
 	TMap<TWeakObjectPtr<AActor>, TWeakObjectPtr<UMaterialInterface>> TacticalFreezeSources;
 
 	/** Strongest flyer time rate among TacticalFreezeSources. */

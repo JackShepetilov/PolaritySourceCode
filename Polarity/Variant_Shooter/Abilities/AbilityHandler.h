@@ -51,6 +51,11 @@ public:
 	void Initialize(UAbilityComponent* InOwningComponent, UAbilityDefinition* InDefinition, int32 InLevel);
 	void SetLevel(int32 NewLevel);
 
+	/** Run without an ability component: an item thrown out of the bag rides the same pipeline as a
+	 *  thrown ability, but has no slot and no cooldown. The end of the pipeline goes to OnFinished
+	 *  (true: it completed, false: it was cancelled) instead of to a component. @see UGrenadeComponent */
+	void InitializeStandalone(AShooterCharacter* InCharacter, UAbilityDefinition* InDefinition, TFunction<void(bool)> OnFinished);
+
 	UFUNCTION(BlueprintNativeEvent, Category = "Ability")
 	void OnEquip();
 	virtual void OnEquip_Implementation() {}
@@ -230,4 +235,9 @@ protected:
 
 	/** Signal to component that the ability was aborted. No cooldown applied. */
 	void NotifyAbilityCancelled();
+
+private:
+
+	/** Set by InitializeStandalone: where completion goes when there is no component. */
+	TFunction<void(bool)> StandaloneFinished;
 };

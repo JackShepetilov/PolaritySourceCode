@@ -148,6 +148,52 @@ def step_medkits():
     log("DONE: medkits")
 
 
+def step_grenades():
+    """Стойка с гранатами рядом с аптечками: на каждый вид гранаты (все UGrenadeDefinition) по два
+    AGrenadePickup по три штуки. Берутся клавишей «взять», уходят в сумку, бросок на G, смена вида на H.
+    Docs/Grenades_Plan_2026-10-14.md"""
+    hb["guard"]()
+    tag = "CombatBenchGrenades"
+    hb["TAG_GEO"] = tag
+    hb["_clear"](tag)
+    f = "CombatBench/Grenades"
+    eas = hb["_eas"]()
+    mesh_asset = unreal.load_asset("/Game/InfimaGames/ArtCore/Weapons/Grenades/Meshes/SM_IG_Grenade_Frag")
+
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    types = [a.get_asset() for a in ar.get_assets_by_class(unreal.TopLevelAssetPath("/Script/Polarity", "GrenadeDefinition"), True)]
+    types.sort(key=lambda t: t.get_name())
+    per_type, count, step = 2, 3, 80.0
+    n_slots = len(types) * per_type
+    length = n_slots * step + 60.0
+    cy = -220.0 - length * 0.5          # справа от стойки аптечек (она y -170..170)
+    box("Grenade_Stand", 260.0, cy, 0.0, 60.0, length, 60.0, folder=f)
+    hb["text"]("Grenade_Title", 225.0, cy, 95.0, "GRENADES", size=16.0, yaw=180.0, folder=f, tag=tag)
+
+    slot = 0
+    for t in types:
+        name = t.get_name().replace("DA_Grenade_", "")
+        for k in range(per_type):
+            y = cy - (n_slots - 1) * step * 0.5 + slot * step
+            p = eas.spawn_actor_from_class(unreal.GrenadePickup, unreal.Vector(260.0, y, 78.0))
+            hb["_tag"](p, tag, "Grenade_{}_{}".format(name, k), f)
+            p.set_editor_property("type", t)
+            p.set_editor_property("count", count)
+            mesh = p.get_component_by_class(unreal.StaticMeshComponent)
+            if mesh and mesh_asset:
+                mesh.set_static_mesh(mesh_asset)
+                mesh.set_relative_scale3d(unreal.Vector(1.6, 1.6, 1.6))
+                mesh.set_visibility(True)
+            slot += 1
+        # Одна подпись на вид, над его парой.
+        y_mid = cy - (n_slots - 1) * step * 0.5 + (slot - per_type * 0.5 - 0.5) * step
+        hb["text"]("Grenade_Label_" + name, 228.0, y_mid, 110.0, name.upper(), size=10.0, yaw=180.0,
+                   folder=f + "/Labels", tag=tag)
+        log("ADDED: {} x{} по {}".format(name, per_type, count))
+    hb["_les"]().save_current_level()
+    log("DONE: grenades, {} types".format(len(types)))
+
+
 def step_armory():
     hb["guard"]()
     hb["TAG_GEO"] = TAG

@@ -18,6 +18,7 @@ class UPawnNoiseEmitterComponent;
 class UWeaponRecoilComponent;
 class UPlayerSuppressionComponent;
 class UFieldCareComponent;
+class UGrenadeComponent;
 class URecoilAnimationComponent;
 class URecoilData;
 class UHitMarkerComponent;
@@ -206,6 +207,10 @@ class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShoote
 	/** The medkit and the armour off a body, each on a held key. @see UFieldCareComponent */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UFieldCareComponent> FieldCareComponent;
+
+	/** Grenades from the bag, on their own key (IA_Grenade, G). @see UGrenadeComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UGrenadeComponent> GrenadeComponent;
 
 	/** Held to use a medkit. Not bound while empty. Armour has no key of its own: it comes off a
 	 *  body on the take key (FetchAction), held. @see DoFetchPressed */

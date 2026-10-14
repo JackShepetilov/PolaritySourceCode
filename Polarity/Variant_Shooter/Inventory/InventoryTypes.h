@@ -52,7 +52,11 @@ enum class EInventorySlotKind : uint8
 	/** A medkit. Stacks. Used by holding a key (UFieldCareComponent), not by picking it up: health
 	 *  comes back only from these [author, 2026-10-11], so the means to heal cost the run a cell.
 	 *  Added at the end: the numbers of the kinds before it are saved in assets. */
-	Medkit
+	Medkit,
+
+	/** Grenades of one type (Payload: the UGrenadeDefinition). Stacks, per type. Thrown on its own key
+	 *  (UGrenadeComponent) [author, 2026-10-14]. Added at the end, for the same reason as Medkit. */
+	Grenade
 };
 
 /**
@@ -129,7 +133,8 @@ struct FInventorySlot
 	/** Currency and ammo merge into a partial cell of the same thing; the others never do. */
 	bool IsStackable() const
 	{
-		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit;
+		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit
+			|| Kind == EInventorySlotKind::Grenade;
 	}
 
 	bool HasRoom() const { return !IsEmpty() && IsStackable() && Count < StackMax; }
@@ -184,6 +189,7 @@ struct FInventoryItem
 
 	bool IsStackable() const
 	{
-		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit;
+		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit
+			|| Kind == EInventorySlotKind::Grenade;
 	}
 };

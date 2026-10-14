@@ -20,6 +20,7 @@
 #include "Variant_Shooter/UI/InventoryDragDropOperation.h"
 #include "Variant_Shooter/UI/InventorySlotWidget.h"
 #include "Variant_Shooter/Siege/MechPartDefinition.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 
 void UInventoryScreenWidget::InitializeFor(AShooterCharacter* InCharacter)
@@ -1123,6 +1124,18 @@ UTexture2D* UInventoryScreenWidget::IconForSlot(const FInventorySlot& InSlot) co
 			if (UTexture2D* PartIcon = Def->Icon.LoadSynchronous())
 			{
 				return PartIcon;
+			}
+		}
+	}
+
+	// A grenade wears its type's picture: a frag and a flash are two different throws.
+	if (InSlot.Kind == EInventorySlotKind::Grenade)
+	{
+		if (const UGrenadeDefinition* Def = Cast<UGrenadeDefinition>(InSlot.Payload))
+		{
+			if (UTexture2D* GrenadeIcon = Def->Icon.Get())
+			{
+				return GrenadeIcon;
 			}
 		}
 	}

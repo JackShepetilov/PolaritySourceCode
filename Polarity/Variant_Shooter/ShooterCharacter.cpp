@@ -20,6 +20,8 @@
 #include "Variant_Shooter/Bench/FightRecorder.h"
 #include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
 #include "Variant_Shooter/Health/FieldCareComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeComponent.h"
+#include "Variant_Shooter/DamageTypes/DamageType_Fragmentation.h"
 #include "Variant_Shooter/AnimNotify_WeaponSwitch.h"
 #include "Animation/AnimMontage.h"
 #include "Net/UnrealNetwork.h"
@@ -277,6 +279,8 @@ AShooterCharacter::AShooterCharacter()
 	SuppressionComponent = CreateDefaultSubobject<UPlayerSuppressionComponent>(TEXT("Suppression Component"));
 
 	FieldCareComponent = CreateDefaultSubobject<UFieldCareComponent>(TEXT("Field Care Component"));
+
+	GrenadeComponent = CreateDefaultSubobject<UGrenadeComponent>(TEXT("Grenade Component"));
 
 	// create the FPS Animation Pack recoil component (PRAS). Costs nothing while idle: it does not
 	// tick until Init is given a recoil asset, which only a pack weapon provides.
@@ -555,6 +559,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Started, FieldCareComponent.Get(), &UFieldCareComponent::BeginMedkit);
 			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Completed, FieldCareComponent.Get(), &UFieldCareComponent::Cancel);
 			EnhancedInputComponent->BindAction(MedkitAction, ETriggerEvent::Canceled, FieldCareComponent.Get(), &UFieldCareComponent::Cancel);
+		}
+
+		// Grenades: their own key (IA_Grenade, G) and the type cycle, set on the component.
+		if (GrenadeComponent)
+		{
+			GrenadeComponent->BindInput(EnhancedInputComponent);
 		}
 
 		// Melee attack
@@ -1011,6 +1021,10 @@ void AShooterCharacter::EnterDownedState()
 	if (AbilityComponent && AbilityComponent->IsCasting())
 	{
 		AbilityComponent->CancelCast();
+	}
+	if (GrenadeComponent && GrenadeComponent->IsThrowing())
+	{
+		GrenadeComponent->CancelThrow();
 	}
 	AbortItemFetch();
 	SetCloaked(false);
@@ -2345,7 +2359,9 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	}
 
 	// Armor absorption (DOOM Eternal-style): armor absorbs damage before health
-	float RemainingDamage = Damage;
+	// Fragments: part of a blast goes past the vest, as on the enemies. @see UDamageType_Fragmentation
+	const float PastArmour = Damage * UDamageType_Fragmentation::GetArmorBypassFraction(DamageEvent.DamageTypeClass);
+	float RemainingDamage = Damage - PastArmour;
 	if (CurrentArmor > 0.0f)
 	{
 		const float ArmorAbsorbed = FMath::Min(CurrentArmor, RemainingDamage);
@@ -2354,7 +2370,7 @@ float AShooterCharacter::TakeDamage(float Damage, struct FDamageEvent const& Dam
 	}
 
 	// Reduce HP by remaining damage after armor
-	CurrentHP -= RemainingDamage;
+	CurrentHP -= RemainingDamage + PastArmour;
 	UFightRecorderSubsystem::NoteDamage(this, EventInstigator, DamageCauser, Damage, CurrentHP);
 
 	// Reset regeneration delay timer
@@ -2569,7 +2585,7 @@ void AShooterCharacter::DoStartFiring()
 
 	// Don't fire while an ability is casting — the fire montage shares the FP mesh slot and
 	// would interrupt the ability's montage (e.g. Charge Burst).
-	if (AbilityComponent && AbilityComponent->IsCasting())
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
 	{
 		return;
 	}
@@ -2810,7 +2826,7 @@ void AShooterCharacter::CycleWeapon(int32 Direction)
 	// Don't switch while an ability is casting — swapping weapons re-inits the FP AnimInstance
 	// (SetAnimInstanceClass), which orphans the ability montage's end delegate and can leave the
 	// cast stuck (bIsCasting never cleared).
-	if (AbilityComponent && AbilityComponent->IsCasting())
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
 	{
 		return;
 	}
@@ -2877,7 +2893,7 @@ void AShooterCharacter::HolsterWeaponByPlayer()
 	{
 		return;
 	}
-	if (AbilityComponent && AbilityComponent->IsCasting())
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
 	{
 		return;
 	}
@@ -3035,7 +3051,7 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 	}
 
 	// Don't switch while an ability is casting — see DoSwitchWeapon for rationale.
-	if (AbilityComponent && AbilityComponent->IsCasting())
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
 	{
 		return;
 	}
@@ -3924,6 +3940,12 @@ void AShooterCharacter::DoAbilityPressed()
 	// Not while the weapon is being put away or brought out. An ability montage shares the FP arms
 	// with the swap, and the swap is the one the player asked for first.
 	if (IsWeaponSwitchInProgress())
+	{
+		return;
+	}
+
+	// A grenade in the hand owns the arms the same way.
+	if (GrenadeComponent && GrenadeComponent->IsThrowing())
 	{
 		return;
 	}
@@ -9600,6 +9622,10 @@ void AShooterCharacter::Die()
 	{
 		AbilityComponent->CancelCast();
 	}
+	if (GrenadeComponent && GrenadeComponent->IsThrowing())
+	{
+		GrenadeComponent->CancelThrow();
+	}
 	AbortItemFetch();
 	SetCloaked(false);
 
@@ -10054,7 +10080,7 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 		const UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
 		const UAbilityComponent* AbilComp = FindComponentByClass<UAbilityComponent>();
 		const bool bChargingOwnsAlpha = ChargeComp && ChargeComp->IsChanneling();
-		const bool bAbilityOwnsAlpha = AbilComp && AbilComp->IsCasting();
+		const bool bAbilityOwnsAlpha = (AbilComp && AbilComp->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing());
 		if (!bChargingOwnsAlpha && !bAbilityOwnsAlpha)
 		{
 			TargetLeftHandIKAlpha = 1.0f;

@@ -44,6 +44,8 @@
 #include "../DamageTypes/DamageType_Ranged.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
+#include "../DamageTypes/DamageType_Fragmentation.h"
+#include "Variant_Shooter/Grenades/GrenadeProjectile.h"
 #include "Curves/CurveFloat.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
@@ -704,7 +706,11 @@ void AShooterNPC::Tick(float DeltaTime)
 	// the tree only reacts to its own perception events, so the march must be driven from here.
 	const ATrackedTankNPC* const Tank = Cast<ATrackedTankNPC>(this);
 	const bool bTankRamming = Tank && Tank->IsRamming();
-	if (!bTankRamming) { TickSiegeMarch(DeltaTime); }
+	// A grenade at its feet: runs from it. Outranks everything below while it runs.
+	TickGrenadeEscape(DeltaTime);
+	const bool bEscaping = IsEscapingGrenade();
+
+	if (!bTankRamming && !bEscaping) { TickSiegeMarch(DeltaTime); }
 
 	// Lit in the face by a tactical light: backs off firing blind, then hides. Outranks the turret
 	// corner game and the siege march for as long as it runs (both yield to it below).
@@ -712,7 +718,7 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	// A turret under the hat overrides everything the NPC was doing, the march included: it plays
 	// the corner until the turret is gone.
-	if (!bTankRamming) { TickTurretCover(DeltaTime); }
+	if (!bTankRamming && !bEscaping) { TickTurretCover(DeltaTime); }
 
 	// [BENCH] State over the head, redrawn every frame: what this NPC is doing and why it is or is
 	// not shooting, in words, so the bench can be read by eye without the log.
@@ -2112,8 +2118,9 @@ void AShooterNPC::TickDazzle(float DeltaTime)
 		return;
 	}
 
-	// Movement-locked states own the body; the dazzle keeps counting and picks up after.
-	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled)
+	// Movement-locked states own the body; the dazzle keeps counting and picks up after. So does a
+	// run from a grenade.
+	if (bIsInKnockback || bIsCaptured || bIsLaunched || bCombatDisabled || IsEscapingGrenade())
 	{
 		return;
 	}
@@ -2592,7 +2599,7 @@ float AShooterNPC::AbsorbDamageWithShieldField(float Damage, struct FDamageEvent
 	}
 
 	AActor* const Attacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
-	return Shield->AbsorbDamage(Damage, Attacker, HitComponent, UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass));
+	return PastArmour + Shield->AbsorbDamage(Damage - PastArmour, Attacker, HitComponent, UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass));
 }
 
 float AShooterNPC::MeasureKnockdownRoom(const FVector& Direction, float Distance) const
@@ -2613,6 +2620,15 @@ float AShooterNPC::MeasureKnockdownRoom(const FVector& Direction, float Distance
 	FHitResult Hit;
 	if (!World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Pawn, FCollisionShape::MakeSphere(BodyRadius), Params))
 	{
+	// Fragments: part of a blast finds what the armour leaves open and goes straight to health. Only
+	// an armour that leaves something open: a whole-body one (no CoveredBones) takes all of it.
+	// @see UDamageType_Fragmentation
+	float PastArmour = 0.0f;
+	if (Shield->HasPartialCover())
+	{
+		PastArmour = Damage * UDamageType_Fragmentation::GetArmorBypassFraction(DamageEvent.DamageTypeClass);
+	}
+
 		return Distance;
 	}
 	return Hit.bStartPenetrating ? 0.0f : Hit.Distance;
@@ -2622,16 +2638,16 @@ bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Att
 {
 	UWorld* const World = GetWorld();
 	UCharacterMovementComponent* const MoveComp = GetCharacterMovement();
-	if (!HasAuthority() || !World || !Helmet || !MoveComp || bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
+	if (!HasAuthority() || !World || !MoveComp || bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
 	{
 		return false;
 	}
 
 	// Which side the hit came from, in the plane.
-	const FVector ToAttacker = Attacker ? (Attacker->GetActorLocation() - GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
+	const FVector ToAttacker = Request.bHasSource ? (Request.SourceLocation - GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
 	const bool bFromFront = ToAttacker.IsNearlyZero() || FVector::DotProduct(GetActorForwardVector(), ToAttacker) >= 0.0f;
-	UAnimMontage* const FallMontage = bFromFront ? Helmet->KnockdownMontageFront.Get() : Helmet->KnockdownMontageBack.Get();
-	const float Reach = bFromFront ? Helmet->KnockdownReachFront : Helmet->KnockdownReachBack;
+	UAnimMontage* const FallMontage = bFromFront ? Request.FrontMontage : Request.BackMontage;
+	const float Reach = bFromFront ? Request.ReachFront : Request.ReachBack;
 
 	// A fall needs a montage and must not start in the air; without either it is the stagger on the
 	// spot. Asked as "not falling", not "walking": a body nothing possesses (a bench target) has no
@@ -2641,6 +2657,66 @@ bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Att
 	float TravelScale = 1.0f;
 	if (bFall)
 	{
+{
+	if (!Helmet)
+	{
+		return false;
+	}
+	FKnockdownRequest Request;
+	Request.bHasSource = Attacker != nullptr;
+	Request.SourceLocation = Attacker ? Attacker->GetActorLocation() : FVector::ZeroVector;
+	Request.FrontMontage = Helmet->KnockdownMontageFront.Get();
+	Request.BackMontage = Helmet->KnockdownMontageBack.Get();
+	Request.ReachFront = Helmet->KnockdownReachFront;
+	Request.ReachBack = Helmet->KnockdownReachBack;
+	Request.FallbackDuration = Helmet->KnockdownDuration;
+	Request.Reason = TEXT("KNOCKED DOWN: hit in the head");
+	return ApplyKnockdownFrom(Request);
+}
+
+bool AShooterNPC::ApplyBlastKnockdown(const FVector& Origin, AActor* Attacker)
+{
+	auto Pick = [](const TArray<TObjectPtr<UAnimMontage>>& Pool) -> UAnimMontage*
+	{
+		TArray<UAnimMontage*> Valid;
+		for (UAnimMontage* const Montage : Pool)
+		{
+			if (Montage)
+			{
+				Valid.Add(Montage);
+			}
+		}
+		return Valid.Num() > 0 ? Valid[FMath::RandRange(0, Valid.Num() - 1)] : nullptr;
+	};
+
+	FKnockdownRequest Request;
+	Request.bHasSource = true;
+	Request.SourceLocation = Origin;
+	Request.FrontMontage = Pick(BlastKnockdownMontagesFront);
+	Request.BackMontage = Pick(BlastKnockdownMontagesBack);
+	if (!Request.BackMontage)
+	{
+		// No falls forwards: whichever side it came from, the body is turned to the blast and goes
+		// over backwards, away from it. Turned here so the fall below reads it as "from the front".
+		Request.BackMontage = Request.FrontMontage;
+		const FVector ToBlast = (Origin - GetActorLocation()).GetSafeNormal2D();
+		if (HasAuthority() && !bIsDead && !bIsInKnockback && !ToBlast.IsNearlyZero())
+		{
+			SetActorRotation(FRotator(0.0f, ToBlast.Rotation().Yaw, 0.0f));
+		}
+	}
+	Request.ReachFront = BlastKnockdownReach;
+	Request.ReachBack = BlastKnockdownReach;
+	Request.FallbackDuration = BlastKnockdownFallbackDuration;
+	Request.Reason = TEXT("KNOCKED DOWN: blast");
+
+	const bool bDown = ApplyKnockdownFrom(Request);
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s blast knockdown from %s by %s: %s"), *GetName(), *Origin.ToCompactString(),
+		*GetNameSafe(Attacker), bDown ? TEXT("down") : TEXT("refused"));
+	return bDown;
+}
+
+bool AShooterNPC::ApplyKnockdownFrom(const FKnockdownRequest& Request)
 		// From the front the body is turned to face the hit exactly, so it goes over straight back
 		// from it [author, 2026-10-12].
 		if (bFromFront && !ToAttacker.IsNearlyZero())
@@ -2649,6 +2725,9 @@ bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Att
 		}
 
 		// Where the montage carries the capsule, in the actor's own frame (the mesh sits turned in it).
+	// Running from a grenade turns the body by its movement, and a fall must not be turned by it.
+	EndGrenadeEscape();
+
 		const FVector MeshTravel = FallMontage->ExtractRootMotionFromTrackRange(0.0f, FallMontage->GetPlayLength(), FAnimExtractContext()).GetTranslation();
 		FVector ActorTravel = GetMesh()->GetRelativeRotation().RotateVector(MeshTravel);
 		ActorTravel.Z = 0.0f;
@@ -2694,7 +2773,7 @@ bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Att
 	}
 
 	UAnimMontage* const Chosen = bFall ? FallMontage : KnockbackMontage.Get();
-	const float Duration = bFall ? FallMontage->GetPlayLength() : Helmet->KnockdownDuration;
+	const float Duration = bFall ? FallMontage->GetPlayLength() : Request.FallbackDuration;
 	if (Duration <= 0.0f)
 	{
 		return false;
@@ -2735,8 +2814,8 @@ bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Att
 		Multicast_PlayKnockdown(Chosen, Length > 0.0f ? Length / Duration : 1.0f);
 	}
 
-	UFightRecorderSubsystem::NoteTactic(this, FName(TEXT("KNOCKED DOWN: hit in the head")));
-	UE_LOG(LogTemp, Log, TEXT("[HELMET_DEBUG] %s knocked down for %.1f s"), *GetName(), Duration);
+	UFightRecorderSubsystem::NoteTactic(this, FName(Request.Reason));
+	UE_LOG(LogTemp, Log, TEXT("[HELMET_DEBUG] %s knocked down for %.1f s (%s)"), *GetName(), Duration, Request.Reason);
 	return true;
 }
 
@@ -2762,6 +2841,512 @@ void AShooterNPC::Multicast_PlayKnockdown_Implementation(UAnimMontage* Montage, 
 			// ahead of the capsule the server is moving.
 			AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 			AnimInstance->Montage_Play(Montage, PlayRate);
+// ==================== Flashbang ====================
+// Docs/Grenades_Plan_2026-10-14.md. Authority, except the montage, which every machine plays.
+
+namespace FlashStun
+{
+	/** After the stun a soldier still sees spots: it backs off to cover from the thrower, firing blind
+	 *  (the tactical light's reaction, AShooterNPC::ApplyDazzle), for this long. */
+	static constexpr float AfterBlindSeconds = 1.5f;
+
+	static const FName Start(TEXT("Start"));
+	static const FName Loop(TEXT("Loop"));
+	static const FName End(TEXT("End"));
+}
+
+void AShooterNPC::ApplyFlashbang(float Duration, float BlindSpreadMultiplier, AActor* Thrower)
+{
+	if (!HasAuthority() || bIsDead || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	UFightRecorderSubsystem::NoteTactic(this, FName(*FString::Printf(TEXT("FLASHED: %.1f s"), Duration)));
+
+	// A drone, a turret, a tank: no body to stagger, they shoot blind instead.
+	if (IsA<AFlyingDrone>() || IsA<AKamikazeDroneNPC>() || IsA<ASniperTurretNPC>() || IsA<ATrackedTankNPC>())
+	{
+		ApplyDazzle(Thrower, Duration, BlindSpreadMultiplier, nullptr);
+		return;
+	}
+
+	TArray<UAnimMontage*> Pool;
+	for (UAnimMontage* const Montage : FlashStunMontages)
+	{
+		if (Montage)
+		{
+			Pool.Add(Montage);
+		}
+	}
+	UAnimMontage* const Chosen = Pool.Num() > 0 ? Pool[FMath::RandRange(0, Pool.Num() - 1)] : nullptr;
+
+	if (!ApplySectionedStun(Duration, Chosen))
+	{
+		// Already on the ground or held: it cannot be stunned on top, but it is blind all the same.
+		ApplyFireLock(Duration);
+	}
+
+	// Whoever it was fighting, it no longer sees: the target is dropped, and the eyes have to find it
+	// again once they clear.
+	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
+	{
+		AIController->ClearCurrentTarget();
+	}
+
+	if (Thrower)
+	{
+		ApplyDazzle(Thrower, Duration + FlashStun::AfterBlindSeconds, BlindSpreadMultiplier, nullptr);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s flashed for %.1f s (montage %s)"), *GetName(), Duration, *GetNameSafe(Chosen));
+}
+
+bool AShooterNPC::ApplySectionedStun(float Duration, UAnimMontage* Montage)
+{
+	if (!HasAuthority() || bIsDead || Duration <= 0.0f || bIsInKnockback || bIsCaptured || bIsLaunched)
+	{
+		return false;
+	}
+
+	// Running from a grenade turns the body by its movement; that has to be undone before the stun
+	// caches the rotation flags it will put back.
+	EndGrenadeEscape();
+
+	// Long enough for the way in and the way out to play whole.
+	if (Montage)
+	{
+		const int32 StartIndex = Montage->GetSectionIndex(FlashStun::Start);
+		const int32 EndIndex = Montage->GetSectionIndex(FlashStun::End);
+		if (StartIndex != INDEX_NONE && EndIndex != INDEX_NONE)
+		{
+			Duration = FMath::Max(Duration, Montage->GetSectionLength(StartIndex) + Montage->GetSectionLength(EndIndex));
+		}
+	}
+
+	// The existing stun does the freezing (path, fire, turning, the EMF) and lets go by itself. It
+	// plays the montage stretched to the time; the sectioned playing below replaces that.
+	ApplyExplosionStun(Duration, Montage);
+	if (!bIsInKnockback)
+	{
+		return false;
+	}
+	ApplyFireLock(Duration);
+
+	// In the air: the stun waits for the landing and plays the montage there, stretched. Rare enough.
+	if (bPendingAirborneStun || !Montage)
+	{
+		return true;
+	}
+
+	PlaySectionedStunLocal(Montage, Duration);
+	Multicast_PlaySectionedStun(Montage, Duration);
+	return true;
+}
+
+void AShooterNPC::Multicast_PlaySectionedStun_Implementation(UAnimMontage* Montage, float Duration)
+{
+	// The authority already plays it.
+	if (HasAuthority() || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+	PlaySectionedStunLocal(Montage, Duration);
+}
+
+void AShooterNPC::PlaySectionedStunLocal(UAnimMontage* Montage, float Duration)
+{
+	UAnimInstance* const AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	UWorld* const World = GetWorld();
+	if (!Montage || !AnimInstance || !World)
+	{
+		return;
+	}
+
+	AnimInstance->Montage_Play(Montage, 1.0f);
+
+	const int32 StartIndex = Montage->GetSectionIndex(FlashStun::Start);
+	const int32 LoopIndex = Montage->GetSectionIndex(FlashStun::Loop);
+	const int32 EndIndex = Montage->GetSectionIndex(FlashStun::End);
+	if (StartIndex == INDEX_NONE || LoopIndex == INDEX_NONE || EndIndex == INDEX_NONE)
+	{
+		// Not cut into sections: one piece, stretched to the time, as the plain stun does.
+		const float Length = Montage->GetPlayLength();
+		AnimInstance->Montage_SetPlayRate(Montage, Length > 0.0f ? Length / Duration : 1.0f);
+		UE_LOG(LogTemp, Warning, TEXT("[GRENADE_DEBUG] %s: stun montage %s has no Start/Loop/End sections, stretched"),
+			*GetName(), *GetNameSafe(Montage));
+		return;
+	}
+
+	// Start into the loop, the loop into itself; End is jumped to when it is time to come out.
+	AnimInstance->Montage_SetNextSection(FlashStun::Start, FlashStun::Loop, Montage);
+	AnimInstance->Montage_SetNextSection(FlashStun::Loop, FlashStun::Loop, Montage);
+
+	SectionedStunMontage = Montage;
+	const float ComeOutAt = FMath::Max(Montage->GetSectionLength(StartIndex), Duration - Montage->GetSectionLength(EndIndex));
+	World->GetTimerManager().SetTimer(SectionedStunTimer, this, &AShooterNPC::JumpSectionedStunToEnd, FMath::Max(0.05f, ComeOutAt), false);
+}
+
+void AShooterNPC::JumpSectionedStunToEnd()
+{
+	UAnimMontage* const Montage = SectionedStunMontage.Get();
+	UAnimInstance* const AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	if (Montage && AnimInstance && AnimInstance->Montage_IsPlaying(Montage))
+	{
+		AnimInstance->Montage_JumpToSection(FlashStun::End, Montage);
+	}
+	SectionedStunMontage = nullptr;
+}
+
+// ==================== Grenades: running from one ====================
+// Docs/Grenades_Plan_2026-10-14.md §4. Authority.
+
+namespace GrenadeEscape
+{
+	static TAutoConsoleVariable<int32> CVarEnabled(
+		TEXT("polarity.ai.grenadeescape"),
+		1,
+		TEXT("1: enemy foot soldiers who notice a grenade run from it. 0: they ignore grenades."),
+		ECVF_Default);
+
+	/** NPCs whose tree the escape paused, so only those are resumed. */
+	static TSet<TWeakObjectPtr<const AActor>> PausedTrees;
+
+	static void PauseTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (!Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (!Tree->IsPaused())
+			{
+				Tree->PauseLogic(TEXT("GrenadeEscape"));
+				PausedTrees.Add(NPC);
+			}
+		}
+	}
+
+	static void ResumeTree(AShooterNPC* NPC, AAIController* Controller)
+	{
+		if (!PausedTrees.Remove(NPC) || !Controller)
+		{
+			return;
+		}
+		if (UStateTreeAIComponent* const Tree = Controller->FindComponentByClass<UStateTreeAIComponent>())
+		{
+			if (Tree->IsPaused())
+			{
+				Tree->ResumeLogic(TEXT("GrenadeEscape"));
+			}
+		}
+	}
+
+	/** Arrival radius at the spot; widened as the engine widens "reached" (Docs/Gotchas/AI_StateTree.md). */
+	static constexpr float ArriveRadius = 60.0f;
+
+	static bool IsWalker(const AShooterNPC* NPC)
+	{
+		return !(NPC->IsA<AFlyingDrone>() || NPC->IsA<AKamikazeDroneNPC>() || NPC->IsA<ASniperTurretNPC>() || NPC->IsA<ATrackedTankNPC>());
+	}
+}
+
+void AShooterNPC::NotifyGrenadeThreat(AGrenadeProjectile* Grenade, const FVector& Center, float Radius, float TimeLeft)
+{
+	UWorld* const World = GetWorld();
+	if (!HasAuthority() || !World || !Grenade || bIsDead || !bEscapesGrenades || GrenadeEscape::CVarEnabled.GetValueOnGameThread() == 0
+		|| !GrenadeEscape::IsWalker(this) || bIsInKnockback || bIsCaptured || bIsLaunched || IsKnockedDown())
+	{
+		return;
+	}
+
+	// Already running from this one: follow where it now lies. One grenade at a time, the first.
+	if (GrenadeEscapePhase != EGrenadeEscapePhase::Inactive)
+	{
+		if (EscapeGrenade.Get() == Grenade)
+		{
+			if (FVector::Dist2D(EscapeCenter, Center) > 150.0f && GrenadeEscapePhase != EGrenadeEscapePhase::Reacting)
+			{
+				// It bounced on: the spot chosen may now be next to it. Choose again at once.
+				EscapeScanTimer = -1.0f;
+			}
+			EscapeCenter = Center;
+			EscapeRadius = Radius;
+		}
+		return;
+	}
+
+	// Out of its reach already: nothing to run from.
+	if (FVector::Dist(GetActorLocation(), Center) > Radius + GrenadeEscapeMargin * 0.5f)
+	{
+		return;
+	}
+
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	if (!AIController)
+	{
+		return;
+	}
+
+	// Seen: in the cone and a clear line from the eyes. A blinded soldier sees nothing.
+	bool bSees = false;
+	if (!IsDazzled() && AIController->IsInViewCone(Grenade->GetActorLocation()))
+	{
+		FVector Eyes;
+		FRotator View;
+		GetActorEyesViewPoint(Eyes, View);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(GrenadeNotice), false, this);
+		Params.AddIgnoredActor(Grenade);
+		FHitResult Blocked;
+		bSees = !World->LineTraceSingleByChannel(Blocked, Eyes, Grenade->GetActorLocation(), ECC_Visibility, Params);
+	}
+	const bool bHears = Grenade->WasHeardBy(GetActorLocation());
+	const bool bShouted = Grenade->WasShoutedTo(this);
+	if (!bSees && !bHears && !bShouted)
+	{
+		return;
+	}
+	if (bSees || bHears)
+	{
+		Grenade->ReportNoticedBy(this);
+	}
+
+	const float Now = World->GetTimeSeconds();
+	GrenadeEscapePhase = EGrenadeEscapePhase::Reacting;
+	EscapeGrenade = Grenade;
+	EscapeCenter = Center;
+	EscapeRadius = Radius;
+	EscapeMoveAt = Now + FMath::FRandRange(GrenadeReactionMin, FMath::Max(GrenadeReactionMin, GrenadeReactionMax));
+	EscapeGiveUpAt = Now + TimeLeft + 1.0f;
+	EscapeScanTimer = 0.0f;
+
+	const TCHAR* const How = bSees ? TEXT("seen") : (bHears ? TEXT("heard") : TEXT("shouted"));
+	UFightRecorderSubsystem::NoteTactic(this, FName(*FString::Printf(TEXT("GRENADE: %s, %.1f s left"), How, TimeLeft)));
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s noticed %s (%s) %.0f cm off, %.2f s left, moves in %.2f s"),
+		*GetName(), *GetNameSafe(Grenade), How, FVector::Dist(GetActorLocation(), Center), TimeLeft, EscapeMoveAt - Now);
+}
+
+bool AShooterNPC::ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) const
+{
+	UWorld* const World = GetWorld();
+	UNavigationSystemV1* const NavSys = World ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
+	const UCharacterMovementComponent* const Move = GetCharacterMovement();
+	if (!NavSys || !Move)
+	{
+		return false;
+	}
+
+	const FVector Me = GetActorLocation();
+	FVector Away = (Me - EscapeCenter).GetSafeNormal2D();
+	if (Away.IsNearlyZero())
+	{
+		Away = -GetActorForwardVector().GetSafeNormal2D();
+	}
+
+	// A sprint, roughly: the walk speed a sprint is built on, and a bit.
+	const float Speed = FMath::Max(Move->MaxWalkSpeed, 300.0f) * 1.3f;
+	const float SafeOut = EscapeRadius + GrenadeEscapeMargin;
+
+	FCollisionQueryParams LineParams(SCENE_QUERY_STAT(GrenadeEscapeCover), false, this);
+	LineParams.AddIgnoredActor(EscapeGrenade.Get());
+
+	static constexpr float Angles[] = { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f, 110.0f, -110.0f };
+	float BestScore = -TNumericLimits<float>::Max();
+	bool bFound = false;
+
+	for (const float Angle : Angles)
+	{
+		const FVector Direction = Away.RotateAngleAxis(Angle, FVector::UpVector);
+
+		// Two spots on each line: just past a wall from it (close, if there is one), and out of reach.
+		const float Distances[] = { EscapeRadius * 0.55f, SafeOut };
+		for (const float FromCenter : Distances)
+		{
+			FNavLocation OnNav;
+			if (!NavSys->ProjectPointToNavigation(EscapeCenter + Direction * FromCenter, OnNav, FVector(300.0f, 300.0f, 300.0f)))
+			{
+				continue;
+			}
+			const FVector Spot = OnNav.Location;
+
+			// A wall between the grenade and the chest at the spot: the blast stops at it as well.
+			FHitResult Wall;
+			const bool bShielded = World->LineTraceSingleByChannel(Wall, EscapeCenter + FVector(0.0f, 0.0f, 40.0f),
+				Spot + FVector(0.0f, 0.0f, 100.0f), ECC_Visibility, LineParams);
+			const bool bOut = FVector::Dist(Spot, EscapeCenter) >= EscapeRadius + GrenadeEscapeMargin * 0.5f;
+
+			// The close spot is only worth a path search when it is behind something.
+			if (!bOut && !bShielded)
+			{
+				continue;
+			}
+
+			UNavigationPath* const Path = NavSys->FindPathToLocationSynchronously(World, Me, Spot, const_cast<AShooterNPC*>(this));
+			if (!Path || !Path->IsValid() || Path->IsPartial())
+			{
+				continue;
+			}
+
+			const float Seconds = Path->GetPathLength() / Speed;
+			// In time: the soonest wins. Too late anyway: the farthest from the grenade wins.
+			const float Score = Seconds <= TimeLeft - 0.1f ? 1000.0f - Seconds : FVector::Dist(Spot, EscapeCenter) * 0.1f - Seconds;
+			if (Score > BestScore)
+			{
+				BestScore = Score;
+				OutGoal = Spot;
+				bFound = true;
+			}
+		}
+	}
+	return bFound;
+}
+
+void AShooterNPC::TickGrenadeEscape(float DeltaTime)
+{
+	if (GrenadeEscapePhase == EGrenadeEscapePhase::Inactive || !HasAuthority())
+	{
+		return;
+	}
+
+	UWorld* const World = GetWorld();
+	AGrenadeProjectile* const Grenade = EscapeGrenade.Get();
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+
+	// Gone off, gone, or taken over by something that owns the body (a stun, a fall, a grab).
+	if (!World || !AIController || bIsDead || !Grenade || Grenade->HasDetonated() || Now > EscapeGiveUpAt
+		|| bIsInKnockback || bIsCaptured || bIsLaunched)
+	{
+		EndGrenadeEscape();
+		return;
+	}
+
+	UApexMovementComponent* const Apex = GetApexMovement();
+
+	if (GrenadeEscapePhase == EGrenadeEscapePhase::Reacting)
+	{
+		if (Now < EscapeMoveAt)
+		{
+			return;
+		}
+
+		// Take the body over, as the dazzle does: the corner game ends, the tree stops giving orders.
+		if (TurretCoverPhase != ETurretCoverPhase::Inactive)
+		{
+			EndTurretCover();
+		}
+		if (DazzlePhase != EDazzlePhase::Inactive)
+		{
+			EndDazzle();
+		}
+		GrenadeEscape::PauseTree(this, AIController);
+		StopShooting();
+
+		if (ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal))
+		{
+			GrenadeEscapePhase = EGrenadeEscapePhase::Running;
+
+			// Turned and running, not backing off with the gun up.
+			if (UCharacterMovementComponent* const CMC = GetCharacterMovement())
+			{
+				CMC->bOrientRotationToMovement = true;
+				CMC->bUseControllerDesiredRotation = false;
+			}
+			if (Apex)
+			{
+				Apex->StartSprint();
+			}
+			AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
+			UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s runs to %s (%.0f cm from the grenade)"),
+				*GetName(), *EscapeGoal.ToCompactString(), FVector::Dist(EscapeGoal, EscapeCenter));
+		}
+		else
+		{
+			// Nowhere to go: down where it stands.
+			GrenadeEscapePhase = EGrenadeEscapePhase::Holding;
+			SetTurretPeekCrouch(/*bCrouched*/ true);
+			UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s has nowhere to run, gets down"), *GetName());
+		}
+		EscapeScanTimer = 0.25f;
+		return;
+	}
+
+	if (bWantsToShoot)
+	{
+		StopShooting();
+	}
+
+	if (GrenadeEscapePhase == EGrenadeEscapePhase::Running)
+	{
+		const float Arrive = GrenadeEscape::ArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+		if (FVector::Dist2D(GetActorLocation(), EscapeGoal) <= Arrive)
+		{
+			GrenadeEscapePhase = EGrenadeEscapePhase::Holding;
+			AIController->StopMovement();
+			if (Apex)
+			{
+				Apex->StopSprint();
+			}
+			SetTurretPeekCrouch(/*bCrouched*/ true);
+			return;
+		}
+
+		EscapeScanTimer -= DeltaTime;
+		if (EscapeScanTimer <= 0.0f)
+		{
+			// Bounced on (NotifyGrenadeThreat set the timer below zero), or the spot is next to it.
+			if (EscapeScanTimer < -0.5f || FVector::Dist(EscapeGoal, EscapeCenter) < EscapeRadius * 0.5f)
+			{
+				ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal);
+			}
+			EscapeScanTimer = 0.25f;
+
+			// Re-issued only while the path follower is not already taking it there.
+			const UPathFollowingComponent* const Path = AIController->GetPathFollowingComponent();
+			const bool bMovingThere = Path && Path->GetStatus() == EPathFollowingStatus::Moving
+				&& FVector::Dist2D(Path->GetPathDestination(), EscapeGoal) < 50.0f;
+			if (!bMovingThere)
+			{
+				AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
+			}
+		}
+	}
+}
+
+void AShooterNPC::EndGrenadeEscape()
+{
+	if (GrenadeEscapePhase == EGrenadeEscapePhase::Inactive)
+	{
+		return;
+	}
+
+	const bool bWasActing = GrenadeEscapePhase != EGrenadeEscapePhase::Reacting;
+	GrenadeEscapePhase = EGrenadeEscapePhase::Inactive;
+	EscapeGrenade = nullptr;
+
+	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
+	{
+		if (bWasActing)
+		{
+			// Its own move only: the tree is still paused, nobody else has given one.
+			AIController->StopMovement();
+		}
+		GrenadeEscape::ResumeTree(this, AIController);
+	}
+
+	if (UApexMovementComponent* const Apex = GetApexMovement())
+	{
+		Apex->StopSprint();
+	}
+	if (bWasActing)
+	{
+		SetTurretPeekCrouch(/*bCrouched*/ false);
+	}
+	RestoreGroundCombatRotation(this);
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s back to the fight"), *GetName());
+}
+
 		}
 	}
 }
@@ -3730,6 +4315,9 @@ void AShooterNPC::Multicast_OnRecycled_Implementation(FVector NewLocation, FRota
 		return;
 	}
 
+	// Running from a grenade: the tree it paused is let go before the body is.
+	EndGrenadeEscape();
+
 	// Position first, then the body. The other way round shows the corpse standing up where it died
 	// for however long it takes the move to arrive, which is the entire reason this carries the
 	// transform instead of trusting replication order.
@@ -4521,6 +5109,8 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 
 	// And tell everybody else, carrying the transform so the revive and the move land together.
 	Multicast_OnRecycled(NewLocation, NewRotation);
+
+	EndGrenadeEscape();
 
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::ResetForPool — %s recycled at %s"), *GetName(), *NewLocation.ToString());
 }

@@ -22,6 +22,15 @@ void UAbilityHandler::Initialize(UAbilityComponent* InOwningComponent, UAbilityD
 	CurrentLevel = FMath::Clamp(InLevel, 1, MaxLevel);
 }
 
+void UAbilityHandler::InitializeStandalone(AShooterCharacter* InCharacter, UAbilityDefinition* InDefinition, TFunction<void(bool)> OnFinished)
+{
+	OwningComponent = nullptr;
+	Definition = InDefinition;
+	OwningCharacter = InCharacter;
+	CurrentLevel = 1;
+	StandaloneFinished = MoveTemp(OnFinished);
+}
+
 void UAbilityHandler::SetLevel(int32 NewLevel)
 {
 	const int32 MaxLevel = Definition ? FMath::Max(1, Definition->GetMaxLevel()) : 1;
@@ -149,6 +158,10 @@ void UAbilityHandler::NotifyAbilityComplete()
 	{
 		OwningComponent->NotifyAbilityCompletedFromHandler(this);
 	}
+	else if (StandaloneFinished)
+	{
+		StandaloneFinished(true);
+	}
 }
 
 void UAbilityHandler::NotifyAbilityCancelled()
@@ -156,5 +169,9 @@ void UAbilityHandler::NotifyAbilityCancelled()
 	if (OwningComponent)
 	{
 		OwningComponent->NotifyAbilityCancelledFromHandler(this);
+	}
+	else if (StandaloneFinished)
+	{
+		StandaloneFinished(false);
 	}
 }
