@@ -750,10 +750,6 @@ protected:
 	/** Drive the dazzle reaction. Called from Tick. */
 	void TickDazzle(float DeltaTime);
 
-	/** Leave the dazzle, whatever phase it is in. */
-	void EndDazzle();
-
-	/** Freezer cones this enemy is standing in, with the overlay each wants shown. */
 	enum class EGrenadeEscapePhase : uint8
 	{
 		Inactive,
@@ -786,6 +782,10 @@ protected:
 	FTimerHandle SectionedStunTimer;
 	TWeakObjectPtr<UAnimMontage> SectionedStunMontage;
 
+	/** Leave the dazzle, whatever phase it is in. */
+	void EndDazzle();
+
+	/** Freezer cones this enemy is standing in, with the overlay each wants shown. */
 	TMap<TWeakObjectPtr<AActor>, TWeakObjectPtr<UMaterialInterface>> TacticalFreezeSources;
 
 	/** Strongest flyer time rate among TacticalFreezeSources. */

@@ -42,10 +42,10 @@
 #include "Variant_Shooter/Shield/HitZoneComponent.h"
 #include "Variant_Shooter/Shield/HelmetComponent.h"
 #include "../DamageTypes/DamageType_Ranged.h"
-#include "Engine/DamageEvents.h"
-#include "Engine/OverlapResult.h"
 #include "../DamageTypes/DamageType_Fragmentation.h"
 #include "Variant_Shooter/Grenades/GrenadeProjectile.h"
+#include "Engine/DamageEvents.h"
+#include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
@@ -2598,6 +2598,15 @@ float AShooterNPC::AbsorbDamageWithShieldField(float Damage, struct FDamageEvent
 		}
 	}
 
+	// Fragments: part of a blast finds what the armour leaves open and goes straight to health. Only
+	// an armour that leaves something open: a whole-body one (no CoveredBones) takes all of it.
+	// @see UDamageType_Fragmentation
+	float PastArmour = 0.0f;
+	if (Shield->HasPartialCover())
+	{
+		PastArmour = Damage * UDamageType_Fragmentation::GetArmorBypassFraction(DamageEvent.DamageTypeClass);
+	}
+
 	AActor* const Attacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
 	return PastArmour + Shield->AbsorbDamage(Damage - PastArmour, Attacker, HitComponent, UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass));
 }
@@ -2620,43 +2629,12 @@ float AShooterNPC::MeasureKnockdownRoom(const FVector& Direction, float Distance
 	FHitResult Hit;
 	if (!World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Pawn, FCollisionShape::MakeSphere(BodyRadius), Params))
 	{
-	// Fragments: part of a blast finds what the armour leaves open and goes straight to health. Only
-	// an armour that leaves something open: a whole-body one (no CoveredBones) takes all of it.
-	// @see UDamageType_Fragmentation
-	float PastArmour = 0.0f;
-	if (Shield->HasPartialCover())
-	{
-		PastArmour = Damage * UDamageType_Fragmentation::GetArmorBypassFraction(DamageEvent.DamageTypeClass);
-	}
-
 		return Distance;
 	}
 	return Hit.bStartPenetrating ? 0.0f : Hit.Distance;
 }
 
 bool AShooterNPC::ApplyHeadKnockdown(const UHelmetComponent* Helmet, AActor* Attacker)
-{
-	UWorld* const World = GetWorld();
-	UCharacterMovementComponent* const MoveComp = GetCharacterMovement();
-	if (!HasAuthority() || !World || !MoveComp || bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
-	{
-		return false;
-	}
-
-	// Which side the hit came from, in the plane.
-	const FVector ToAttacker = Request.bHasSource ? (Request.SourceLocation - GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
-	const bool bFromFront = ToAttacker.IsNearlyZero() || FVector::DotProduct(GetActorForwardVector(), ToAttacker) >= 0.0f;
-	UAnimMontage* const FallMontage = bFromFront ? Request.FrontMontage : Request.BackMontage;
-	const float Reach = bFromFront ? Request.ReachFront : Request.ReachBack;
-
-	// A fall needs a montage and must not start in the air; without either it is the stagger on the
-	// spot. Asked as "not falling", not "walking": a body nothing possesses (a bench target) has no
-	// movement mode at all, and it still falls, on the spot, because nothing carries its capsule.
-	bool bFall = FallMontage && GetMesh() && !MoveComp->IsFalling() && !MoveComp->IsFlying();
-	float FallYaw = GetActorRotation().Yaw;
-	float TravelScale = 1.0f;
-	if (bFall)
-	{
 {
 	if (!Helmet)
 	{
@@ -2717,6 +2695,31 @@ bool AShooterNPC::ApplyBlastKnockdown(const FVector& Origin, AActor* Attacker)
 }
 
 bool AShooterNPC::ApplyKnockdownFrom(const FKnockdownRequest& Request)
+{
+	UWorld* const World = GetWorld();
+	UCharacterMovementComponent* const MoveComp = GetCharacterMovement();
+	if (!HasAuthority() || !World || !MoveComp || bIsDead || bIsInKnockback || bIsCaptured || bIsLaunched)
+	{
+		return false;
+	}
+
+	// Running from a grenade turns the body by its movement, and a fall must not be turned by it.
+	EndGrenadeEscape();
+
+	// Which side the hit came from, in the plane.
+	const FVector ToAttacker = Request.bHasSource ? (Request.SourceLocation - GetActorLocation()).GetSafeNormal2D() : FVector::ZeroVector;
+	const bool bFromFront = ToAttacker.IsNearlyZero() || FVector::DotProduct(GetActorForwardVector(), ToAttacker) >= 0.0f;
+	UAnimMontage* const FallMontage = bFromFront ? Request.FrontMontage : Request.BackMontage;
+	const float Reach = bFromFront ? Request.ReachFront : Request.ReachBack;
+
+	// A fall needs a montage and must not start in the air; without either it is the stagger on the
+	// spot. Asked as "not falling", not "walking": a body nothing possesses (a bench target) has no
+	// movement mode at all, and it still falls, on the spot, because nothing carries its capsule.
+	bool bFall = FallMontage && GetMesh() && !MoveComp->IsFalling() && !MoveComp->IsFlying();
+	float FallYaw = GetActorRotation().Yaw;
+	float TravelScale = 1.0f;
+	if (bFall)
+	{
 		// From the front the body is turned to face the hit exactly, so it goes over straight back
 		// from it [author, 2026-10-12].
 		if (bFromFront && !ToAttacker.IsNearlyZero())
@@ -2725,9 +2728,6 @@ bool AShooterNPC::ApplyKnockdownFrom(const FKnockdownRequest& Request)
 		}
 
 		// Where the montage carries the capsule, in the actor's own frame (the mesh sits turned in it).
-	// Running from a grenade turns the body by its movement, and a fall must not be turned by it.
-	EndGrenadeEscape();
-
 		const FVector MeshTravel = FallMontage->ExtractRootMotionFromTrackRange(0.0f, FallMontage->GetPlayLength(), FAnimExtractContext()).GetTranslation();
 		FVector ActorTravel = GetMesh()->GetRelativeRotation().RotateVector(MeshTravel);
 		ActorTravel.Z = 0.0f;
@@ -2819,28 +2819,6 @@ bool AShooterNPC::ApplyKnockdownFrom(const FKnockdownRequest& Request)
 	return true;
 }
 
-bool AShooterNPC::IsKnockedDown() const
-{
-	const UWorld* const World = GetWorld();
-	return World && !bIsDead && World->GetTimeSeconds() < KnockdownEndTime;
-}
-
-void AShooterNPC::Multicast_PlayKnockdown_Implementation(UAnimMontage* Montage, float PlayRate)
-{
-	// The authority already plays it from the stun itself.
-	if (!Montage || HasAuthority() || GetNetMode() == NM_DedicatedServer)
-	{
-		return;
-	}
-
-	if (USkeletalMeshComponent* const TPMesh = GetMesh())
-	{
-		if (UAnimInstance* const AnimInstance = TPMesh->GetAnimInstance())
-		{
-			// A fall carries root motion: taken out of the pose here as well, or the body would run
-			// ahead of the capsule the server is moving.
-			AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
-			AnimInstance->Montage_Play(Montage, PlayRate);
 // ==================== Flashbang ====================
 // Docs/Grenades_Plan_2026-10-14.md. Authority, except the montage, which every machine plays.
 
@@ -3347,6 +3325,28 @@ void AShooterNPC::EndGrenadeEscape()
 	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s back to the fight"), *GetName());
 }
 
+bool AShooterNPC::IsKnockedDown() const
+{
+	const UWorld* const World = GetWorld();
+	return World && !bIsDead && World->GetTimeSeconds() < KnockdownEndTime;
+}
+
+void AShooterNPC::Multicast_PlayKnockdown_Implementation(UAnimMontage* Montage, float PlayRate)
+{
+	// The authority already plays it from the stun itself.
+	if (!Montage || HasAuthority() || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	if (USkeletalMeshComponent* const TPMesh = GetMesh())
+	{
+		if (UAnimInstance* const AnimInstance = TPMesh->GetAnimInstance())
+		{
+			// A fall carries root motion: taken out of the pose here as well, or the body would run
+			// ahead of the capsule the server is moving.
+			AnimInstance->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+			AnimInstance->Montage_Play(Montage, PlayRate);
 		}
 	}
 }
@@ -4141,6 +4141,9 @@ void AShooterNPC::Die()
 		return;
 	}
 
+	// Running from a grenade: the tree it paused is let go before the body is.
+	EndGrenadeEscape();
+
 	// raise the dead flag
 	bIsDead = true;
 	UFightRecorderSubsystem::NoteDeath(this, LastKillingDamageCauser);
@@ -4314,9 +4317,6 @@ void AShooterNPC::Multicast_OnRecycled_Implementation(FVector NewLocation, FRota
 	{
 		return;
 	}
-
-	// Running from a grenade: the tree it paused is let go before the body is.
-	EndGrenadeEscape();
 
 	// Position first, then the body. The other way round shows the corpse standing up where it died
 	// for however long it takes the move to arrive, which is the entire reason this carries the
@@ -4910,6 +4910,8 @@ void AShooterNPC::DeferredDestruction()
 // the next one would have spawned.
 void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRotation)
 {
+	EndGrenadeEscape();
+
 	// --- Core state ---
 	bIsDead = false;
 	bSuppressDeathDrops = false;
@@ -5109,8 +5111,6 @@ void AShooterNPC::ResetForPool(const FVector& NewLocation, const FRotator& NewRo
 
 	// And tell everybody else, carrying the transform so the revive and the move land together.
 	Multicast_OnRecycled(NewLocation, NewRotation);
-
-	EndGrenadeEscape();
 
 	UE_LOG(LogTemp, Warning, TEXT("ShooterNPC::ResetForPool — %s recycled at %s"), *GetName(), *NewLocation.ToString());
 }
