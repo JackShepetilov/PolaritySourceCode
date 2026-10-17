@@ -3,6 +3,7 @@
 #include "Variant_Shooter/Grenades/AbilityHandler_Grenade.h"
 #include "Variant_Shooter/Grenades/GrenadeDefinition.h"
 #include "Variant_Shooter/Grenades/GrenadeProjectile.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition_FPV.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 #include "Engine/World.h"
@@ -14,6 +15,17 @@ void UAbilityHandler_Grenade::SpawnThrown(const FVector& Location, const FRotato
 	UWorld* const World = Caster ? Caster->GetWorld() : nullptr;
 	if (!Def || !World)
 	{
+		return;
+	}
+
+	// A drone, not a projectile: it flies by itself. @see UGrenadeDefinition_FPV
+	if (const UGrenadeDefinition_FPV* const FPV = Cast<UGrenadeDefinition_FPV>(Def))
+	{
+		UInventoryComponent* const DroneBag = Caster->FindComponentByClass<UInventoryComponent>();
+		if (FPV->DroneClass && DroneBag && DroneBag->ConsumeGrenades(Def, 1) >= 1)
+		{
+			FPV->LaunchDrone(Caster, Location, Rotation);
+		}
 		return;
 	}
 

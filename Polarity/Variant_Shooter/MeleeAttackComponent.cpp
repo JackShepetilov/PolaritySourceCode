@@ -32,6 +32,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_MomentumBonus.h"
 #include "Variant_Shooter/DamageTypes/DamageType_Dropkick.h"
 #include "Arena/SportsBall.h"
+#include "Variant_Shooter/ShoveComponent.h"
 
 UMeleeAttackComponent::UMeleeAttackComponent()
 {
@@ -2397,6 +2398,12 @@ void UMeleeAttackComponent::ApplyKnockbackOnAuthority(AActor* Target, const FVec
 		return;
 	}
 
+	// One of our characters, player or NPC: the shove, with its reaction. @see UShoveComponent
+	if (UShoveComponent::TryShove(Target, AttackerLocation, Distance, Duration, nullptr))
+	{
+		return;
+	}
+
 	// An NPC's movement is the server's, so the server's shove is the whole story.
 	if (AShooterNPC* NPC = Cast<AShooterNPC>(Target))
 	{
@@ -3179,6 +3186,23 @@ void UMeleeAttackComponent::ExitMeleeMeshView()
 {
 	SwitchToFirstPersonMesh();
 	DrawWeaponBack();
+}
+
+void UMeleeAttackComponent::PlayExternalAnimation(const FMeleeAnimationData& Animation)
+{
+	// SwitchToMeleeMesh places the mesh by the selected animation's offsets and hides its bones, the
+	// way every swing is placed. Selected first, so the view comes up for this animation and not for
+	// whichever swing ran last.
+	SelectedAnimationData = &Animation;
+	EnterMeleeMeshView();
+	PlayMontageOnMeleeMesh(Animation.AttackMontage, Animation.BasePlayRate);
+}
+
+void UMeleeAttackComponent::ExitExternalAnimation()
+{
+	ExitMeleeMeshView();
+	// The caller's data must not be the selection of the next ordinary swing.
+	SelectedAnimationData = nullptr;
 }
 
 void UMeleeAttackComponent::PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate)

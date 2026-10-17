@@ -43,8 +43,10 @@ public:
 	// The notes below are free to call from anywhere on the authority: each one returns at once when
 	// nothing is being written.
 
-	/** One round left Shooter's barrel. bPinFire: fired to keep a head down, not to hit. */
-	static void NoteShot(const AActor* Shooter, const AActor* Target, bool bPinFire);
+	/** One round left Shooter's barrel. bPinFire: fired to keep a head down, not to hit. bMeantToMiss:
+	 *  any round its shooter sent past on purpose (fire discipline, suppressed, pinning). Written as
+	 *  1 for pin fire, 2 for the other deliberate misses; both count as pin in the summary. */
+	static void NoteShot(const AActor* Shooter, const AActor* Target, bool bPinFire, bool bMeantToMiss = false);
 
 	/** Victim lost Damage. The one behind it is worked out from the instigator and the causer. */
 	static void NoteDamage(const AActor* Victim, const AController* InstigatedBy, const AActor* Causer, float Damage, float HealthAfter);

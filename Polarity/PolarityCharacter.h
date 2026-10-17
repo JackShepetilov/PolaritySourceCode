@@ -99,6 +99,15 @@ private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UCameraShakeComponent* CameraShakeComponent;
 
+	/** Being shoved by a melee hit: reaction montage plus an exact push. One for players and NPCs.
+	 *  @see UShoveComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<class UShoveComponent> ShoveComponent;
+
+	/** A player running, sliding, landing hard is heard by the soldiers. @see UFootstepNoiseComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<class UFootstepNoiseComponent> FootstepNoise;
+
 protected:
 
 	/** Jump Input Action */
@@ -167,6 +176,10 @@ public:
 	/** Can the player sprint */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")
 	bool bCanSprint = true;
+
+	/** May a double press of sprint start the tactical sprint now. The shooter asks the gun in hand
+	 *  (weapon mastery); nothing else may. Asked on the controlling machine only. */
+	virtual bool CanTacticalSprint() const { return false; }
 
 	/** Master switch for air jumps. How many there are is the Extra Jump upgrade's (jump slot). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Abilities")

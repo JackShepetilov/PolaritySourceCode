@@ -969,6 +969,15 @@ void UUpgradeManagerComponent::NotifyOwnerDealtDamage(AActor* Target, float Dama
 
 void UUpgradeManagerComponent::NotifyWeaponDealtDamage(AShooterWeapon* Weapon, AActor* Target, float Damage, bool bKilled)
 {
+	// The owning machine's clock for the fast swap after a kill (weapon mastery).
+	if (bKilled)
+	{
+		if (AShooterCharacter* const Character = Cast<AShooterCharacter>(GetOwner()))
+		{
+			Character->NoteKill();
+		}
+	}
+
 	for (auto& Pair : ActiveUpgrades)
 	{
 		if (Pair.Value)

@@ -272,6 +272,9 @@ public:
 	/** Has somebody hostile in view right now. */
 	bool SeesAnyEnemy() const { return SeenEnemies.Num() > 0; }
 
+	/** A foot soldier (it carries a cover finder): the one the knowledge and the fire discipline are for. */
+	bool IsInfantry() const { return bInfantry; }
+
 	/** Turned towards a sound or a shout, and not yet seen who. */
 	bool IsLookingAround() const { return bLookingAround; }
 
@@ -279,6 +282,15 @@ public:
 	 *  shooter's side hears it and knows the place; the nearest few with nobody in view turn to it.
 	 *  Called by the gun, so it does not depend on a hearing sense being set up in a blueprint. */
 	static void ReportShotNoise(const UObject* WorldContext, APawn* Shooter, const FVector& Location, float Range);
+
+	/** Somebody running, sliding, landing hard at Location, heard within Range. Everybody in reach
+	 *  not of its side is alerted; the nearest few with nobody in view turn to it and hold there.
+	 *  @see UFootstepNoiseComponent */
+	static void ReportMovementNoise(const UObject* WorldContext, APawn* Mover, const FVector& Location, float Range);
+
+	/** Its head is splitting (a stress grenade): it neither calls out nor turns to a call.
+	 *  @see UAIAccuracyComponent::ApplyHeadache */
+	bool HasHeadache() const;
 
 	/** This NPC was hit by Source. It learns a direction; with the shot heard, the place. */
 	void NoteHitFrom(AActor* Source, float Damage);

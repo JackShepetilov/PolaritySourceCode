@@ -99,6 +99,15 @@ public:
 	 *  needs the position of the BODY it is trying to hit. */
 	virtual AActor* GetWeaponAimActor() const { return nullptr; }
 
+	/** The round being fired now was meant to miss: asked right after GetWeaponTargetLocation. The
+	 *  weapon then fires it down exactly that line, with no spread cone of its own and no turning it
+	 *  onto the view direction, either of which can put a near miss back into the body. */
+	virtual bool IsCurrentShotDeliberateMiss() const { return false; }
+
+	/** The round being fired now was already placed by its shooter, to land or to miss: fired down
+	 *  exactly that line, as a deliberate miss is. */
+	virtual bool IsCurrentShotPlaced() const { return IsCurrentShotDeliberateMiss(); }
+
 	/** Gives a weapon of this class to the owner */
 	virtual void AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) = 0;
 

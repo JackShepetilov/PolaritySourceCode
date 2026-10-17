@@ -621,6 +621,21 @@ protected:
 	float RepositionSide = 1.0f;
 	float RepositionTimer = 0.0f;
 
+	/** Where the current slide started (degrees): the slide eases out of it and into the far side. */
+	float RepositionStartDeg = 0.0f;
+
+	/** The target as the flight sees it: its feet (what the hold hangs off) and its velocity (what
+	 *  the strike leads by), both smoothed, for SmoothedTarget only. */
+	FVector HoldAnchor = FVector::ZeroVector;
+	FVector SmoothedTargetVelocity = FVector::ZeroVector;
+	TWeakObjectPtr<APawn> SmoothedTarget;
+
+	/** The velocity the hand-driven flight flies with. Its own copy, not the CMC's Velocity: the CMC's
+	 *  is open to anything that stops a pawn (an AI StopMovement, a path abort), and a write there
+	 *  used to zero the flight every half second. FlyMove copies it into the CMC for replication,
+	 *  audio and tilt; outside drivers (launch, knockback) hand theirs back explicitly. */
+	FVector FlightVelocity = FVector::ZeroVector;
+
 	/** Velocity last frame and a smoothed acceleration, for the tilt and the motor pitch. */
 	FVector LastVelocity = FVector::ZeroVector;
 	FVector SmoothedAcceleration = FVector::ZeroVector;

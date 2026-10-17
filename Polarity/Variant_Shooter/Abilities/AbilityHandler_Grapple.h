@@ -44,14 +44,16 @@ public:
 	 *  Static and public because the brackets have to run the SAME rule on the owning client that
 	 *  the server checks the claim against, or the brackets promise a fetch the throw then refuses.
 	 *  Def is whichever grapple definition the fetch uses; it need not be an equipped ability.
-	 *  Cheap enough for a frame: one pass over the registered fetchables, one trace for the winner. */
+	 *  Cheap enough for a frame: one pass over the registered fetchables, one trace for the winner.
+	 *  RadiusOverride above zero replaces Def's reach: the hand pickup uses the same rule up close. */
 	static AActor* FindFetchTarget(const class AShooterCharacter* Caster,
-		const class UAbilityDefinition_Grapple* Def);
+		const class UAbilityDefinition_Grapple* Def, float RadiusOverride = -1.0f);
 
 	/** Whether Target can be fetched by this character right now, ignoring where they look.
-	 *  ExtraRadius is the round-trip slack the server grants a client's claim. */
+	 *  ExtraRadius is the round-trip slack the server grants a client's claim. RadiusOverride as in
+	 *  FindFetchTarget. */
 	static bool IsFetchable(const class AShooterCharacter* Caster, const AActor* Target,
-		const class UAbilityDefinition_Grapple* Def, float ExtraRadius = 0.0f);
+		const class UAbilityDefinition_Grapple* Def, float ExtraRadius = 0.0f, float RadiusOverride = -1.0f);
 
 protected:
 	/** The hook has arrived: attach the line and start pulling. */

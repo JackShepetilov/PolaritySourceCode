@@ -26,6 +26,8 @@
 #include "PlayerSuppressionComponent.generated.h"
 
 class APostProcessVolume;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
 
 UCLASS(ClassGroup = (Polarity), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UPlayerSuppressionComponent : public UActorComponent
@@ -74,6 +76,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Suppression|Effects", meta = (ClampMin = "0.0"))
 	float VignetteAtFull = 1.4f;
 
+	// ==================== Headache (the microwave grenade) ====================
+	// [author, 2026-10-15] The player is a soldier like the ones the grenade dulls: inside its reach the
+	// sight sways harder (from the hip too) and comes up slower, there is no sprint and no slide, and
+	// the picture throbs at the edges in time with the pulses. The suppression vignette is not used
+	// for it: the headache has a post process material of its own.
+
+	/** Sway at full headache, degrees. Applies from the hip as well, less. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Suppression|Headache", meta = (ClampMin = "0.0", Units = "deg"))
+	float HeadacheSwayDegreesAtFull = 1.4f;
+
+	/** Share of the sway left from the hip (aiming gives all of it). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Suppression|Headache", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HeadacheHipSwayShare = 0.4f;
+
+	/** Seconds the picture takes to clear once the headache runs out. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Suppression|Headache", meta = (ClampMin = "0.05", Units = "s"))
+	float HeadacheFadeSeconds = 1.5f;
+
+	/** The picture: a post process material with a scalar "Strength" 0..1. Set in the Blueprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Suppression|Headache")
+	TObjectPtr<UMaterialInterface> HeadacheMaterial;
+
+	/** A headache of Strength (0..1) held for Seconds, then fading. Renewed by every pulse of the
+	 *  grenade. Authority; reaches the owning machine on its own. */
+	void ApplyHeadache(float Strength, float Seconds);
+
+	/** 0 none, 1 as bad as it gets; fades out after it stops being renewed. */
+	float GetHeadacheLevel() const;
+
 	// ==================== API ====================
 
 	/** A hostile round left Start along Direction. Every player it passes close to, with nothing in
@@ -101,6 +132,21 @@ private:
 
 	UFUNCTION(Client, Unreliable)
 	void Client_AddSuppression(float Amount);
+
+	UFUNCTION(Client, Unreliable)
+	void Client_ApplyHeadache(float Strength, float Seconds);
+
+	void ApplyHeadacheLocally(float Strength, float Seconds);
+	void UpdateHeadachePicture();
+
+	float HeadacheStrength = 0.0f;
+	float HeadacheUntil = -1000.0f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<APostProcessVolume> HeadacheVolume;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> HeadacheMID;
 
 	void ApplyLocally(float Amount);
 	void UpdateVignette();

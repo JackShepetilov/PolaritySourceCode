@@ -12,12 +12,16 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Variant_Shooter/AI/SquadSpawn/Squad.h"
+#include "AI/Components/AIAccuracyComponent.h"
 #include "BenchEncounter.generated.h"
 
 class AShooterNPC;
+class ABenchEncounter;
 class UShootableButtonComponent;
 class UTextRenderComponent;
 class UMaterialInterface;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBenchEncounterDone, ABenchEncounter*, Encounter);
 
 /** One kind of enemy and where each one of them appears. */
 USTRUCT(BlueprintType)
@@ -68,6 +72,25 @@ struct FBenchEncounterGroup
 	 *  @see AShooterNPC::ForceWeapon */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter")
 	TSubclassOf<class AShooterWeapon> Weapon;
+
+	/** How used to a fight these are: their reaction, how often a round is meant to hit, how easily
+	 *  they are shaken. @see UAIAccuracyComponent */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter")
+	EAIExperience Experience = EAIExperience::Regular;
+
+	/** At the start these are told where every soldier of the other side stands, as if somebody
+	 *  had called it on the radio: a group told to Advance then walks to them. For a fight that has
+	 *  to start with one side coming round a corner. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter")
+	bool bToldWhereEnemiesAre = false;
+
+	/** How many of the group there are for one player. 0: one on every point, whatever the team
+	 *  size. Otherwise the first ceil(CountPerPlayer x N^PlayerScaleExponent) points are used, N the
+	 *  players at the start of the fight, and the share the team is short of CountPerPlayer x N comes
+	 *  out as veterans [author, 2026-10-17: fewer enemies than per player x players, made up for by
+	 *  other qualities]. Docs/Run_Skeleton_Plan_2026-10-17.md, section 9. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter", meta = (ClampMin = "0"))
+	int32 CountPerPlayer = 0;
 };
 
 UCLASS()
@@ -98,6 +121,21 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter", meta = (ClampMin = "0.0", Units = "s"))
 	float ReinforcementDelay = 60.0f;
 
+	/** Off for a fight that something else starts (a room of the run, ARunRoom): in the middle of a
+	 *  fight a stray round into the button would clear it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter")
+	bool bButtonEnabled = true;
+
+	/** How fast the count of a group with CountPerPlayer grows with the players: 1 is straight
+	 *  per player x players, less is fewer. 0.75: four players get 2.83 times the count of one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Encounter", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PlayerScaleExponent = 0.75f;
+
+	/** Every enemy of the fight is dead, the reinforcement too if it came. Not for a versus, and not
+	 *  when the fight is cleared by hand. */
+	UPROPERTY(BlueprintAssignable, Category = "Encounter")
+	FOnBenchEncounterDone OnEncounterDone;
+
 	/** Spawn the fight when nobody of it is alive, clear it when somebody is. What the button does. */
 	UFUNCTION(BlueprintCallable, Category = "Encounter")
 	void Toggle();
@@ -111,6 +149,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Encounter")
 	int32 GetAliveCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Encounter")
+	bool IsRunning() const { return bRunning; }
 
 protected:
 
@@ -151,6 +192,9 @@ private:
 
 	/** True when the groups name more than one side. */
 	bool bVersus = false;
+
+	/** The players counted when the fight started (polarity.bench.players overrides). */
+	int32 PlayerCount = 1;
 
 	TArray<TWeakObjectPtr<AShooterNPC>> Alive;
 	int32 SpawnedCount = 0;

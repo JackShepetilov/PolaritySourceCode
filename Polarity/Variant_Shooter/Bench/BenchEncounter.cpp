@@ -13,11 +13,19 @@
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 #include "AI/PolarityTeams.h"
+#include "AI/FactionContactMemory.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "AIController.h"
+#include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/Bench/FightRecorder.h"
 #include "Variant_Shooter/ShootableButtonComponent.h"
+
+static TAutoConsoleVariable<int32> CVarBenchPlayers(
+	TEXT("polarity.bench.players"),
+	0,
+	TEXT("Count a fight that grows with the players (a group with CountPerPlayer) as if this many players were in it. 0: the players there really are."),
+	ECVF_Default);
 
 ABenchEncounter::ABenchEncounter()
 {
@@ -53,11 +61,20 @@ void ABenchEncounter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (HasAuthority() && Button)
+	if (HasAuthority() && Button && bButtonEnabled)
 	{
 		Button->OnButtonPressed.AddDynamic(this, &ABenchEncounter::HandleButtonPressed);
 	}
-	SetStatus(TEXT("shoot to start"));
+	if (Button && !bButtonEnabled)
+	{
+		Button->SetEnabled(false);
+		Button->SetVisibility(false, true);
+		if (UStaticMeshComponent* const Mesh = Button->GetButtonMesh())
+		{
+			Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
+	SetStatus(bButtonEnabled ? TEXT("shoot to start") : TEXT("waiting"));
 
 	// The switch is a console variable and outlives a play session: one that ended in the middle of
 	// a watched fight would leave every enemy of the next session blind to the players.
@@ -181,12 +198,42 @@ int32 ABenchEncounter::SpawnGroup(const FBenchEncounterGroup& Group)
 		}
 	}
 
+	// How many of the group, and how many of those are veterans. A group without CountPerPlayer
+	// fills every point, as the bench consoles always did.
+	int32 Wanted = MAX_int32;
+	int32 Veterans = 0;
+	if (Group.CountPerPlayer > 0)
+	{
+		const float Players = static_cast<float>(FMath::Max(1, PlayerCount));
+		const float Grown = FMath::Pow(Players, PlayerScaleExponent);
+		Wanted = FMath::CeilToInt(Group.CountPerPlayer * Grown);
+		Veterans = FMath::RoundToInt(Wanted * (1.0f - Grown / Players));
+		int32 Available = 0;
+		for (const AActor* const Point : Group.SpawnPoints)
+		{
+			Available += Point ? 1 : 0;
+		}
+		if (Available < Wanted)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BENCH] %s: %s wants %d for %d players, only %d points"),
+				*EncounterName, *GetNameSafe(Group.EnemyClass), Wanted, PlayerCount, Available);
+			Veterans = FMath::Min(Veterans, Available);
+		}
+		UE_LOG(LogTemp, Log, TEXT("[BENCH] %s: %s %d per player x %d players -> %d, %d of them veterans"),
+			*EncounterName, *GetNameSafe(Group.EnemyClass), Group.CountPerPlayer, PlayerCount, FMath::Min(Wanted, Available), Veterans);
+		Wanted = FMath::Min(Wanted, Available);
+	}
+
 	int32 Count = 0;
 	for (const AActor* const Point : Group.SpawnPoints)
 	{
 		if (!Point)
 		{
 			continue;
+		}
+		if (Count >= Wanted)
+		{
+			break;
 		}
 		// Deferred, so the side is on the pawn BEFORE it begins play. The sight sense remembers the
 		// team of everything it can see at the moment that thing registers, and a side given after
@@ -211,6 +258,12 @@ int32 ABenchEncounter::SpawnGroup(const FBenchEncounterGroup& Group)
 		}
 		NPC->FinishSpawning(SpawnTransform);
 		NPC->SetCombatTask(Group.Task);
+		if (UAIAccuracyComponent* const Accuracy = NPC->GetAccuracyComponent())
+		{
+			// The last ones of the group make up for the players the team is short of.
+			const bool bVeteran = Count >= Wanted - Veterans;
+			Accuracy->SetExperience(bVeteran ? EAIExperience::Veteran : Group.Experience);
+		}
 		if (Group.Task == ESquadTask::Hold && Group.HoldRadius > 0.0f)
 		{
 			NPC->SetHoldArea(Middle, Group.HoldRadius);
@@ -260,6 +313,13 @@ void ABenchEncounter::StartEncounter()
 	}
 	ClearEncounter();
 
+	{
+		TArray<APawn*> Players;
+		CoopPlayers::GetAll(World, Players);
+		const int32 Forced = CVarBenchPlayers.GetValueOnGameThread();
+		PlayerCount = Forced > 0 ? Forced : FMath::Max(1, Players.Num());
+	}
+
 	SpawnedCount = 0;
 	SidesSpawned.Reset();
 	bReinforcementOwed = false;
@@ -276,6 +336,27 @@ void ABenchEncounter::StartEncounter()
 	}
 
 	bVersus = SidesSpawned.Num() > 1;
+
+	// Groups told where the other side is: a contact for their side on every soldier of another.
+	if (UFactionContactMemory* const Memory = UFactionContactMemory::Get(this))
+	{
+		for (const FBenchEncounterGroup& Group : Groups)
+		{
+			if (!Group.bToldWhereEnemiesAre || Group.bReinforcement || Group.Team == PolarityTeams::Neutral)
+			{
+				continue;
+			}
+			for (const TWeakObjectPtr<AShooterNPC>& Weak : Alive)
+			{
+				AShooterNPC* const Enemy = Weak.Get();
+				if (Enemy && Enemy->GetGenericTeamId().GetId() != Group.Team)
+				{
+					Memory->ReportContact(Group.Team, Enemy, Enemy->GetActorLocation(), nullptr, /*bSeenNow*/ false);
+				}
+			}
+		}
+	}
+
 	if (bPlayersOnlyWatch && SpawnedCount > 0)
 	{
 		SetPlayersIgnored(true);
@@ -494,6 +575,8 @@ void ABenchEncounter::HandleDeath(AShooterNPC* DeadNPC)
 	{
 		Recorder->EndFight(EncounterName, How);
 	}
+
+	OnEncounterDone.Broadcast(this);
 }
 
 // ==================== Console ====================

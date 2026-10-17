@@ -153,7 +153,7 @@ void UAbilityHandler_Grapple::OnUnequip_Implementation()
 // works whatever ability is equipped. @see AShooterCharacter::Server_FetchItem
 
 bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const AActor* Target,
-	const UAbilityDefinition_Grapple* Def, float ExtraRadius)
+	const UAbilityDefinition_Grapple* Def, float ExtraRadius, float RadiusOverride)
 {
 	if (!Caster || !IsValid(Target) || !Def || !Def->bCanFetchWeapons)
 	{
@@ -167,12 +167,13 @@ bool UAbilityHandler_Grapple::IsFetchable(const AShooterCharacter* Caster, const
 		return false;
 	}
 
-	const float Radius = Def->WeaponFetchRadius + FMath::Max(0.0f, ExtraRadius);
+	const float Reach = RadiusOverride > 0.0f ? RadiusOverride : Def->WeaponFetchRadius;
+	const float Radius = Reach + FMath::Max(0.0f, ExtraRadius);
 	return FVector::DistSquared(Caster->GetActorLocation(), Target->GetActorLocation()) <= FMath::Square(Radius);
 }
 
 AActor* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster,
-	const UAbilityDefinition_Grapple* Def)
+	const UAbilityDefinition_Grapple* Def, float RadiusOverride)
 {
 	UWorld* World = Caster ? Caster->GetWorld() : nullptr;
 	if (!World || !Def || !Def->bCanFetchWeapons)
@@ -204,7 +205,7 @@ AActor* UAbilityHandler_Grapple::FindFetchTarget(const AShooterCharacter* Caster
 	GrappleFetch::GetAll(World, Fetchables);
 	for (AActor* Drop : Fetchables)
 	{
-		if (!IsFetchable(Caster, Drop, Def))
+		if (!IsFetchable(Caster, Drop, Def, 0.0f, RadiusOverride))
 		{
 			continue;
 		}

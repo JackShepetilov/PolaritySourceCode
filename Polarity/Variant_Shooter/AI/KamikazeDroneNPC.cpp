@@ -21,6 +21,7 @@
 #include "EMFVelocityModifier.h"
 #include "EMF_FieldComponent.h"
 #include "AI/PolarityTeams.h"
+#include "Coop/CoopPlayers.h"
 #include "../DamageTypes/DamageType_Melee.h"
 #include "../DamageTypes/DamageType_Wallslam.h"
 #include "../DamageTypes/DamageType_EMFProximity.h"
@@ -188,6 +189,19 @@ namespace
 	/** After the wind-up, this long to swing the nose round at low speed before the run counts
 	 *  (seconds). 180 degrees at the low-speed turn rate of 720/s is a quarter of a second. */
 	constexpr float StrikeTurnOutWindow = 0.4f;
+
+	/** How stiffly the hold homes in on its point in the last stretch (1/s): speed per cm of distance
+	 *  at the point itself. See ArriveVelocity. */
+	constexpr float ArriveGain = 3.0f;
+
+	/** How fast the hold's anchor follows the target's feet, across and up (1/s). Slower up, so a
+	 *  jump or a step down barely moves the drone. */
+	constexpr float HoldAnchorRateXY = 3.0f;
+	constexpr float HoldAnchorRateZ = 1.0f;
+
+	/** How fast the velocity the strike leads by follows the target's (1/s): about a sixth of a
+	 *  second behind, enough to take the snap out of a strafe flip. */
+	constexpr float LeadVelocityRate = 6.0f;
 }
 
 void AKamikazeDroneNPC::BeginPlay()
@@ -261,9 +275,11 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 	}
 
 	// Acceleration from the velocity change, lightly smoothed: it drives the bank into turns and the
-	// motor pitch. Works on clients too, from the replicated velocity.
+	// motor pitch. Works on clients too, from the replicated velocity. The authority reads its own
+	// flight velocity while it drives, so an outside write to the CMC does not show as a jolt.
 	{
-		const FVector Vel = GetVelocity();
+		const bool bOwnFlight = HasAuthority() && !bIsInKnockback && !bIsCaptured && CurrentState != EKamikazeState::Parried;
+		const FVector Vel = bOwnFlight ? FlightVelocity : GetVelocity();
 		const FVector RawAccel = (DeltaTime > KINDA_SMALL_NUMBER) ? (Vel - LastVelocity) / DeltaTime : FVector::ZeroVector;
 		SmoothedAcceleration = FMath::VInterpTo(SmoothedAcceleration, RawAccel, DeltaTime, 12.0f);
 		LastVelocity = Vel;
@@ -294,6 +310,28 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 			bStrikeGranted = false;
 		}
 		QueueTarget = NewTarget;
+
+		// The target as the flight sees it, smoothed. Raw, every strafe flip, jump and landing of the
+		// player reached the drone the same frame: the hold bobbed with each jump and the strike's lead
+		// point snapped sideways with each change of direction. A new target is taken as it is.
+		if (APawn* const Target = GetTargetPawn())
+		{
+			const FVector Feet = GetTargetFeet(Target);
+			const FVector TargetVelocity = Target->GetVelocity();
+			if (Target != SmoothedTarget.Get())
+			{
+				SmoothedTarget = Target;
+				HoldAnchor = Feet;
+				SmoothedTargetVelocity = TargetVelocity;
+			}
+			else
+			{
+				HoldAnchor.X = FMath::FInterpTo(HoldAnchor.X, Feet.X, DeltaTime, HoldAnchorRateXY);
+				HoldAnchor.Y = FMath::FInterpTo(HoldAnchor.Y, Feet.Y, DeltaTime, HoldAnchorRateXY);
+				HoldAnchor.Z = FMath::FInterpTo(HoldAnchor.Z, Feet.Z, DeltaTime, HoldAnchorRateZ);
+				SmoothedTargetVelocity = FMath::VInterpTo(SmoothedTargetVelocity, TargetVelocity, DeltaTime, LeadVelocityRate);
+			}
+		}
 	}
 
 	// Everything below moves the pawn or decides damage, and both belong to the authority. A client
@@ -302,6 +340,17 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 	// driven by whoever captured or knocked them.
 	if (HasAuthority() && !bIsCaptured && !bIsInKnockback)
 	{
+		// FlyMove leaves the CMC's Velocity equal to the flight's. A difference here means something
+		// outside wrote it since the last frame. The flight no longer reads it; this says who and when.
+		// Seen 2026-10-15: zeroed for every drone on the same frame every half second, writer not found.
+		if (const UCharacterMovementComponent* const CMC = GetCharacterMovement();
+			CMC && CVarKamikazeDebug.GetValueOnGameThread() >= 1 && CurrentState != EKamikazeState::Parried
+			&& FVector::DistSquared(CMC->Velocity, FlightVelocity) > FMath::Square(50.0f))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[KAMIKAZE_DEBUG] %s velocity written from outside: flight %.0f, CMC %.0f, state %s, controller %s"),
+				*GetName(), FlightVelocity.Size(), CMC->Velocity.Size(), KamikazeStateToString(CurrentState), *GetNameSafe(GetController()));
+		}
+
 		switch (CurrentState)
 		{
 		case EKamikazeState::Launching:
@@ -347,7 +396,24 @@ void AKamikazeDroneNPC::Tick(float DeltaTime)
 		const FVector Vel = GetVelocity();
 		const bool bHolding = (CurrentState == EKamikazeState::Orbiting);
 		const APawn* const Target = bHolding ? GetTargetPawn() : nullptr;
-		const FVector Facing = Target ? (Target->GetActorLocation() - GetActorLocation()) : Vel;
+
+		// Lining the strike up (the wind-up and the swing round out of it): the nose stays on the aim
+		// point, pitched down at it, while the body backs off. Facing the velocity there turned the
+		// drone's back to the player for the wind-up and round again for the run, a half-turn each way
+		// in under a second.
+		const bool bLiningUp = CurrentState == EKamikazeState::Attacking && !bBlindStrike
+			&& !(AttackPattern == EAttackPattern::Direct && BuildingTarget)
+			&& StateTimer < WindUpTime + StrikeTurnOutWindow;
+
+		FVector Facing = Vel;
+		if (Target)
+		{
+			Facing = Target->GetActorLocation() - GetActorLocation();
+		}
+		else if (bLiningUp)
+		{
+			Facing = AttackTargetPosition - GetActorLocation();
+		}
 		if (!Facing.IsNearlyZero(10.0f))
 		{
 			const FRotator TargetRotation = bHolding
@@ -420,6 +486,7 @@ FHitResult AKamikazeDroneNPC::FlyMove(const FVector& NewVelocity, float DeltaTim
 		return FirstHit;
 	}
 
+	FlightVelocity = NewVelocity;
 	CMC->Velocity = NewVelocity;
 	const FVector Delta = NewVelocity * DeltaTime;
 	if (Delta.IsNearlyZero())
@@ -436,7 +503,8 @@ FHitResult AKamikazeDroneNPC::FlyMove(const FVector& NewVelocity, float DeltaTim
 		// the surface: the drone skims a wall or a floor, it does not stick to it or bounce.
 		FHitResult SlideHit = FirstHit;
 		static_cast<UMovementComponent*>(CMC)->SlideAlongSurface(Delta, 1.0f - FirstHit.Time, FirstHit.Normal, SlideHit, true);
-		CMC->Velocity = FVector::VectorPlaneProject(NewVelocity, FirstHit.Normal);
+		FlightVelocity = FVector::VectorPlaneProject(NewVelocity, FirstHit.Normal);
+		CMC->Velocity = FlightVelocity;
 	}
 	return FirstHit;
 }
@@ -460,7 +528,8 @@ FVector AKamikazeDroneNPC::GetTargetFeet(const APawn* Target) const
 
 FVector AKamikazeDroneNPC::ComputeHoldPoint(const APawn* Target) const
 {
-	const FVector Feet = GetTargetFeet(Target);
+	// Hung off the smoothed feet, so the hold does not copy the player's every hop and strafe flip.
+	const FVector Feet = (Target && Target == SmoothedTarget.Get()) ? HoldAnchor : GetTargetFeet(Target);
 
 	// Bearing: the side the drone came in from, fixed when it first reached the hold (before that,
 	// the side it is on now). It does not go round the player on its own: a group from one carrier
@@ -540,9 +609,11 @@ FVector AKamikazeDroneNPC::ComputeStrikeAimPoint() const
 	const FVector Aim = Feet + FVector(0.0f, 0.0f, AimHeightAboveFeet);
 
 	// Lead by the time the strike needs to get there at its own speed. A constant velocity is caught
-	// exactly; only a change the turn rate cannot follow escapes.
+	// exactly; only a change the turn rate cannot follow escapes. The velocity is the smoothed one: the
+	// raw one flips with every strafe, and the lead point (up to MaxLeadTime of it) flipped with it.
 	const float TimeToGo = FMath::Min(FVector::Dist(GetActorLocation(), Aim) / FMath::Max(StrikeSpeed, 1.0f), MaxLeadTime);
-	FVector Led = Aim + Target->GetVelocity() * TimeToGo;
+	const FVector TargetVelocity = (Target == SmoothedTarget.Get()) ? SmoothedTargetVelocity : Target->GetVelocity();
+	FVector Led = Aim + TargetVelocity * TimeToGo;
 
 	// Never below the feet: a falling target would otherwise pull the aim point into the floor.
 	Led.Z = FMath::Max(Led.Z, Feet.Z + GetCapsuleComponent()->GetScaledCapsuleRadius());
@@ -557,8 +628,15 @@ FVector AKamikazeDroneNPC::ArriveVelocity(const FVector& Point, float SpeedCap, 
 	{
 		return FVector::ZeroVector;
 	}
-	// The fastest speed from which it can still stop exactly on the point: v = sqrt(2 a d).
-	const float Speed = FMath::Min(SpeedCap, FMath::Sqrt(2.0f * Acceleration * Dist));
+	// The fastest speed from which it can still stop on the point, v = sqrt(2 a d), shifted by a soft
+	// zone so that near the point the speed falls off in a straight line (ArriveGain per second)
+	// instead of with an infinite slope. The bare square root reversed the demanded velocity every
+	// time the drone crossed its drifting point, the acceleration limit turned that into full-thrust
+	// flips frame to frame, and the tilt showed them as the shake. The shifted curve never asks for
+	// more braking than Acceleration.
+	const float Soft = Acceleration / (2.0f * FMath::Square(ArriveGain));
+	const float Speed = FMath::Min(SpeedCap,
+		FMath::Sqrt(2.0f * Acceleration * (Dist + Soft)) - FMath::Sqrt(2.0f * Acceleration * Soft));
 	return ToPoint / Dist * Speed;
 }
 
@@ -573,7 +651,7 @@ void AKamikazeDroneNPC::UpdateLaunching(float DeltaTime)
 		return;
 	}
 
-	const FVector Vel = CMC->Velocity;
+	const FVector Vel = FlightVelocity;
 	const float Speed = Vel.Size();
 	const FVector Dir = (Speed > 1.0f) ? Vel / Speed : GetActorForwardVector();
 
@@ -602,6 +680,7 @@ void AKamikazeDroneNPC::InitiateLaunch(const FVector& LaunchVelocity)
 	{
 		CMC->Velocity = LaunchVelocity;
 	}
+	FlightVelocity = LaunchVelocity;
 	SetHandDrivenFlight(true);
 
 	if (!LaunchVelocity.IsNearlyZero())
@@ -642,6 +721,7 @@ void AKamikazeDroneNPC::InitiateDirectAttack(AActor* Target, FVector TargetWorld
 	{
 		CMC->Velocity = Dir * StrikeSpeed;
 	}
+	FlightVelocity = Dir * StrikeSpeed;
 	SetHandDrivenFlight(true);
 	if (!Dir.IsNearlyZero())
 	{
@@ -666,18 +746,15 @@ void AKamikazeDroneNPC::UpdateHold(float DeltaTime, bool bCountTowardStrike)
 		return;
 	}
 
-	// Slide from one side of the sector to the other every RepositionInterval, along the arc.
+	// Sway from one side of the sector to the other and back, one side per RepositionInterval, along
+	// the arc, never stopping. Each drone on its own phase. It used to be a slide every interval with a
+	// dead stop between: every drone stood still, then all of them jumped together (the timers started
+	// at spawn), 17 m in a second and a half at a 25 m hold. RepositionTime is not used by this.
 	if (bCountTowardStrike && RepositionInterval > KINDA_SMALL_NUMBER)
 	{
 		RepositionTimer += DeltaTime;
-		if (RepositionTimer >= RepositionInterval)
-		{
-			RepositionTimer = 0.0f;
-			RepositionSide = -RepositionSide;
-		}
-		const float TargetOffset = RepositionSide * RepositionAngle * 0.5f;
-		RepositionOffsetDeg = FMath::FInterpConstantTo(RepositionOffsetDeg, TargetOffset, DeltaTime,
-			RepositionAngle / FMath::Max(RepositionTime, 0.1f));
+		const float SwayW = UE_PI / RepositionInterval;
+		RepositionOffsetDeg = RepositionSide * RepositionAngle * 0.5f * FMath::Sin(RepositionTimer * SwayW + DriftPhase);
 	}
 
 	APawn* const Target = GetTargetPawn();
@@ -694,9 +771,9 @@ void AKamikazeDroneNPC::UpdateHold(float DeltaTime, bool bCountTowardStrike)
 	// pilot climbs out of a missed dive before turning back.
 	if (!bCountTowardStrike && StateTimer < PunchOutTime)
 	{
-		const FVector Forward(CMC->Velocity.X * 0.5f, CMC->Velocity.Y * 0.5f, 0.0f);
+		const FVector Forward(FlightVelocity.X * 0.5f, FlightVelocity.Y * 0.5f, 0.0f);
 		const FVector Desired = Forward + FVector(0.0f, 0.0f, PunchOutSpeed);
-		FlyMove(StepVelocityToward(CMC->Velocity, Desired, StrikeAcceleration * DeltaTime), DeltaTime);
+		FlyMove(StepVelocityToward(FlightVelocity, Desired, StrikeAcceleration * DeltaTime), DeltaTime);
 		return;
 	}
 
@@ -711,7 +788,7 @@ void AKamikazeDroneNPC::UpdateHold(float DeltaTime, bool bCountTowardStrike)
 		// The point drifts and slides, so "there" is a generous radius around it.
 		bAtHoldPoint = FVector::DistSquared(GetActorLocation(), HoldPoint) <= FMath::Square(HoldArriveTolerance * 2.0f);
 	}
-	FlyMove(StepVelocityToward(CMC->Velocity, Desired, HoldAcceleration * DeltaTime), DeltaTime);
+	FlyMove(StepVelocityToward(FlightVelocity, Desired, HoldAcceleration * DeltaTime), DeltaTime);
 
 	if (!Target)
 	{
@@ -793,7 +870,7 @@ void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
 	if (bBlindStrike)
 	{
 		BlindStrikeTime += DeltaTime;
-		FVector BlindVelocity = CMC->Velocity;
+		FVector BlindVelocity = FlightVelocity;
 		if (BlindVelocity.IsNearlyZero(10.0f))
 		{
 			BlindVelocity = GetActorForwardVector() * StrikeSpeed;
@@ -842,13 +919,13 @@ void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
 		const FVector Back(-DesiredDir.X, -DesiredDir.Y, 0.0f);
 		const FVector WindUpDir = (Back.GetSafeNormal() * 0.6f + FVector(0.0f, 0.0f, 0.8f)).GetSafeNormal();
 		const float WindUpSpeed = 1.5f * WindUpDistance / FMath::Max(WindUpTime, 0.05f);
-		FlyMove(StepVelocityToward(CMC->Velocity, WindUpDir * WindUpSpeed, StrikeAcceleration * DeltaTime), DeltaTime);
+		FlyMove(StepVelocityToward(FlightVelocity, WindUpDir * WindUpSpeed, StrikeAcceleration * DeltaTime), DeltaTime);
 		CheckContact();
 		return;
 	}
 
-	const float Speed = CMC->Velocity.Size();
-	const FVector CurrentDir = (Speed > 1.0f) ? CMC->Velocity / Speed : DesiredDir;
+	const float Speed = FlightVelocity.Size();
+	const FVector CurrentDir = (Speed > 1.0f) ? FlightVelocity / Speed : DesiredDir;
 
 	// Constant top speed and a turn limited by sideways grip, like a real quad: StrikeTurnRate at full
 	// speed, faster when slow (so it can snap its nose round out of the wind-up), never above 720.
@@ -901,9 +978,25 @@ void AKamikazeDroneNPC::UpdateStrike(float DeltaTime)
 	// could not follow), or the run took too long. Punch out and come back to the hold. Judged only
 	// once the drone is actually running, not while it is still turning out of the wind-up.
 	const bool bRunning = !bTurningOut && NewSpeed >= StrikeSpeed * 0.8f;
-	const bool bAimBehind = bRunning && FVector::DotProduct(AttackTargetPosition - GetActorLocation(), NewDir) < 0.0f;
-	if (bAimBehind || StateTimer >= StrikeMaxTime + WindUpTime)
+	const FVector ToAimNow = AttackTargetPosition - GetActorLocation();
+	const bool bAimBehind = bRunning && FVector::DotProduct(ToAimNow, NewDir) < 0.0f;
+	// The time limit grows by what flying straight from here would still take. A flat StrikeMaxTime
+	// gave up on long runs before they arrived: from a hold 25 m out and 10 m up the run itself takes
+	// about as long as the whole limit, and the drone punched out 6-8 m short of a standing target.
+	const bool bTimedOut = StateTimer >= StrikeMaxTime + WindUpTime + ToAimNow.Size() / FMath::Max(StrikeSpeed, 1.0f);
+	if (bAimBehind || bTimedOut)
 	{
+		// A miss is rare and is the moment to explain: why it gave up, how far from the target, and
+		// what the target and the drone were doing then.
+		const APawn* const Target = GetTargetPawn();
+		UE_LOG(LogTemp, Warning, TEXT("[KAMIKAZE_DEBUG] %s strike miss: %s | t=%.2fs | to aim %.0f cm (dz %.0f) | to target %.0f cm | speed %.0f | target vel %s (%.0f) | blocked by %s"),
+			*GetName(), bAimBehind ? TEXT("aim behind") : TEXT("timed out"), StateTimer,
+			ToAimNow.Size(), ToAimNow.Z,
+			Target ? FVector::Dist(GetActorLocation(), Target->GetActorLocation()) : -1.0f,
+			NewSpeed,
+			Target ? *Target->GetVelocity().ToCompactString() : TEXT("none"),
+			Target ? Target->GetVelocity().Size() : 0.0f,
+			Hit.IsValidBlockingHit() ? *GetNameSafe(Hit.GetActor()) : TEXT("nothing"));
 		SetState(EKamikazeState::Recovery);
 	}
 }
@@ -1615,6 +1708,13 @@ void AKamikazeDroneNPC::DoExplosion(float Radius, float Damage, TSubclassOf<UDam
 		// instigator stored on the drone. Attribution pass, not this one.
 		APawn* PlayerPawn = GetTargetPawn();
 
+		// A drone a player threw (UGrenadeDefinition_FPV): the blast is his. Its target is an enemy,
+		// and naming the enemy as the causer would have that enemy's own-side filter drop the hit.
+		if (APawn* const Thrower = GetInstigator(); Thrower && Thrower != this && CoopPlayers::IsPlayer(Thrower))
+		{
+			PlayerPawn = Thrower;
+		}
+
 		TSet<AActor*> DamagedActors;
 
 		for (const FOverlapResult& Overlap : Overlaps)
@@ -1808,9 +1908,14 @@ void AKamikazeDroneNPC::EndKnockbackStun()
 
 	Super::EndKnockbackStun();
 
-	// Restore flying mode, and take the flight back from whatever drove the knockback.
+	// Restore flying mode, and take the flight back from whatever drove the knockback, carrying on
+	// with the velocity the knockback left.
 	if (HasAuthority() && !bIsDead && CurrentState != EKamikazeState::Parried)
 	{
+		if (const UCharacterMovementComponent* const CMC = GetCharacterMovement())
+		{
+			FlightVelocity = CMC->Velocity;
+		}
 		SetHandDrivenFlight(true);
 	}
 	else if (UCharacterMovementComponent* CMC = GetCharacterMovement())

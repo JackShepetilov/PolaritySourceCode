@@ -34,6 +34,8 @@ class UDataTable;
 class UAnimationAsset;
 class UNiagaraSystem;
 class UNiagaraComponent;
+class UWeaponMasteryDefinition;
+struct FWeaponMasteryPerks;
 class UPhysicalMaterial;
 class UTexture2D;
 class UStaticMesh;
@@ -67,6 +69,7 @@ UCLASS(abstract)
 class POLARITY_API AShooterWeapon : public AActor
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 	// The bolt subsystem drives deferred (dodgeable) hitscan damage and calls ApplyHitscanDamage.
 	friend class UEnemyBeamBoltSubsystem;
@@ -213,6 +216,18 @@ protected:
 	 *  where on a body it went off. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (ClampMin = "1.0"))
 	float HeadshotMultiplier = 2.0f;
+
+	/** The weapon sets its own armour penetration. Off = the damage type decides
+	 *  (UDamageType_RangedLight 0.6, UDamageType_RangedPiercing 1.5, anything else 1). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (InlineEditConditionToggle))
+	bool bOverrideArmorPenetration = false;
+
+	/** How hard this weapon's hits bite body armour. The armour pool loses damage x this, and what
+	 *  the pool could not hold reaches health in the hit's own damage: health never sees this number.
+	 *  Below 1 a pistol, about 1 a rifle, above 1 armour-piercing. Only hits on armour it covers
+	 *  (UShieldFieldComponent::CoversBone); limbs and the head go past the armour anyway. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Damage", meta = (EditCondition = "bOverrideArmorPenetration", ClampMin = "0.05"))
+	float ArmorPenetration = 1.0f;
 
 public:
 	// ==================== In an enemy's hands ====================
@@ -526,6 +541,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX")
 	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
 
+	/** This gun's Niagara flash while a muzzle with bIsSuppressor is fitted. Replaces charge-based
+	 *  flashes too. Empty preserves this weapon's usual flash selection. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VFX|Suppressor")
+	TObjectPtr<UNiagaraSystem> SuppressedMuzzleFlashFX;
+
 	// ==================== VFX|Charge-Based Muzzle Flash ====================
 
 	/** If true, use charge-based muzzle flash VFX instead of default MuzzleFlashFX */
@@ -593,6 +613,11 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX")
 	TObjectPtr<USoundBase> FireSound;
+
+	/** This gun's firing sound while a muzzle with bIsSuppressor is fitted. Empty uses FireSound.
+	 *  AI hearing is controlled separately by the gun's noise range and the muzzle multiplier. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Suppressor")
+	TObjectPtr<USoundBase> SuppressedFireSound;
 
 	/** Sound attenuation settings for fire sound spatialization */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX")
@@ -674,7 +699,7 @@ protected:
 	 *  through the raise fires the instant it opens. Releasing the trigger cancels it.
 	 *  Keep this equal to the sprint-out blend time in the anim graph, or the weapon fires out of
 	 *  a pose that has not finished coming up. Zero disables the gate. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|Sprint", meta = (ClampMin = "0.0", Units = "s"))
 	float SprintToFireTime = 0.2f;
 
 	// ==================== Animation ====================
@@ -697,7 +722,7 @@ protected:
 	 *
 	 *  Deliberately NOT FiringMontage, which every weapon in the project may already use for a
 	 *  flourish. Overloading that one would gate twenty weapons that were never meant to be gated. */
-	UPROPERTY(EditAnywhere, Category = "Animation")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Fire")
 	TObjectPtr<UAnimMontage> CycleActionMontage;
 
 	// ==================== Animation|Weapon mesh ====================
@@ -719,15 +744,15 @@ protected:
 	TObjectPtr<UAnimationAsset> WeaponMeshFireAnimation;
 
 	/** Played on the weapon's own meshes when a reload starts. Primary slot: the empty reload. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshReloadAnimation;
 
 	/** The weapon's half of the second reload. Empty falls back to WeaponMeshReloadAnimation. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshSecondaryReloadAnimation;
 
 	/** The weapon's half of the closing stage of a per round reload. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshReloadEndAnimation;
 
 	/** Played instead of WeaponMeshFireAnimation on the shot that EMPTIES the magazine.
@@ -755,12 +780,12 @@ protected:
 	 *  the next one is due: for a frame, or for a whole network delay on another machine, nothing was
 	 *  playing and the body snapped to its base pose between two shells. Now a stage that is followed
 	 *  by another holds its last pose instead of ending, and the next one crossfades over it. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character", meta = (ClampMin = 0.0))
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Visuals", meta = (ClampMin = 0.0, Units = "s"))
 	float ThirdPersonReloadStageBlendTime = 0.15f;
 
 	/** How long a held stage may wait for the next one before it lets go by itself. Covers a reload
 	 *  cut short without any montage taking over the slot, and a stage lost on the network. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character", meta = (ClampMin = 0.0))
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Visuals", meta = (ClampMin = 0.0, Units = "s"))
 	float ThirdPersonReloadStageHoldTimeout = 0.5f;
 
 	/** The held stage instances (body and TP weapon mesh), released by the next stage or the timeout. */
@@ -787,13 +812,13 @@ protected:
 
 	/** Seconds into the first person reload before the round appears. 0 suits a reload whose first
 	 *  frame already has the round in the hand, as the pack's RPG7 does. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Loaded Round", meta = (ClampMin = 0.0))
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Visuals", meta = (ClampMin = 0.0, Units = "s"))
 	float LoadedRoundRevealTime = 0.0f;
 
 	/** The same for the third person reload, in that animation's own seconds, before it is stretched
 	 *  to the reload's length. Infima RL_01 keeps the rocket in the tube for its first 0.3 s and hides
 	 *  it until 0.35 s itself, so its value is 0.35. */
-	UPROPERTY(EditAnywhere, Category = "Animation|Loaded Round", meta = (ClampMin = 0.0))
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Visuals", meta = (ClampMin = 0.0, Units = "s"))
 	float LoadedRoundRevealTimeTP = 0.0f;
 
 	/** Cosmetic, per machine and per perspective: set by the fire and reload effects every machine
@@ -804,7 +829,7 @@ protected:
 	FTimerHandle LoadedRoundRevealTimerTP;
 
 	void SetLoadedRoundVisible(bool bFirstPerson, bool bThirdPerson, bool bVisible);
-	void ScheduleLoadedRoundReveal(float ThirdPersonStretch);
+	void ScheduleLoadedRoundReveal(float FirstPersonStretch, float ThirdPersonStretch);
 
 	/** True when the third person magazine part is attached to the loaded round's bone or below it. */
 	bool IsThirdPersonMagazineTheRound() const;
@@ -813,22 +838,22 @@ protected:
 	TObjectPtr<UAnimationAsset> WeaponMeshFireAnimationTP;
 	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
 	TObjectPtr<UAnimationAsset> WeaponMeshLastShotAnimationTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh TP")
 	TObjectPtr<UAnimationAsset> WeaponMeshReloadAnimationTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh TP")
 	TObjectPtr<UAnimationAsset> WeaponMeshSecondaryReloadAnimationTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Weapon Mesh")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Weapon Mesh TP")
 	TObjectPtr<UAnimationAsset> WeaponMeshReloadEndAnimationTP;
 
 	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
 	TObjectPtr<UAnimMontage> FiringMontageTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Fire")
 	TObjectPtr<UAnimMontage> CycleActionMontageTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Montages")
 	TObjectPtr<UAnimMontage> ReloadMontageTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Montages")
 	TObjectPtr<UAnimMontage> SecondaryReloadMontageTP;
-	UPROPERTY(EditAnywhere, Category = "Animation|Third Person|Character")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Reload|Montages")
 	TObjectPtr<UAnimMontage> ReloadEndMontageTP;
 
 	// Cosmetic state updated by the existing fire-effects multicast on each machine.
@@ -919,7 +944,7 @@ protected:
 	 *
 	 *  Exists only because a number has no "unset" the way an asset pointer does, so a weapon that
 	 *  wants their animations but its own pacing has no other way to say so. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "FPS Animation Pack",
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|Fire",
 		meta = (EditCondition = "PackWeaponSettings != nullptr"))
 	bool bPackSetsFireRate = true;
 
@@ -1138,12 +1163,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
 	FName ADSSocketNameBottom = FName("SightBottom");
 
-	/** Blend time when entering ADS (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	/** Legacy interpolation coefficient. The native ADS transition now uses ADSBlendInTime and
+	 *  ADSBlendOutTime in seconds. Kept only to preserve existing serialized values and getters. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Weapon|Handling|ADS|Legacy", meta = (ClampMin = "0.1"))
+	float ADSInterpSpeed = 12.0f;
+
+	/** Seconds for a complete hip-to-aim transition before stock and suppression modifiers.
+	 *  Smaller is faster, 0 is instant. Reversing partway takes the proportional remaining time. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|ADS", meta = (ClampMin = "0.0", Units = "s"))
 	float ADSBlendInTime = 0.15f;
 
-	/** Blend time when exiting ADS (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	/** Seconds for a complete aim-to-hip transition before the stock modifier. Smaller is faster,
+	 *  0 is instant. Suppression does not slow leaving ADS. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|ADS", meta = (ClampMin = "0.0", Units = "s"))
 	float ADSBlendOutTime = 0.1f;
 
 	// ==================== Attachments ====================
@@ -1245,7 +1277,7 @@ protected:
 	// they run dry, and that is their whole point.
 
 	/** Does this weapon have a magazine that has to be reloaded, or does it never run out? */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload")
 	bool bUseReload = false;
 
 	/** A real magazine fed by an endless reserve: the gun runs dry and has to be reloaded, but the
@@ -1258,10 +1290,16 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
 	bool bInfiniteReserve = false;
 
-	/** How long the magazine takes to fill. Match it to the reload montage, or the weapon fires out
-	 *  of an animation that has not finished. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.05", Units = "s"))
+	/** Fallback duration for a magazine reload with no usable FP montage and no explicit duration.
+	 *  Kept under its original name so existing weapons retain their unanimated reload timing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, AdvancedDisplay, Category = "Weapon|Handling|Reload|Fallback", meta = (ClampMin = "0.05", Units = "s"))
 	float ReloadTime = 2.0f;
+
+	/** Empty-magazine reload duration before stock and upgrade speed modifiers. 0 keeps the
+	 *  authored montage and its readiness notify. A positive value retimes the montage and makes
+	 *  the weapon ready at that duration; an earlier readiness notify cannot shorten it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload", meta = (EditCondition = "!bPerRoundReload", ClampMin = "0.0", Units = "s"))
+	float ReloadDuration = 0.0f;
 
 	// ==================== The second reload ====================
 	//
@@ -1278,10 +1316,9 @@ protected:
 	// Everything here is optional. Left empty, the weapon reloads exactly as it always has, which
 	// is what every weapon in the project that has not been migrated needs.
 
-	/** Seconds the second reload takes. Zero measures the montage instead, which is the answer you
-	 *  want: a hand-typed duration that drifts from the animation is precisely how a weapon ends up
-	 *  firing out of a reload that has not finished. Zero with no montage falls back to ReloadTime. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload", ClampMin = "0.0", Units = "s"))
+	/** Chambered magazine reload duration, using the same rule as ReloadDuration. Kept under its
+	 *  original property name to preserve Blueprint values. Ignored for per-round reloads. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload", meta = (EditCondition = "!bPerRoundReload", ClampMin = "0.0", Units = "s", DisplayName = "Secondary Reload Duration"))
 	float SecondaryReloadTime = 0.0f;
 
 	// Running out of ammunition and deciding to reload are two different events, and only the second
@@ -1291,32 +1328,32 @@ protected:
 	// deliberately, per weapon.
 
 	/** Start reloading by itself the moment the magazine runs out. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload")
 	bool bAutoReloadWhenEmpty = false;
 
 	/** Treat pulling the trigger on an empty magazine as asking to reload. Off means it just clicks:
 	 *  a dry fire is an answer too, and it leaves the player in charge of when the gun goes down. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload")
 	bool bReloadOnEmptyTriggerPull = false;
 
 	/** Played on the holder for the duration of the reload, first and third person both. This is
 	 *  the PRIMARY slot: the reload with an empty magazine. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Montages")
 	TObjectPtr<UAnimMontage> ReloadMontage;
 	/** Normalized draw position (0=start, 1=end) at which a holstered reload blends back in. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "0..1 position through the draw montage where the saved reload begins blending in; 0 starts immediately, 1 waits for the draw end."))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Resume", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "0..1 position through the draw montage where the saved reload begins blending in; 0 starts immediately, 1 waits for the draw end."))
 	float ReloadResumeEquipStart = 0.25f;
 	/** Time of the actual montage crossfade from draw to the saved reload position. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ClampMin = "0.0", Units = "s", ToolTip = "Seconds used to blend from the draw pose into the saved reload pose."))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Resume", meta = (ClampMin = "0.0", Units = "s", ToolTip = "Seconds used to blend from the draw pose into the saved reload pose."))
 	float ReloadResumeBlendDuration = 0.2f;
 	/** Shape of that crossfade. Custom uses ReloadResumeBlendCurve. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (ToolTip = "Easing shape for the reload-resume blend. Select Custom to use Reload Resume Blend Curve."))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Resume", meta = (ToolTip = "Easing shape for the reload-resume blend. Select Custom to use Reload Resume Blend Curve."))
 	EAlphaBlendOption ReloadResumeBlendOption = EAlphaBlendOption::HermiteCubic;
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload|Resume", meta = (EditCondition = "ReloadResumeBlendOption == EAlphaBlendOption::Custom", ToolTip = "Optional 0..1 curve used only when Reload Resume Blend Option is Custom."))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Resume", meta = (EditCondition = "ReloadResumeBlendOption == EAlphaBlendOption::Custom", ToolTip = "Optional 0..1 curve used only when Reload Resume Blend Option is Custom."))
 	TObjectPtr<UCurveFloat> ReloadResumeBlendCurve;
 
 	/** The holder's half of the second reload. Empty falls back to ReloadMontage. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Montages")
 	TObjectPtr<UAnimMontage> SecondaryReloadMontage;
 
 	// ==================== Third reload shape: one round at a time ====================
@@ -1337,15 +1374,28 @@ protected:
 	/** Rounds go in one at a time. Set from the pack profile: their WeaponClass says BP_ManualAction
 	 *  for precisely the two guns built this way, so the shape is read from their data rather than
 	 *  ticked by hand per weapon. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload")
 	bool bPerRoundReload = false;
+
+	/** Per-round opening duration before stock and upgrade modifiers. 0 uses the FP montage. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Per Round", meta = (EditCondition = "bPerRoundReload", ClampMin = "0.0", Units = "s"))
+	float ReloadStartDuration = 0.0f;
+
+	/** Duration of inserting ONE round, before stock and upgrade modifiers. 0 uses the FP montage. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Per Round", meta = (EditCondition = "bPerRoundReload", ClampMin = "0.0", Units = "s"))
+	float ReloadLoopDuration = 0.0f;
+
+	/** Per-round closing duration before stock and upgrade modifiers. 0 uses the FP montage;
+	 *  with neither a closing montage nor an explicit duration the closing is skipped. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Per Round", meta = (EditCondition = "bPerRoundReload", ClampMin = "0.0", Units = "s"))
+	float ReloadEndDuration = 0.0f;
 
 	/** The holder's closing animation for a per round reload. Empty means the reload simply ends
 	 *  after the last round, with no separate closing. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Reload", meta = (EditCondition = "bPerRoundReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Reload|Montages", meta = (EditCondition = "bPerRoundReload"))
 	TObjectPtr<UAnimMontage> ReloadEndMontage;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ammo|Reload", meta = (EditCondition = "bUseReload"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Handling|Reload|Audio")
 	TObjectPtr<USoundBase> ReloadSound;
 
 	// ==================== Energy reserve (Apex season 30) ====================
@@ -1367,15 +1417,15 @@ protected:
 	// the server catches up with the client's trigger.
 
 	/** Every gun a player holds is an energy weapon unless this is unticked. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_EnergyReserve, Category = "Ammo|Energy")
 	bool bRegeneratingReserve = true;
 	/** Set on an enemy/drop weapon: finite reserve is usable but never refills. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_EnergyReserve, Category = "Ammo|Energy")
 	bool bFiniteEnergyReserve = false;
 
 	/** How many full magazines the reserve refills up to. Apex uses 2 to 4. A bigger magazine makes
 	 *  each of these deeper; it does not change how many there are. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ammo|Energy", meta = (EditCondition = "bRegeneratingReserve", ClampMin = "0", ClampMax = "20"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_EnergyReserve, Category = "Ammo|Energy", meta = (EditCondition = "bRegeneratingReserve", ClampMin = "0", ClampMax = "20"))
 	int32 EnergyReserveMagazines = 3;
 
 	/** Seconds to refill one whole magazine, whatever its size: a bigger magazine refills faster in
@@ -1519,29 +1569,29 @@ protected:
 	/** FP arms montage for putting this weapon away. Place a "Weapon Switch - Swap Point" notify
 	 *  where the old weapon should disappear and the new one appear; without one the swap happens
 	 *  when the montage ends. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch")
 	TObjectPtr<UAnimMontage> HolsterMontage;
 
 	/** Third-person montage for putting this weapon away, played on every machine. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch")
 	TObjectPtr<UAnimMontage> HolsterMontageTP;
 
 	/** FP arms montage for bringing this weapon out. Firing, reloading and abilities come back when
 	 *  it finishes. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch")
 	TObjectPtr<UAnimMontage> DrawMontage;
 
 	/** Third-person montage for bringing this weapon out, played on every machine. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch")
 	TObjectPtr<UAnimMontage> DrawMontageTP;
 
 	/** How long putting this weapon away should take. The montage is stretched to fit by play rate,
 	 *  so tuning the feel never means re-exporting the animation. 0 plays it at its authored speed. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
 	float HolsterDuration = 0.0f;
 
 	/** How long bringing this weapon out should take. Same play-rate scaling as HolsterDuration. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Switch Animation", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon|Handling|Switch", meta = (ClampMin = "0.0", ClampMax = "5.0", Units = "s"))
 	float DrawDuration = 0.0f;
 
 	/** True from the moment a reload starts until the magazine is full or the reload is cancelled. */
@@ -1636,7 +1686,7 @@ protected:
 
 	// ==================== Refire ====================
 
-	UPROPERTY(EditAnywhere, Category = "Refire", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Fire", meta = (ClampMin = 0, ClampMax = 10, Units = "s"))
 	float RefireRate = 0.1f;
 
 	/** Legacy scalar pitch kick, used only when bUseAdvancedRecoil is false. Dead once advanced
@@ -1644,7 +1694,7 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Refire", meta = (ClampMin = 0, ClampMax = 10, Units = "deg"))
 	float FiringRecoil = 1.0f;
 
-	UPROPERTY(EditAnywhere, Category = "Refire")
+	UPROPERTY(EditAnywhere, Category = "Weapon|Handling|Fire")
 	bool bFullAuto = true;
 
 	/** Runtime multiplier on the refire interval, set by external owners (e.g. sentry turret spin-up).
@@ -1681,6 +1731,15 @@ protected:
 	/** Degrees of spread added by shooting, on top of the state part. Bleeds off after
 	 *  SpreadConfig.BloomRecoveryDelay. */
 	float CurrentBloomDegrees = 0.0f;
+
+	/** @see GetNextShotOffset */
+	FVector2D NextShotOffset = FVector2D::ZeroVector;
+
+	/** The offset the last round went out at (zero for a precise first one). @see GetShownShotOffset */
+	FVector2D PrevShotOffset = FVector2D::ZeroVector;
+
+	/** Pick the next shot's offset, evenly over the disc. */
+	void RollNextShotOffset();
 
 	/** Game time of the shot the bloom is currently recovering from. */
 	float TimeOfLastSpreadShot = -1000.0f;
@@ -1925,17 +1984,29 @@ public:
 	 *  for anything that is not an energy weapon, so both report paths can call it blindly. */
 	void PauseEnergyRegen(float ExtraSeconds = 0.0f);
 
+	/** Compatibility accessor: returns the effective duration, never the unanimated fallback alone. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
-	float GetReloadTime() const { return ReloadTime; }
+	float GetReloadTime() const { return GetActiveReloadTime(); }
 
-	/** Seconds the reload that would start now will take. Prefers an explicit override, then the
-	 *  length of the montage that will actually play, and only then the legacy ReloadTime. Already
-	 *  divided by the stock's reload speed. */
+	/** Resolved duration of the running/suspended stage, or the stage that would start now.
+	 *  Includes stock and upgrade speed modifiers. With no explicit duration a readiness notify
+	 *  may finish earlier. A per-round reload answers one stage, not a full tube. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	float GetActiveReloadTime() const;
 
 	/** GetActiveReloadTime without the stock. */
 	float GetBaseReloadTime() const;
+
+	/** Duration of an explicit stage, also usable on observers whose ammo count differs. */
+	float GetReloadStageDuration(EWeaponReloadStage Stage) const;
+
+	/** Selected stage is latched while running or suspended, otherwise selected from current ammo. */
+	EWeaponReloadStage GetCurrentReloadStage() const;
+	EWeaponReloadStage GetInitialReloadStage() const;
+	float GetReloadStageDurationOverride(EWeaponReloadStage Stage) const;
+	float GetReloadStageBaseTime(EWeaponReloadStage Stage) const;
+	float GetReloadStagePlayRate(EWeaponReloadStage Stage) const;
+	float GetReloadStageHandlingMultiplier(EWeaponReloadStage Stage) const;
 
 	/** The montage this weapon plays while reloading, if it has one. The PRIMARY one: callers that
 	 *  need whichever is actually running want GetActiveReloadMontage instead. */
@@ -1947,21 +2018,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	bool UsesSecondaryReload() const { return CurrentBullets > 0; }
 
-	/** Whichever of the two reload montages this weapon would play right now.
-	 *
-	 *  A per round weapon always answers with the OPENING: it is the only stage that exists at the
-	 *  moment a reload is asked for, and the rest of the sequence is chosen a stage at a time as it
-	 *  runs. Answering with the loop here would hand the caller a fraction of a second and the gun
-	 *  would consider itself reloaded after one shell. */
+	/** The running or suspended stage's FP montage; before a reload, the initial stage's montage. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Reload")
 	UAnimMontage* GetActiveReloadMontage() const
 	{
-		if (bPerRoundReload)
-		{
-			return ReloadMontage;
-		}
-
-		return (UsesSecondaryReload() && SecondaryReloadMontage) ? SecondaryReloadMontage : ReloadMontage;
+		return GetArmsMontageForStage(GetCurrentReloadStage());
 	}
 
 	/** Rounds go in one at a time, so the reload is a loop and can be walked out of. */
@@ -1993,11 +2054,18 @@ public:
 
 	/** Play rate for this weapon's holster half, times the stock's swap speed. @see GetSwitchPlayRate */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
-	float GetHolsterPlayRate() const { return GetSwitchPlayRate(HolsterMontage, HolsterDuration) * GetStockSwapSpeed(); }
+	float GetHolsterPlayRate() const;
 
 	/** Play rate for this weapon's draw half, times the stock's swap speed. @see GetSwitchPlayRate */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Switch Animation")
-	float GetDrawPlayRate() const { return GetSwitchPlayRate(DrawMontage, DrawDuration) * GetStockSwapSpeed(); }
+	float GetDrawPlayRate() const;
+
+	/** Duration penalty from all installed attachments. Read live; base weapon values stay intact. */
+	float GetAttachmentHandlingMultiplier(float UWeaponAttachmentDefinition::* Field) const;
+
+	/** Sprint-out delay including all attachment duration penalties. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|Sprint")
+	float GetSprintToFireTime() const;
 
 	// ==================== Stock ====================
 	// Docs/Stock_Attachment_Plan_2026-10-01.md. Read live off the installed stock; 1 without one.
@@ -2613,6 +2681,33 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	FVector GetMuzzleWorldLocation() const;
 
+	/** 1 while the body is in a sprint, a jump or a fall, a slide or a wall run, else 0 (and 0 down the
+	 *  sights) [author, 2026-10-15]: then the rounds and the side rail device's beam go down the barrel
+	 *  instead of to the screen centre. Eased by UTacticalDeviceComponent. */
+	float GetDeviceBarrelWeight() const;
+
+	/** The spread offset the NEXT shot takes, picked in advance after every shot [author, 2026-10-15]:
+	 *  a point in the unit disc (X right, Y up), scaled by the cone at the moment of the shot. So the
+	 *  laser can show exactly where the next round goes. A player's shots only; an AI rolls at the
+	 *  shot as before. */
+	FVector2D GetNextShotOffset() const { return NextShotOffset; }
+
+	/** Dir turned by the next shot's offset inside a cone of ConeDegrees. */
+	FVector ApplyNextShotSpread(const FVector& Dir, float ConeDegrees) const { return ApplyShotOffset(Dir, ConeDegrees, NextShotOffset); }
+
+	/** Dir turned by Offset (unit disc) inside a cone of ConeDegrees. */
+	static FVector ApplyShotOffset(const FVector& Dir, float ConeDegrees, const FVector2D& Offset);
+
+	/** Where the laser shows the next round [author, 2026-10-15]: on its way from where the last one
+	 *  went to where the next one will, over one refire interval, eased. Fired at the full rate, it
+	 *  arrives as the round leaves; slower, it is there first and waits. */
+	FVector2D GetShownShotOffset() const;
+
+	/** A laser is on, the feet are planted, and the bloom of the last string is gone (under
+	 *  LaserFirstShotBloomShare of one shot): this shot is the first of a string and goes exactly to
+	 *  the centre (a shotgun's pattern tightens instead). Asked on the machine that aims the shot. */
+	bool IsLaserFirstShot() const;
+
 	/** Can a shot fired right now actually get out and reach TargetLocation.
 	 *
 	 *  Not the same question as "is there a line of sight", and the difference is the whole bug it
@@ -2870,7 +2965,7 @@ public:
 	 *  all. Without it a yanked weapon read as an endless magazine on the client while the server
 	 *  had counted out forty rounds. Sent on change, not per frame. */
 	UFUNCTION(Client, Reliable)
-	void Client_SyncAmmoState(int32 InBullets, bool bInHasLimitedAmmo);
+	void Client_SyncAmmoState(int32 InBullets, bool bInHasLimitedAmmo, int32 InMagazineSize);
 
 	/** A round that struck a shootable button goes back in the magazine [author, 2026-10-11]: the
 	 *  consoles of the bench level are pressed by shooting them, and a fight should not start a
@@ -2930,9 +3025,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	float GetShotHeadshotMultiplier() const;
 
-	/** The same against this target. A target that wears a helmet (UHelmetComponent) answers for
-	 *  its own head with a pool, so the multiplier is 1 there. What a hit on a body asks. */
+	/** The same against this target. What a hit on a body asks. A helmet (UHelmetComponent) does not
+	 *  cancel it [author, 2026-10-17]: the head takes the multiplied hit, and the helmet counts that. */
 	float GetShotHeadshotMultiplierAgainst(const AActor* Target) const;
+
+	/** How hard a hit of this weapon bites body armour: ArmorPenetration when the weapon sets it,
+	 *  otherwise the damage type's (UDamageType_Ranged::ArmorDamageScale).
+	 *  @see AShooterNPC::AbsorbDamageWithShieldField */
+	float GetArmorDamageScale(const UClass* DamageTypeClass) const;
 
 	/**
 	 * Does one shot of this weapon ionize its target, and by how much.
@@ -3110,6 +3210,14 @@ public:
 	/** ShotNoiseRange with the muzzle attachment counted. */
 	float GetShotNoiseRange() const;
 
+	/** This weapon's suppressed sound when a suppressor is fitted, otherwise its ordinary sound. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	USoundBase* GetEffectiveFireSound() const;
+
+	/** This weapon's suppressed flash wins over normal and charge-based flashes with a suppressor. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	UNiagaraSystem* GetEffectiveMuzzleFlashFX() const;
+
 	/** Apply a magnification to a field of view and get the zoomed-in field of view back.
 	 *
 	 *  Zoom is a ratio of TANGENTS, not of angles, because that is what the projection does:
@@ -3118,13 +3226,63 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
 	static float ApplyZoomToFOV(float BaseFOVDegrees, float Zoom);
 
-	/** Returns ADS blend in time */
-	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
-	float GetADSBlendInTime() const { return ADSBlendInTime; }
+	/** Legacy coefficient; the native ADS transition uses the duration getters below. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|ADS|Legacy")
+	float GetADSInterpSpeed() const { return ADSInterpSpeed; }
 
-	/** Returns ADS blend out time */
-	UFUNCTION(BlueprintPure, Category = "Weapon|ADS")
-	float GetADSBlendOutTime() const { return ADSBlendOutTime; }
+	/** Seconds for entering ADS with attachment penalties, before stock/suppression speed modifiers. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|ADS")
+	float GetADSBlendInTime() const;
+
+	/** Seconds for leaving ADS with attachment penalties, before the stock speed modifier. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|ADS")
+	float GetADSBlendOutTime() const;
+
+	// ==================== ADS Fatigue ====================
+	// The longer the sight is held, the more the gun wanders, the way suppression makes it wander
+	// [author, 2026-10-16]. Read by AShooterCharacter::UpdateADSFatigue; the sway enters the view in
+	// AShooterCharacter::GetViewRotation, so the round goes where the sight is. A pistol starts later,
+	// wanders less and tires slower than a machine gun.
+
+	/** Seconds in the sight before the gun starts to wander. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|ADS Fatigue", meta = (ClampMin = "0.0", Units = "s"))
+	float ADSFatigueDelay = 3.0f;
+
+	/** Seconds from the first wander to the worst of it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|ADS Fatigue", meta = (ClampMin = "0.05", Units = "s"))
+	float ADSFatigueRampTime = 5.0f;
+
+	/** How far the sight wanders at the worst. 0: this gun never tires. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|ADS Fatigue", meta = (ClampMin = "0.0", Units = "deg"))
+	float ADSFatigueSwayDegrees = 0.5f;
+
+	/** Seconds out of the sight for fully tired arms to rest. Gradual, so tapping the sight does not reset it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|ADS Fatigue", meta = (ClampMin = "0.05", Units = "s"))
+	float ADSFatigueRecoveryTime = 2.5f;
+
+	/** Wander cycles a second. Slow: a drift the hand can follow, not a shake. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Handling|ADS Fatigue", meta = (ClampMin = "0.05"))
+	float ADSFatigueSwayFrequency = 0.35f;
+
+	/** How fast the arms tire: attachments (1 or more) times mastery (1 or less). */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|ADS Fatigue")
+	float GetADSFatigueRateMultiplier() const;
+
+	/** How far a tired sight wanders: attachments (1 or more) times mastery (1 or less). */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Handling|ADS Fatigue")
+	float GetADSFatigueSwayMultiplier() const;
+
+	// ==================== Mastery ====================
+	// Docs/GameDesign_Tactical_To_PowerFantasy_2026-10-11.md section 11. Progress is the player's
+	// (UWeaponMasteryComponent), the ladder is this asset; guns that share an asset share progress.
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Mastery")
+	TObjectPtr<UWeaponMasteryDefinition> MasteryDefinition;
+
+	/** What the holder's mastery of this gun gives now. Neutral (nothing open, multipliers 1) without
+	 *  a holder, a player state or a MasteryDefinition. Every machine answers the same: the progress
+	 *  replicates with the player state. */
+	FWeaponMasteryPerks GetMasteryPerks() const;
 
 	// ==================== ADS Camera ====================
 

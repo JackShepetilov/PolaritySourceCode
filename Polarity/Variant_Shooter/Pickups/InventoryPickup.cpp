@@ -13,6 +13,8 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "Variant_Shooter/Inventory/InventoryComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition.h"
 #include "Variant_Shooter/ShooterCharacter.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogInventoryPickup, Log, All);
@@ -275,6 +277,14 @@ void AInventoryPickup::CompletePull()
 	if (bAttachment)
 	{
 		Inventory->CanAccept(Offered, LandingCell);
+	}
+
+	// A new gadget kind with every place taken: the kind on the G key goes on the floor and this one
+	// takes its place [author, 2026-10-16].
+	if (Offered.Kind == EInventorySlotKind::Grenade)
+	{
+		const UGrenadeComponent* const Grenades = Player->FindComponentByClass<UGrenadeComponent>();
+		Inventory->SwapOutGadgetFor(Cast<UGrenadeDefinition>(Offered.Payload), Grenades ? Grenades->GetSelectedType() : nullptr);
 	}
 
 	const int32 Left = Inventory->TryAdd(Offered);

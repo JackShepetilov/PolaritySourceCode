@@ -19,14 +19,40 @@
 #include "Components/BoxComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Curves/CurveFloat.h"
+#include "Curves/CurveVector.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/DamageEvents.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/Character.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "Net/UnrealNetwork.h"
 
 // Marks a pull started by the grapple rather than by a yank. Server-side only, like the pull itself;
 // written by BeginGrappleFetchPull.
 static const FName GrappleFetchPullTag(TEXT("GrappleFetchPull"));
+
+namespace SpearTrace
+{
+	// Debug only, so the header stays as it is: the thrower's view at the slap, per drop, to measure
+	// where the flight goes against the sight line. [SPEAR_TRACE] in the log.
+	TMap<TWeakObjectPtr<const ADroppedRangedWeapon>, FTransform> LaunchViews;
+
+	FString InView(const ADroppedRangedWeapon* Drop, const FVector& WorldPoint)
+	{
+		const FTransform* const View = LaunchViews.Find(Drop);
+		if (!View)
+		{
+			return TEXT("?");
+		}
+		// X along the sight, Y to the right of it, Z above it, in cm; and the angle off the sight line.
+		const FVector Local = View->InverseTransformPosition(WorldPoint);
+		const float RightDeg = FMath::RadiansToDegrees(FMath::Atan2(Local.Y, FMath::Max(1.0f, Local.X)));
+		const float UpDeg = FMath::RadiansToDegrees(FMath::Atan2(Local.Z, FMath::Max(1.0f, Local.X)));
+		return FString::Printf(TEXT("fwd %.0f right %.1f up %.1f cm (right %.2f deg, up %.2f deg)"), Local.X, Local.Y, Local.Z, RightDeg, UpDeg);
+	}
+}
 
 ADroppedRangedWeapon::ADroppedRangedWeapon()
 {
@@ -84,6 +110,7 @@ void ADroppedRangedWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME(ADroppedRangedWeapon, ReplicatedCharge);
 	// Set before FinishSpawning and never changed after, so the first packet is enough.
 	DOREPLIFETIME_CONDITION(ADroppedRangedWeapon, WeaponClass, COND_InitialOnly);
+	DOREPLIFETIME(ADroppedRangedWeapon, SpearToss);
 }
 
 UPrimitiveComponent* ADroppedRangedWeapon::GetBody() const
@@ -178,17 +205,24 @@ void ADroppedRangedWeapon::RefreshVisualFromWeaponClass()
 	}
 	VisualBuiltFor = WeaponClass;
 
+	// The gun as the player saw it in his hands: the first person mesh [author, 2026-10-17]. The third
+	// person one is an Infima stand-in that often looks like another gun; it stays the fallback for a
+	// class without a first person mesh.
 	const AShooterWeapon* const CDO = WeaponClass ? WeaponClass->GetDefaultObject<AShooterWeapon>() : nullptr;
-	const USkeletalMeshComponent* const SourceMesh = CDO ? CDO->GetThirdPersonMesh() : nullptr;
+	const USkeletalMeshComponent* SourceMesh = CDO ? CDO->GetFirstPersonMesh() : nullptr;
+	if (!SourceMesh || !SourceMesh->GetSkeletalMeshAsset())
+	{
+		SourceMesh = CDO ? CDO->GetThirdPersonMesh() : nullptr;
+	}
 	USkeletalMesh* const Mesh = SourceMesh ? SourceMesh->GetSkeletalMeshAsset() : nullptr;
 	if (!Mesh)
 	{
-		// An old drop blueprint without a class, or a class with no third person mesh. Nothing to
-		// show, and saying so is more useful than an invisible pickup.
+		// An old drop blueprint without a class, or a class with no mesh at all. Nothing to show, and
+		// saying so is more useful than an invisible pickup.
 		WeaponVisual->SetSkeletalMeshAsset(nullptr);
 		if (WeaponClass)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[WEAPON_DROP] %s: %s has no third person mesh, the drop is invisible"),
+			UE_LOG(LogTemp, Warning, TEXT("[WEAPON_DROP] %s: %s has no first or third person mesh, the drop is invisible"),
 				*GetName(), *GetNameSafe(WeaponClass));
 		}
 		return;
@@ -222,6 +256,13 @@ void ADroppedRangedWeapon::OnRep_DropCharge()
 
 void ADroppedRangedWeapon::PostNetReceivePhysicState()
 {
+	// In the toss every machine flies its own copy against the thrower's view: the server's
+	// transform would drag a client's copy back to where the server last saw the camera.
+	if (IsSpearTossing())
+	{
+		return;
+	}
+
 	if (Body && !Body->IsSimulatingPhysics())
 	{
 		const FRepMovement& RepMove = GetReplicatedMovement();
@@ -289,6 +330,32 @@ void ADroppedRangedWeapon::OnWeaponMeshHit(UPrimitiveComponent* HitComponent, AA
 	UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
 	if (!OtherActor || !Body) return;
+
+	// ==================== Spear throw: the first thing it meets ends the flight ====================
+	// No damage, a stun like the flashbang's [author, 2026-10-16]. Then an ordinary drop: the pawns
+	// stop blocking it again, and nothing else below (the old throw stun, Air Mail) runs for it.
+	if (bSpearFlying)
+	{
+		if (OtherActor == SpearThrower.Get())
+		{
+			return;
+		}
+		bSpearFlying = false;
+		SpearTarget = nullptr;
+		Body->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		Body->IgnoreActorWhenMoving(SpearThrower.Get(), false);
+
+		AShooterNPC* const NPC = Cast<AShooterNPC>(OtherActor);
+		if (NPC && !NPC->IsDead() && HasAuthority())
+		{
+			NPC->ApplyFlashbang(SpearStunSeconds, 4.0f, SpearThrower.Get());
+		}
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s hit %s%s"), *GetName(), *GetNameSafe(OtherActor),
+			NPC ? *FString::Printf(TEXT(", stunned for %.1f s"), SpearStunSeconds) : TEXT(""));
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_TRACE] %s hit point at %s"), *GetName(), *SpearTrace::InView(this, Hit.ImpactPoint));
+		SpearTrace::LaunchViews.Remove(this);
+		return;
+	}
 
 	// ==================== Air Mail: kicked flight resolves on first impact ====================
 	// The kicked weapon deals the upgrade's KickDamage to the NPC it slams into (plus the
@@ -385,6 +452,27 @@ void ADroppedRangedWeapon::Tick(float DeltaTime)
 	if (Body && Body->IsSimulatingPhysics())
 	{
 		PreImpactVelocity = Body->GetPhysicsLinearVelocity();
+	}
+
+	// The spear throw: the toss on every machine, the spin in flight on the server.
+	if (IsSpearTossing())
+	{
+		UpdateSpearToss();
+	}
+	else if (bSpearFlying)
+	{
+		if (HasAuthority())
+		{
+			SteerSpear(DeltaTime);
+		}
+		AirMailTickSpear(Body, SpearSpinSpeed);
+		if (Body && SpearTrace::LaunchViews.Contains(this))
+		{
+			const FTransform& View = SpearTrace::LaunchViews[this];
+			const FVector Vel = View.InverseTransformVector(Body->GetPhysicsLinearVelocity());
+			UE_LOG(LogTemp, Log, TEXT("[SPEAR_TRACE] %s flight: body at %s; velocity in view (%.0f, %.0f, %.0f)"),
+				*GetName(), *SpearTrace::InView(this, GetActorLocation()), Vel.X, Vel.Y, Vel.Z);
+		}
 	}
 
 	// Air Mail spear: while kicked, drive orientation kinematically (nose along velocity + roll)
@@ -792,6 +880,208 @@ float ADroppedRangedWeapon::CalculateCaptureRange() const
 }
 
 // ==================== Pull ====================
+
+// ==================== Spear throw ====================
+
+void ADroppedRangedWeapon::GetThrowerView(const AShooterCharacter* Thrower, FVector& OutLocation, FQuat& OutRotation)
+{
+	// His own machine has the real camera, the one the slap is aimed with. Everywhere else the pawn's
+	// eyes and its replicated aim are the closest there is.
+	const APlayerController* const PC = Thrower ? Cast<APlayerController>(Thrower->GetController()) : nullptr;
+	if (PC && PC->IsLocalController() && PC->PlayerCameraManager)
+	{
+		OutLocation = PC->PlayerCameraManager->GetCameraLocation();
+		OutRotation = PC->PlayerCameraManager->GetCameraRotation().Quaternion();
+		return;
+	}
+	OutLocation = Thrower ? Thrower->GetPawnViewLocation() : FVector::ZeroVector;
+	OutRotation = Thrower ? Thrower->GetBaseAimRotation().Quaternion() : FQuat::Identity;
+}
+
+void ADroppedRangedWeapon::BeginSpearToss(AShooterCharacter* Thrower, const FSpearTossState& InToss)
+{
+	if (!HasAuthority() || !Thrower || !Body)
+	{
+		return;
+	}
+
+	FSpearTossState Toss = InToss;
+	Toss.Thrower = Thrower;
+	const AGameStateBase* const GameState = GetWorld() ? GetWorld()->GetGameState() : nullptr;
+	Toss.StartTime = GameState ? GameState->GetServerWorldTimeSeconds() : GetWorld()->GetTimeSeconds();
+	Toss.Duration = FMath::Max(0.05f, Toss.Duration);
+	SpearToss = Toss;
+	SpearThrower = Thrower;
+
+	// Nobody takes it out of the air, and it bumps into nothing on the way up.
+	bCanBeCaptured = false;
+	OnRep_SpearToss();
+	UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s tossed by %s for %.2f s"), *GetName(), *GetNameSafe(Thrower), Toss.Duration);
+}
+
+void ADroppedRangedWeapon::OnRep_SpearToss()
+{
+	if (!Body)
+	{
+		return;
+	}
+	if (IsSpearTossing())
+	{
+		Body->SetSimulatePhysics(false);
+		Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		UpdateSpearToss();
+	}
+	else if (!HasAuthority())
+	{
+		// The slap on a client: the server simulates the flight, this copy is shown it again.
+		Body->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	}
+}
+
+void ADroppedRangedWeapon::UpdateSpearToss()
+{
+	const AShooterCharacter* const Thrower = SpearToss.Thrower;
+	const UWorld* const World = GetWorld();
+	if (!Thrower || !World)
+	{
+		return;
+	}
+
+	const AGameStateBase* const GameState = World->GetGameState();
+	const double Now = GameState ? GameState->GetServerWorldTimeSeconds() : World->GetTimeSeconds();
+	const float Alpha = FMath::Clamp(static_cast<float>((Now - SpearToss.StartTime) / SpearToss.Duration), 0.0f, 1.0f);
+
+	// Up from the hand and down in front of the eyes: a bezier whose middle point is lifted twice the
+	// apex, so the top of the curve sits one apex above the straight line.
+	const FVector Mid = (SpearToss.StartOffset + SpearToss.EndOffset) * 0.5f + FVector(0.0f, 0.0f, SpearToss.Apex * 2.0f);
+	const float U = 1.0f - Alpha;
+	FVector Local = SpearToss.StartOffset * (U * U) + Mid * (2.0f * U * Alpha) + SpearToss.EndOffset * (Alpha * Alpha);
+	if (SpearToss.PathCurve)
+	{
+		Local += SpearToss.PathCurve->GetVectorValue(Alpha);
+	}
+
+	// From the hand's own angle to pointing forward for the slap, and on top of it the turn about the
+	// view's axes: drawn by hand in RotationCurve, or Turns about SpinAxis slowing by SpinEase.
+	FQuat Spin = FQuat::Identity;
+	if (SpearToss.RotationCurve)
+	{
+		const FVector Degrees = SpearToss.RotationCurve->GetVectorValue(Alpha);
+		Spin = FRotator(Degrees.Y, Degrees.Z, Degrees.X).Quaternion();
+	}
+	else
+	{
+		const FVector Axis = SpearToss.SpinAxis.IsNearlyZero() ? FVector::RightVector : SpearToss.SpinAxis.GetSafeNormal();
+		const float Turned = FMath::InterpEaseOut(0.0f, 1.0f, Alpha, FMath::Max(1.0f, SpearToss.SpinEase));
+		Spin = FQuat(Axis, FMath::DegreesToRadians(-360.0f * SpearToss.Turns * Turned));
+	}
+	const FQuat LocalRotation = Spin * FQuat::Slerp(SpearToss.StartRotation, FQuat::Identity, Alpha);
+
+	FVector ViewLocation;
+	FQuat ViewRotation;
+	GetThrowerView(Thrower, ViewLocation, ViewRotation);
+	SetActorLocationAndRotation(ViewLocation + ViewRotation.RotateVector(Local), ViewRotation * LocalRotation,
+		false, nullptr, ETeleportType::TeleportPhysics);
+}
+
+void ADroppedRangedWeapon::LaunchSpear(const FVector& Direction, float Speed, float SpinDegPerSec, float StunSeconds,
+	AActor* Target, float TurnRateDegPerSec)
+{
+	if (!HasAuthority() || !Body)
+	{
+		return;
+	}
+
+	const FVector Dir = Direction.GetSafeNormal();
+	SpearToss = FSpearTossState();
+	bSpearFlying = true;
+	SpearSpinSpeed = SpinDegPerSec;
+	SpearStunSeconds = StunSeconds;
+	SpearTarget = Target;
+	SpearTurnRate = TurnRateDegPerSec;
+	bCanBeCaptured = true;
+
+	// Pawns block it for the flight (the stun needs the hit), but not at the very start: it leaves from
+	// inside the thrower's reach, and a body that touches his capsule on the way out is pushed off
+	// line (it flew right of the sight). The first frames ignore pawns, then they block.
+	Body->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Body->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	Body->IgnoreActorWhenMoving(SpearThrower.Get(), true);
+	TWeakObjectPtr<ADroppedRangedWeapon> WeakThis(this);
+	GetWorldTimerManager().SetTimer(SpearPawnBlockTimer, FTimerDelegate::CreateLambda([WeakThis]()
+	{
+		ADroppedRangedWeapon* const Self = WeakThis.Get();
+		if (Self && Self->bSpearFlying && Self->Body)
+		{
+			Self->Body->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		}
+	}), 0.12f, false);
+	Body->SetSimulatePhysics(true);
+	AirMailOrientSpear(Body, Dir);
+	Body->SetPhysicsLinearVelocity(Dir * Speed);
+	ForceNetUpdate();
+	UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s slapped forward at %.0f cm/s"), *GetName(), Speed);
+
+	if (const AShooterCharacter* const Thrower = SpearThrower.Get())
+	{
+		FVector ViewLocation;
+		FQuat ViewRotation;
+		GetThrowerView(Thrower, ViewLocation, ViewRotation);
+		SpearTrace::LaunchViews.Add(this, FTransform(ViewRotation, ViewLocation));
+		const FVector DirInView = ViewRotation.UnrotateVector(Dir);
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_TRACE] %s launch: body at %s; velocity dir in view (%.3f, %.3f, %.3f); body velocity after set %.0f"),
+			*GetName(), *SpearTrace::InView(this, GetActorLocation()), DirInView.X, DirInView.Y, DirInView.Z,
+			Body->GetPhysicsLinearVelocity().Size());
+	}
+}
+
+FVector ADroppedRangedWeapon::GetSpearAimPoint(const AActor* Target)
+{
+	if (const ACharacter* const Character = Cast<ACharacter>(Target))
+	{
+		// The chest: a third of the half height above the capsule's middle.
+		const float HalfHeight = Character->GetCapsuleComponent() ? Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.0f;
+		return Character->GetActorLocation() + FVector(0.0f, 0.0f, HalfHeight * 0.3f);
+	}
+	return Target ? Target->GetActorLocation() : FVector::ZeroVector;
+}
+
+void ADroppedRangedWeapon::SteerSpear(float DeltaTime)
+{
+	const AActor* const Target = SpearTarget.Get();
+	const AShooterNPC* const NPC = Cast<AShooterNPC>(Target);
+	if (!Target || !Body || SpearTurnRate <= 0.0f || (NPC && NPC->IsDead()))
+	{
+		SpearTarget = nullptr;
+		return;
+	}
+
+	const FVector Velocity = Body->GetPhysicsLinearVelocity();
+	const float Speed = Velocity.Size();
+	const FVector ToTarget = GetSpearAimPoint(Target) - GetActorLocation();
+	if (Speed < 100.0f || ToTarget.IsNearlyZero())
+	{
+		return;
+	}
+
+	const FVector Current = Velocity / Speed;
+	const FVector Wanted = ToTarget.GetSafeNormal();
+	// Gone past him: the flight carries on straight rather than turning back like a boomerang.
+	if (FVector::DotProduct(Current, Wanted) <= 0.0f)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s passed %s, homing off"), *GetName(), *GetNameSafe(Target));
+		SpearTarget = nullptr;
+		return;
+	}
+
+	// Turn by at most TurnRate this frame, keeping the speed: gravity is replaced by the steering
+	// while it lasts, which is what makes the flight a line to him rather than an arc under him.
+	const float Angle = FMath::Acos(FMath::Clamp(FVector::DotProduct(Current, Wanted), -1.0f, 1.0f));
+	const float MaxStep = FMath::DegreesToRadians(SpearTurnRate) * DeltaTime;
+	const FVector NewDir = Angle <= MaxStep ? Wanted
+		: FQuat::Slerp(FQuat::Identity, FQuat::FindBetweenNormals(Current, Wanted), MaxStep / Angle).RotateVector(Current);
+	Body->SetPhysicsLinearVelocity(NewDir.GetSafeNormal() * Speed);
+}
 
 void ADroppedRangedWeapon::StartPull(AShooterCharacter* InPullingPlayer)
 {

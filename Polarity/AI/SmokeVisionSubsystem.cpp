@@ -4,6 +4,7 @@
 #include "Variant_Shooter/Abilities/SmokeCloud.h"
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "AI/Coordination/AICombatCoordinator.h"
+#include "Variant_Shooter/Bench/FightRecorder.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "TimerManager.h"
@@ -14,6 +15,11 @@ void USmokeVisionSubsystem::RegisterCloud(ASmokeCloud* Cloud)
 	{
 		Clouds.AddUnique(Cloud);
 		UpdateSweepTimer();
+
+		// Into the record of the fight: without the place of the smoke nobody can say afterwards
+		// whether somebody was seen through it or over it.
+		const FVector Where = Cloud->GetActorLocation();
+		UFightRecorderSubsystem::NoteMark(this, FString::Printf(TEXT("SMOKE at %.0f %.0f %.0f"), Where.X, Where.Y, Where.Z));
 	}
 }
 

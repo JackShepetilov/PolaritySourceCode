@@ -103,6 +103,28 @@ STOPS = (
     ("SNIPER", (SX[0] + 600.0, SY[0] + 700.0, -90.0, 100.0), (SX[0] + 1500.0, SY[0] + 60.0, 130.0, 90.0)),
 )
 
+# ---------------- CORNER ----------------
+# [автор, 2026-10-14] Бой в упор из-за угла: выходишь из-за стены, враг в двух метрах лицом к углу.
+# Комната 40x40 м севернее поля, свой пол и навмеш. Стена-угол идёт с запада на восток и обрывается
+# в середине комнаты. Север стены: старт (игрок или атакующий NPC). Юг: защитник у самого угла,
+# смотрит на угол. Пульты (поворот задаётся тут, не как у _console):
+#   CORNER 1v1     защитник против игрока
+#   CORNER NPC     защитник (сторона 1) против атакующего (сторона 2), игрок смотрит. Обоим один
+#                  ствол, атакующему сказано, где защитник: он сам идёт за угол.
+KX = (500.0, 4500.0)
+KY = (15800.0, 19800.0)
+K_WALL_Y = 17800.0          # стена-угол
+K_TIP_X = 2500.0            # конец стены, сам угол
+K_WALL_H = 300.0
+K_DEFENDER = (K_TIP_X - 200.0, K_WALL_Y - 90.0)    # вплотную к стене: видно только с самого угла, 2-3 м
+                                                   # (на 130/160 видели друг друга с 5 м, замер 2026-10-14)
+K_START = (1300.0, K_WALL_Y + 500.0)               # старт с севера, лицом на восток
+K_GUN = "/Game/Variant_Shooter/Blueprints/Pickups/Weapons/Kinemation/ARs/BP_AKX203"
+K_MATS = "/Game/Prototype/CombatBench/Materials/MI_BenchTeam_"
+
+CORNER_STOP = ("CORNER", (K_START[0], K_START[1], 0.0, 100.0), (KX[0] + 45.0, K_START[1] + 250.0, 130.0, 0.0))
+STOPS = STOPS + (CORNER_STOP,)
+
 
 def _point(tag, label, x, y, z, yaw, folder):
     tp = hb["_eas"]().spawn_actor_from_class(unreal.TargetPoint, unreal.Vector(x, y, z),
@@ -135,11 +157,26 @@ def _group(shooter, points, task, reinforcement=False, hold_radius=0.0, centre=N
     return grp
 
 
-def _room_walls(name, x, y, folder):
-    wall(name + "_WallS", "y", y[0], x[0], x[1], 0.0, WALL_H, t=60.0, folder=folder)
-    wall(name + "_WallN", "y", y[1], x[0], x[1], 0.0, WALL_H, t=60.0, folder=folder)
-    wall(name + "_WallW", "x", x[0], y[0], y[1], 0.0, WALL_H, t=60.0, folder=folder)
-    wall(name + "_WallE", "x", x[1], y[0], y[1], 0.0, WALL_H, t=60.0, folder=folder)
+# Проёмы скелета забега [автор, 2026-10-17]: из низины PATROL на восток в проход, из прохода в
+# аванпост с запада. Дверь в проёме PATROL ставит build_run_glue.py. (от y, до y, верх проёма)
+RUN_DOOR_PATROL = (8800.0, 9200.0, 300.0)
+RUN_DOOR_OUTPOST = (6400.0, 6800.0, 300.0)
+
+
+def _room_walls(name, x, y, folder, gaps=None):
+    """gaps: {"E": (от, до, верх проёма), ...} проём от пола по стороне."""
+    gaps = gaps or {}
+
+    def g(side):
+        if side not in gaps:
+            return ()
+        a, b, head = gaps[side]
+        return ((a, b, 0.0, head),)
+
+    wall(name + "_WallS", "y", y[0], x[0], x[1], 0.0, WALL_H, t=60.0, folder=folder, gaps=g("S"))
+    wall(name + "_WallN", "y", y[1], x[0], x[1], 0.0, WALL_H, t=60.0, folder=folder, gaps=g("N"))
+    wall(name + "_WallW", "x", x[0], y[0], y[1], 0.0, WALL_H, t=60.0, folder=folder, gaps=g("W"))
+    wall(name + "_WallE", "x", x[1], y[0], y[1], 0.0, WALL_H, t=60.0, folder=folder, gaps=g("E"))
 
 
 def _patrol(shooter):
@@ -155,7 +192,7 @@ def _patrol(shooter):
     nav.set_actor_scale3d(unreal.Vector((fx1 - fx0) / 200.0, (fy1 - fy0) / 200.0, 10.0))
     hb["_tag"](nav, tag, "Field_NavBounds", f)
 
-    _room_walls("Patrol", PX, PY, f)
+    _room_walls("Patrol", PX, PY, f, gaps={"E": RUN_DOOR_PATROL})
     mid = (PX[0] + PX[1]) * 0.5
 
     # Уступ, бруствер с просветами и два пологих спуска (ступень 15 см: бойцы поднимаются).
@@ -229,7 +266,7 @@ def _outpost(shooter):
     hb["TAG_GEO"] = tag
     hb["_clear"](tag)
 
-    _room_walls("Outpost", OX, OY, f)
+    _room_walls("Outpost", OX, OY, f, gaps={"W": RUN_DOOR_OUTPOST})
 
     # ---- площадка и четыре подъёма на неё ----
     _lbox("Out_Platform", -30, -18, 30, 26, 0.0, PLAT, f)
@@ -348,6 +385,80 @@ def _sniper(shooter):
              [_group(shooter, [post], unreal.SquadTask.HOLD, hold_radius=450.0, centre=centre, weapon=gun)])
     log("ADDED: SNIPER x1")
     log("DONE: SNIPER")
+
+
+def _corner_console(tag, title, x, y, z, yaw, folder, groups, watch=False):
+    enc = hb["_eas"]().spawn_actor_from_class(unreal.BenchEncounter, unreal.Vector(x, y, z),
+                                              unreal.Rotator(roll=0.0, pitch=0.0, yaw=yaw))
+    hb["_tag"](enc, tag, "Enc_" + title.replace(" ", "_"), folder)
+    enc.set_editor_property("encounter_name", title)
+    enc.set_editor_property("players_only_watch", watch)
+    enc.set_editor_property("groups", groups)
+    return enc
+
+
+def _corner(shooter):
+    import math
+    tag, f = "CombatBenchCorner", "CombatBench/CORNER"
+    hb["TAG_GEO"] = tag
+    hb["_clear"](tag)
+    eas = hb["_eas"]()
+    gun = unreal.EditorAssetLibrary.load_blueprint_class(K_GUN)
+    if gun is None:
+        raise RuntimeError("нет ствола " + K_GUN)
+
+    x0, x1 = KX
+    y0, y1 = KY
+    box("Corner_Floor", (x0 + x1) * 0.5, (y0 + y1) * 0.5, -50.0, x1 - x0, y1 - y0, 50.0, folder=f)
+    nav = eas.spawn_actor_from_class(unreal.NavMeshBoundsVolume, unreal.Vector((x0 + x1) * 0.5, (y0 + y1) * 0.5, 300.0))
+    nav.set_actor_scale3d(unreal.Vector((x1 - x0) / 200.0, (y1 - y0) / 200.0, 10.0))
+    hb["_tag"](nav, tag, "Corner_NavBounds", f)
+    _room_walls("Corner", KX, KY, f)
+    wall("Corner_Wall", "y", K_WALL_Y, x0, K_TIP_X, 0.0, K_WALL_H, t=30.0, folder=f)
+
+    dx, dy = K_TIP_X - K_DEFENDER[0], K_WALL_Y - K_DEFENDER[1]
+    face = math.degrees(math.atan2(dy, dx))
+    defender = _point(tag, "Corner_Defender", K_DEFENDER[0], K_DEFENDER[1], cb["S_Z"], face, f + "/SpawnPoints")
+    attacker = _point(tag, "Corner_Attacker", K_START[0], K_START[1], cb["S_Z"], 0.0, f + "/SpawnPoints")
+
+    def holder(team=255, mat=None):
+        g = _group(shooter, [defender], unreal.SquadTask.HOLD, hold_radius=150.0, centre=defender, weapon=gun)
+        g.set_editor_property("team", team)
+        if mat is not None:
+            g.set_editor_property("body_material", mat)
+        return g
+
+    mats = {t: unreal.load_asset(K_MATS + str(t)) for t in (1, 2)}
+    walker = _group(shooter, [attacker], unreal.SquadTask.ADVANCE, weapon=gun)
+    walker.set_editor_property("team", 2)
+    walker.set_editor_property("body_material", mats[2])
+    walker.set_editor_property("told_where_enemies_are", True)
+
+    hb["text"]("Corner_Title", x0 + 60.0, K_START[1] - 250.0, 330.0,
+               "CORNER\ncome round the wall: he is 2 m behind it", size=40.0, yaw=0.0, folder=f, tag=tag)
+    _corner_console(tag, "CORNER 1v1", x0 + 60.0, K_START[1] + 450.0, 130.0, 0.0, f, [holder()])
+    _corner_console(tag, "CORNER NPC", x0 + 60.0, K_START[1] + 650.0, 130.0, 0.0, f,
+                    [holder(1, mats[1]), walker], watch=True)
+    # Камера для записи: сверху вдоль стены с востока, видны обе стороны угла (PC.set_view_target_with_blend).
+    # Сбоку с севера защитника прятала стена (проверено 2026-10-14).
+    cam_at, look_at = (3500.0, 17750.0, 1050.0), (2000.0, 17800.0, 50.0)
+    d = [look_at[i] - cam_at[i] for i in range(3)]
+    cam_yaw = math.degrees(math.atan2(d[1], d[0]))
+    cam_pitch = math.degrees(math.atan2(d[2], math.hypot(d[0], d[1])))
+    cam = eas.spawn_actor_from_class(unreal.CameraActor, unreal.Vector(*cam_at),
+                                     unreal.Rotator(roll=0.0, pitch=cam_pitch, yaw=cam_yaw))
+    hb["_tag"](cam, tag, "Corner_Cam", f)
+    log("ADDED: CORNER 1v1, CORNER NPC; defender faces {:.0f} deg".format(face))
+    log("DONE: CORNER")
+
+
+def step_corner():
+    hb["guard"]()
+    shooter = unreal.EditorAssetLibrary.load_blueprint_class(cb["SHOOTER"])
+    if shooter is None:
+        raise RuntimeError("нет класса " + cb["SHOOTER"])
+    _corner(shooter)
+    hb["_les"]().save_current_level()
 
 
 def step_field():

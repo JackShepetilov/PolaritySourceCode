@@ -300,6 +300,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "AI|Dazzle")
 	bool IsDazzled() const;
 
+	/** A light in the face that puts it off without driving it anywhere (the plain flashlight, the
+	 *  plain laser) [author, 2026-10-15]: the reaction starts over and the aim is SpreadMultiplier
+	 *  worse for Duration. Nothing changes while a full dazzle is running. Authority. */
+	void ApplyGlare(AActor* Source, float Duration, float SpreadMultiplier);
+
+	/** It may not come closer to Source than it is now, for Seconds (the strobe, the burner): corners
+	 *  nearer to Source are refused (UCoverFinderComponent), and a dazzle drive-off fires on at the
+	 *  light from its cover instead of hiding quiet. Renewing it keeps the distance it started with.
+	 *  Authority. */
+	void ApplyKeepAway(AActor* Source, float Seconds);
+
+	bool IsKeepAwayActive() const;
+
+	/** Is Point closer to the keep-away source than this one may come. */
+	bool IsKeptAwayFrom(const FVector& Point) const;
+
 	/** Knocked out of shooting for at least Duration from now; calling again while disarmed pushes
 	 *  the end out, never pulls it in. Gates TryStartShooting, so it covers what fires through that:
 	 *  the foot soldier. Flyers and the tank drive their own fire and are not touched. Authority. */
@@ -405,7 +421,7 @@ public:
 	 *  it land, or is shouted at by its side) and where it runs is decided here. */
 	void NotifyGrenadeThreat(AGrenadeProjectile* Grenade, const FVector& Center, float Radius, float TimeLeft);
 
-	/** True from noticing a grenade to it having gone off. */
+	/** True from noticing a grenade to being clear of its reach (or it being over). */
 	UFUNCTION(BlueprintPure, Category = "AI|Grenade")
 	bool IsEscapingGrenade() const { return GrenadeEscapePhase != EGrenadeEscapePhase::Inactive; }
 
@@ -456,6 +472,21 @@ public:
 
 	UFUNCTION()
 	void OnRep_Distracted();
+
+	/** A headache is on (the microwave grenade, UAIAccuracyComponent::ApplyHeadache). Replicated so
+	 *  every player can see whom it got and whom it no longer holds. */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Headache, Category = "Coop|Headache")
+	bool bHeadache = false;
+
+	UFUNCTION()
+	void OnRep_Headache();
+
+	/** Worn on the head while bHeadache: wisps and glitch streaks. Set in the Blueprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Headache")
+	TObjectPtr<UNiagaraSystem> HeadacheFX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Coop|Headache")
+	FName HeadacheFXSocket = FName("head");
 
 	/** Worn while a decoy holds this enemy. Set per NPC class in the Blueprint, like the shield
 	 *  bypass overlay next to it, and not replicated for the same reason: the flag travels and every
@@ -529,11 +560,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|SFX")
 	TObjectPtr<USoundBase> DeathSound;
 
+	/** Shouted when it starts a reload: the player's cue to push. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Damage|SFX")
+	TObjectPtr<USoundBase> ReloadCallSound;
+
 	// Team lives on APolarityCharacter now, one implementation for every character in the game.
 	// The value for enemies is set in this class's constructor; see the note there.
 
 	/** Pointer to the equipped weapon */
 	TObjectPtr<AShooterWeapon> Weapon;
+
+	/** @see SetBenchWeaponOverride */
+	UPROPERTY(Transient)
+	TSubclassOf<AShooterWeapon> BenchWeaponOverride;
 
 	/** Type of weapon to spawn for this character. Ignored when WeaponOptions has rows. */
 	UPROPERTY(EditAnywhere, Category = "Weapon")
@@ -550,6 +589,10 @@ protected:
 	 *  because the row's index is what travels to clients; one that is not is refused with a warning. */
 public:
 	void ForceWeapon(TSubclassOf<AShooterWeapon> GunClass);
+
+	/** Any gun, over the profile and the options: for the bench poser (ABenchWeaponPoser), which shows
+	 *  every gun. Before BeginPlay, on the server. */
+	void SetBenchWeaponOverride(TSubclassOf<AShooterWeapon> GunClass) { BenchWeaponOverride = GunClass; }
 
 	/** The gun in its hands; null before it has one. */
 	AShooterWeapon* GetWeapon() const { return Weapon; }
@@ -742,6 +785,14 @@ protected:
 
 	TWeakObjectPtr<UMaterialInterface> DazzleOverlay;
 
+	/** @see ApplyGlare */
+	float GlareUntil = -1.0f;
+
+	/** @see ApplyKeepAway */
+	TWeakObjectPtr<AActor> KeepAwaySource;
+	float KeepAwayUntil = -1000.0f;
+	float KeepAwayDistance = 0.0f;
+
 	float DazzleScanTimer = 0.0f;
 	float DazzleRetreatClock = 0.0f;
 	bool bDazzleBackingOff = false;
@@ -754,8 +805,8 @@ protected:
 	{
 		Inactive,
 		Reacting,	// Noticed it; the reaction time is running.
-		Running,	// Sprinting to the spot it chose.
-		Holding,	// There, down, until it goes off.
+		Searching,	// Asked the cover search for a corner out of its reach; waiting for the answer.
+		Moving,		// Going there: running, or backing off shooting. Back to the fight on arrival.
 	};
 	EGrenadeEscapePhase GrenadeEscapePhase = EGrenadeEscapePhase::Inactive;
 
@@ -766,6 +817,19 @@ protected:
 	float EscapeMoveAt = 0.0f;
 	float EscapeGiveUpAt = 0.0f;
 	float EscapeScanTimer = 0.0f;
+	float EscapeSearchUntil = 0.0f;
+
+	/** Shooting on the way out (at the enemy pressing it, or at the working microwave). */
+	bool bEscapeShooting = false;
+
+	/** When it last took damage: pressed by fire, it does not sprint away. */
+	float LastDamageTakenTime = -1000.0f;
+
+	/** Go to EscapeGoal (a corner when bHaveGoal, else chosen here). */
+	void StartGrenadeEscapeMove(bool bHaveGoal);
+
+	/** Run, or back off shooting, as the moment asks. @see TickGrenadeEscape */
+	void UpdateGrenadeEscapeGait(bool bForce);
 
 	/** Drive the escape. Called from Tick, before the dazzle. */
 	void TickGrenadeEscape(float DeltaTime);
@@ -773,7 +837,7 @@ protected:
 	/** Back to the tree, whatever phase it is in. */
 	void EndGrenadeEscape();
 
-	/** Where to run: out of the radius, or behind a wall from it, whichever it reaches soonest. */
+	/** Where to go without a corner: out of the reach, or behind a wall from it, away from the enemy. */
 	bool ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) const;
 
 	/** Each machine's own playing of a sectioned stun. @see ApplySectionedStun */
@@ -1673,6 +1737,16 @@ public:
 	 *  rather than where the aim ray ended. @see IShooterWeaponHolder::GetWeaponAimActor */
 	virtual AActor* GetWeaponAimActor() const override { return CurrentAimTarget.Get(); }
 
+	/** The round being fired was meant to miss (fire discipline, suppression, pin fire).
+	 *  @see UAIAccuracyComponent::WasLastRoundDeliberateMiss */
+	virtual bool IsCurrentShotDeliberateMiss() const override;
+
+	/** @see UAIAccuracyComponent::WasLastRoundPlaced */
+	virtual bool IsCurrentShotPlaced() const override;
+
+	/** Reaction, aimed rounds, stress. @see UAIAccuracyComponent */
+	UAIAccuracyComponent* GetAccuracyComponent() const { return AccuracyComponent; }
+
 	/** Gives a weapon of this class to the owner */
 	virtual void AddWeaponClass(const TSubclassOf<AShooterWeapon>& WeaponClass) override;
 
@@ -1784,7 +1858,37 @@ protected:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayReloadMontage(float PlayRate);
 
+	/** Close fight melee: the strike made when the magazine runs dry and closing in pays better than
+	 *  backing off to reload. @see UNPCMeleeStrikeComponent */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Components")
+	TObjectPtr<class UNPCMeleeStrikeComponent> MeleeStrike;
+
 public:
+
+	/** Charging at somebody or striking: no shooting and no reload until it is over. */
+	bool IsMeleeBusy() const;
+
+	/** Shoved by a melee hit (UShoveComponent): no shooting, no walking, no turning for Seconds. */
+	void BeginShoveStun(float Seconds);
+
+	/** The strikes are over and it goes back to the gun: draw, then reload on the move. */
+	void ReturnToGunAfterMelee();
+
+	/** Frozen for Seconds: a friend fell next to it while it had a headache. No shooting, and the
+	 *  reaction to whoever it was fighting starts over. @see UAIAccuracyComponent::ApplyHeadache */
+	void BeginFlinch(float Seconds);
+
+	UNPCMeleeStrikeComponent* GetMeleeStrike() const { return MeleeStrike; }
+
+	/** The strike with the gun put away, on every machine. Holster may be null (a second strike in a
+	 *  row: the gun is already away). It starts at weight one and hands over to Strike over BlendIn.
+	 *  @see UNPCMeleeStrikeComponent */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayMeleeStrike(UAnimMontage* Holster, UAnimMontage* Strike, float BlendIn);
+
+	/** The gun comes back out after the strikes, on every machine. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayMeleeDraw(UAnimMontage* Draw);
 
 	/** Signals this character to start shooting at the passed actor
 	 *  @param ActorToShoot Target to shoot at
@@ -2146,6 +2250,29 @@ private:
 
 	/** @see SayTactic */
 	FName TacticNote;
+
+	/** Counts down to the next report of what this soldier sees to the fire discipline. */
+	float SightReportClock = 0.0f;
+
+	/** @see BeginShoveStun. What it switched off, to put back. */
+	FTimerHandle ShoveStunTimer;
+
+	/** @see HeadacheFX */
+	UPROPERTY(Transient)
+	TObjectPtr<class UNiagaraComponent> HeadacheFXComponent;
+
+	/** Start or stop the effect on the head to match bHeadache, on this machine. */
+	void RefreshHeadacheFX();
+
+	/** @see BeginFlinch */
+	float FlinchUntil = -1000.0f;
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_ReloadCall();
+	bool bInShoveStun = false;
+	bool bShoveSavedDesiredRotation = false;
+	bool bShoveSavedControllerYaw = false;
+	void EndShoveStun();
 
 	/** World time the cornered charge began, below zero when it never has. */
 	float LastStandStartTime = -1.0f;

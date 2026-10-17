@@ -18,6 +18,7 @@
 // reshuffled the blobs took that away. Same fault as the one written up in InventoryTypes.cpp.
 #include "Coop/CoopPlayers.h"
 #include "Variant_Shooter/Bench/FightRecorder.h"
+#include "Variant_Shooter/Bench/BenchLoadoutButton.h"
 #include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
 #include "Variant_Shooter/Health/FieldCareComponent.h"
 #include "Variant_Shooter/Grenades/GrenadeComponent.h"
@@ -32,6 +33,7 @@
 #include "Weapons/WeaponAttachmentDefinition.h"
 #include "Tactical/TacticalDeviceComponent.h"
 #include "Weapons/DroppedRangedWeapon.h"
+#include "AnimNotify_MeleeWindow.h"
 #include "Abilities/GrappleFetchable.h"
 #include "Variant_Shooter/Pickups/InventoryPickup.h"
 #include "Variant_Shooter/Buildables/BuilderComponent.h"
@@ -44,6 +46,8 @@
 #include "Abilities/AbilityDefinition_ShieldBypass.h"
 #include "Abilities/AbilityHandler_ShieldBypass.h"
 #include "AI/ShooterNPC.h"
+#include "AI/PolarityTeams.h"
+#include "EngineUtils.h"
 #include "ShooterDummyInterface.h"
 #include "MovementSettings.h"
 #include "CameraShakeComponent.h"
@@ -114,6 +118,7 @@
 #include "Variant_Shooter/DamageTypes/DamageType_EMFProximity.h"
 #include "Variant_Shooter/ShooterPlayerController.h"
 #include "PlayerDeathSequenceComponent.h"
+#include "Variant_Shooter/Progression/WeaponMasteryDefinition.h"
 
 // How far off the view ray the scope may drift, in cm, before the magnified-optic cut closes.
 // See the optic cut in UpdateADS: below "aligned" the tube is fully open, past "lost" it is shut.
@@ -567,6 +572,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			GrenadeComponent->BindInput(EnhancedInputComponent);
 		}
 
+		// The flashlight and the laser: one key cycles Off, Normal, Active (IA_TacticalMode).
+		if (TacticalDeviceComponent)
+		{
+			TacticalDeviceComponent->BindInput(EnhancedInputComponent);
+		}
+
 		// Melee attack
 		if (MeleeAction)
 		{
@@ -664,6 +675,12 @@ void AShooterCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 void AShooterCharacter::DoAim(float Yaw, float Pitch)
 {
+	// The gadget wheel is open (H held): the look picks a kind, the camera stays.
+	if (GrenadeComponent && GrenadeComponent->HandleLookForWheel(Yaw, Pitch))
+	{
+		return;
+	}
+
 	// Apex's aim sensitivity is a product of three things, and until now we had only the first:
 	//     ADS degrees per count = hip degrees per count * FOV scale * per-optic multiplier
 	// The FOV scale is what keeps a hand movement worth the same distance on the screen as the
@@ -1027,6 +1044,7 @@ void AShooterCharacter::EnterDownedState()
 		GrenadeComponent->CancelThrow();
 	}
 	AbortItemFetch();
+	AbortHandPickup();
 	SetCloaked(false);
 	if (IsValid(CurrentWeapon))
 	{
@@ -1237,6 +1255,30 @@ void AShooterCharacter::OnRep_OwnedWeapons()
 {
 	// Inventory arrived: the arms are allowed to exist again.
 	UpdateFirstPersonMeshVisibility();
+	OnWeaponInventoryChanged.Broadcast();
+}
+
+void AShooterCharacter::Client_ResetBenchLoadoutPresentation_Implementation()
+{
+	GetWorldTimerManager().ClearTimer(WeaponSwitchTimer);
+	GetWorldTimerManager().ClearTimer(ReloadResumeTimer);
+	PendingWeapon = nullptr;
+	WeaponSwitchPhase = EWeaponSwitchPhase::None;
+	bFireHeldThroughSwitch = false;
+	if (CurrentWeapon) CurrentWeapon->StopFiring();
+}
+
+void AShooterCharacter::Client_SaveBenchPreset_Implementation(ABenchLoadoutButton* BenchButton)
+{
+	TArray<int32> Bullets;
+	for (AShooterWeapon* Weapon : OwnedWeapons) Bullets.Add(Weapon ? Weapon->GetBulletCount() : 0);
+	Server_SaveBenchPreset(BenchButton, OwnedWeapons, Bullets);
+}
+
+void AShooterCharacter::Server_SaveBenchPreset_Implementation(ABenchLoadoutButton* BenchButton,
+	const TArray<AShooterWeapon*>& Weapons, const TArray<int32>& Bullets)
+{
+	if (IsValid(BenchButton) && BenchButton->GetWorld() == GetWorld()) BenchButton->SaveReportedPreset(this, Weapons, Bullets);
 }
 
 void AShooterCharacter::OnRep_CurrentWeapon()
@@ -1341,7 +1383,12 @@ void AShooterCharacter::DealDamage(AActor* HitActor, float Damage, TSubclassOf<U
 			DamageEvent.DamageTypeClass = UDamageType::StaticClass();
 		}
 		DamageEvent.HitInfo.BoneName = HitBone;
-		HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+		AActor* Causer = this;
+		if (Weapon)
+		{
+			Causer = Weapon;
+		}
+		HitActor->TakeDamage(Damage, DamageEvent, GetController(), Causer);
 		return;
 	}
 
@@ -1450,10 +1497,13 @@ void AShooterCharacter::Server_ReportDamage_Implementation(AActor* HitActor, flo
 	// The gate is re-checked HERE rather than trusted from the client. The client now reports a hit
 	// even when its own copy said the shield was up, precisely so the pierce above can happen; that
 	// report grants the weapon's damage nothing on its own.
+	// The weapon is the causer, as on the host's own shots (AShooterWeapon::ApplyDamageToTarget): the
+	// victim reads the weapon's armour penetration off it, and a gun hit must not pass for melee
+	// (ABuildableActor treats a pawn causer as a melee hit).
 	float ActualDamage = PierceDamage;
 	if (!Weapon->IsShieldGateBlocking(HitActor))
 	{
-		ActualDamage += HitActor->TakeDamage(Damage, DamageEvent, GetController(), this);
+		ActualDamage += HitActor->TakeDamage(Damage, DamageEvent, GetController(), Weapon);
 	}
 
 	// Only the server can know what the hit really did. Hand the answer back to the shooter, whose
@@ -1708,7 +1758,7 @@ void AShooterCharacter::Server_ReportWeaponReloaded_Implementation(AShooterWeapo
 
 		// The only moment the server hears that a client started reloading, so the energy refill
 		// is held back here, same as the shot report above holds it for a shot.
-		Weapon->PauseEnergyRegen(Weapon->GetActiveReloadTime());
+		Weapon->PauseEnergyRegen(Weapon->GetReloadStageDuration(Stage));
 	}
 }
 
@@ -2565,8 +2615,14 @@ void AShooterCharacter::DoStartFiring()
 		return;
 	}
 
-	// Hands busy with a medkit or with a body's armour.
-	if (FieldCareComponent && FieldCareComponent->IsBusy())
+	// Hands busy with a medkit, a body's armour or an item off the floor.
+	if ((FieldCareComponent && FieldCareComponent->IsBusy()) || IsHandPickupActive())
+	{
+		return;
+	}
+
+	// The gun is in the air for the spear throw: the hidden copy in the hands must not fire.
+	if (bSpearThrowActive)
 	{
 		return;
 	}
@@ -2585,7 +2641,8 @@ void AShooterCharacter::DoStartFiring()
 
 	// Don't fire while an ability is casting — the fire montage shares the FP mesh slot and
 	// would interrupt the ability's montage (e.g. Charge Burst).
-	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing())
+		|| IsHandPickupActive())
 	{
 		return;
 	}
@@ -2767,12 +2824,325 @@ void AShooterCharacter::DoReload()
 		return;
 	}
 
+	// Nor while the left hand is taking an item: it is the hand that changes the magazine.
+	if (IsHandPickupActive())
+	{
+		return;
+	}
+
+	// No reload started in a slide until the mastery of this gun allows it [author, 2026-10-16].
+	if (CurrentWeapon && GetApexMovement() && GetApexMovement()->IsSliding()
+		&& !CurrentWeapon->GetMasteryPerks().bAllowReloadWhileSliding)
+	{
+		return;
+	}
+
 	// The weapon owns the decision: it knows whether it has a magazine, whether that magazine is
 	// already full and whether it is the kind that gets thrown away instead of reloaded.
 	if (CurrentWeapon)
 	{
 		CurrentWeapon->StartReload();
 	}
+}
+
+void AShooterCharacter::NoteKill()
+{
+	if (const UWorld* const World = GetWorld())
+	{
+		LastKillTime = World->GetTimeSeconds();
+	}
+}
+
+// ==================== Spear throw ====================
+
+// Defined further down with the pickup code; the spear throw drops the gun the same way.
+static bool DropOwnedRangedWeaponForPickupReplacement(AShooterCharacter* Self, TArray<AShooterWeapon*>& OwnedWeapons,
+	TObjectPtr<AShooterWeapon>& CurrentWeapon, UUpgradeManagerComponent* UpgradeManager, AShooterWeapon* WeaponToDrop,
+	const FVector& LocalSpawnOffset, const FVector& LocalLinearImpulse, const FVector& AngularImpulse,
+	ADroppedRangedWeapon** OutDrop = nullptr);
+
+bool AShooterCharacter::TryStartSpearThrow()
+{
+	UWorld* const World = GetWorld();
+	if (!World || !IsLocallyControlled() || bSpearThrowActive || !CurrentWeapon || Cast<AShooterWeapon_Melee>(CurrentWeapon)
+		|| !CurrentWeapon->GetMasteryPerks().bCanThrowWeapon || IsWeaponSwitchInProgress()
+		|| (MeleeAttackComponent && MeleeAttackComponent->IsAttacking()) || !SpearSlapAnimation.AttackMontage)
+	{
+		return false;
+	}
+
+	// Where the gun is in the hand, in view space: this machine has the real camera and pose.
+	FVector HandOffset = FVector(40.0f, 10.0f, -15.0f);
+	FQuat HandRotation = FQuat::Identity;
+	if (const USkeletalMeshComponent* const GunMesh = CurrentWeapon->GetFirstPersonMesh())
+	{
+		FVector ViewLocation;
+		FQuat ViewRotation;
+		ADroppedRangedWeapon::GetThrowerView(this, ViewLocation, ViewRotation);
+		HandOffset = ViewRotation.UnrotateVector(GunMesh->GetComponentLocation() - ViewLocation);
+		HandRotation = ViewRotation.Inverse() * GunMesh->GetComponentQuat();
+	}
+
+	bSpearThrowActive = true;
+	DoStopADS();
+
+	// The gun leaves the hands now: the server's copy is gone a moment later, this one must not wait.
+	if (USkeletalMeshComponent* const FPGun = CurrentWeapon->GetFirstPersonMesh())
+	{
+		FPGun->SetVisibility(false, true);
+	}
+
+	// The arms put it away like a pistol, then the slap.
+	const float HolsterTime = SpearHolsterMontage ? SpearHolsterTime : 0.0f;
+	if (SpearHolsterMontage && GetFirstPersonMesh() && GetFirstPersonMesh()->GetAnimInstance() && HolsterTime > 0.0f)
+	{
+		GetFirstPersonMesh()->GetAnimInstance()->Montage_Play(SpearHolsterMontage, SpearHolsterMontage->GetPlayLength() / HolsterTime);
+	}
+	if (HolsterTime > 0.0f)
+	{
+		World->GetTimerManager().SetTimer(SpearSlapTimer, this, &AShooterCharacter::SpearSlapBegin, HolsterTime, false);
+	}
+	else
+	{
+		SpearSlapBegin();
+	}
+	World->GetTimerManager().SetTimer(SpearEndTimer, this, &AShooterCharacter::SpearThrowEnd,
+		HolsterTime + FMath::Max(0.1f, SpearSlapAnimation.AttackMontage->GetPlayLength() / FMath::Max(0.1f, SpearSlapAnimation.BasePlayRate)), false);
+
+	if (HasAuthority())
+	{
+		ServerSpearThrow(HandOffset, HandRotation);
+	}
+	else
+	{
+		Server_SpearThrow(HandOffset, HandRotation.Rotator());
+	}
+	UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s throws %s"), *GetName(), *GetNameSafe(CurrentWeapon));
+	return true;
+}
+
+void AShooterCharacter::Server_SpearThrow_Implementation(FVector HandOffset, FRotator HandRotation)
+{
+	ServerSpearThrow(HandOffset, HandRotation.Quaternion());
+}
+
+void AShooterCharacter::ServerSpearThrow(const FVector& HandOffset, const FQuat& HandRotation)
+{
+	UWorld* const World = GetWorld();
+	if (!World || !HasAuthority() || !CurrentWeapon || Cast<AShooterWeapon_Melee>(CurrentWeapon)
+		|| !CurrentWeapon->GetMasteryPerks().bCanThrowWeapon)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s: server refused the throw"), *GetName());
+		return;
+	}
+
+	// The gun leaves the inventory the ordinary way (its rounds go with it, its attachments back
+	// to the bag) and becomes the one drop every gun becomes; the toss takes it from there.
+	ADroppedRangedWeapon* Drop = nullptr;
+	DropOwnedRangedWeaponForPickupReplacement(this, OwnedWeapons, CurrentWeapon, UpgradeManager, CurrentWeapon,
+		FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector, &Drop);
+	if (!Drop)
+	{
+		return;
+	}
+
+	const float HolsterTime = SpearHolsterMontage ? SpearHolsterTime : 0.0f;
+	const float TossTime = HolsterTime + GetSpearSlapImpactTime();
+	FSpearTossState Toss;
+	Toss.Duration = TossTime;
+	Toss.StartOffset = HandOffset;
+	Toss.StartRotation = HandRotation;
+	Toss.EndOffset = SpearTossEndOffset;
+	Toss.Apex = SpearTossApex;
+	Toss.Turns = SpearTossTurns;
+	Toss.SpinAxis = SpearTossSpinAxis;
+	Toss.SpinEase = SpearTossSpinEase;
+	Toss.RotationCurve = SpearTossRotationCurve;
+	Toss.PathCurve = SpearTossPathCurve;
+	Drop->BeginSpearToss(this, Toss);
+	SpearDrop = Drop;
+	World->GetTimerManager().SetTimer(SpearLaunchTimer, this, &AShooterCharacter::SpearLaunch, FMath::Max(0.05f, TossTime), false);
+}
+
+void AShooterCharacter::SpearLaunch()
+{
+	ADroppedRangedWeapon* const Drop = SpearDrop.Get();
+	SpearDrop = nullptr;
+	if (!Drop || !HasAuthority())
+	{
+		return;
+	}
+	// Into the point under the crosshair, not parallel to the sight: the slap meets the gun beside the
+	// sight line (SpearTossEndOffset), and a parallel flight stayed that far right of it for the first
+	// metres, which is what reads as "right of the sight" [measured 2026-10-16, SPEAR_TRACE]. The view
+	// is the one the toss flew against (on a server, its copy of the thrower's aim).
+	FVector ViewLocation;
+	FQuat CameraRotation;
+	ADroppedRangedWeapon::GetThrowerView(this, ViewLocation, CameraRotation);
+
+	// The AIM, not the camera's picture: the slap's camera animation turns the face at the very moment
+	// of the slap, and a flight along the camera went wherever the face was turned [author, 2026-10-16].
+	// GetViewRotation is what the rounds fly along (recoil and sway included, camera animation not).
+	const FQuat ViewRotation = GetViewRotation().Quaternion();
+	const FVector ViewForward = ViewRotation.GetForwardVector();
+	FVector AimPoint = ViewLocation + ViewForward * 10000.0f;
+	FHitResult AimHit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(SpearAim), false, this);
+	Params.AddIgnoredActor(Drop);
+	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(AimHit, ViewLocation, AimPoint, ECC_Visibility, Params))
+	{
+		AimPoint = AimHit.ImpactPoint;
+	}
+	const FVector ToAim = (AimPoint - Drop->GetActorLocation()).GetSafeNormal();
+
+	// SpearLaunchDirection then bends it the way it bends the sight: (1,0,0) straight in, (1,0,0.05) a
+	// little up. Applied as the turn from the view's forward to that vector.
+	const FVector LocalDirection = SpearLaunchDirection.IsNearlyZero() ? FVector::ForwardVector : SpearLaunchDirection.GetSafeNormal();
+	const FQuat Bend = FQuat::FindBetweenNormals(ViewForward, ViewRotation.RotateVector(LocalDirection));
+	FVector Direction = ToAim.IsNearlyZero() ? ViewRotation.RotateVector(LocalDirection) : Bend.RotateVector(ToAim);
+
+	// Target lock [author, 2026-10-16]: the hostile enemy nearest the crosshair inside the cone, in
+	// range and in sight. With one the flight starts at him and keeps turning to him (the dodge in the
+	// last moment is what made running enemies so hard to hit); behind cover he stays safe, the sight
+	// test refuses him.
+	AActor* Locked = nullptr;
+	if (SpearLockConeDegrees > 0.0f && GetWorld())
+	{
+		const float MinCos = FMath::Cos(FMath::DegreesToRadians(SpearLockConeDegrees));
+		float BestCos = MinCos;
+		for (TActorIterator<AShooterNPC> It(GetWorld()); It; ++It)
+		{
+			AShooterNPC* const Candidate = *It;
+			if (!Candidate || Candidate->IsDead() || !PolarityTeams::AreHostile(this, Candidate))
+			{
+				continue;
+			}
+			const FVector CandidatePoint = ADroppedRangedWeapon::GetSpearAimPoint(Candidate);
+			const FVector ToCandidate = CandidatePoint - ViewLocation;
+			const float Distance = ToCandidate.Size();
+			const float Cos = Distance > KINDA_SMALL_NUMBER ? FVector::DotProduct(ToCandidate / Distance, ViewForward) : -1.0f;
+			if (Distance > SpearLockRange || Cos < BestCos)
+			{
+				continue;
+			}
+			FHitResult SightHit;
+			const bool bBlocked = GetWorld()->LineTraceSingleByChannel(SightHit, ViewLocation, CandidatePoint, ECC_Visibility, Params)
+				&& SightHit.GetActor() != Candidate;
+			if (!bBlocked)
+			{
+				BestCos = Cos;
+				Locked = Candidate;
+			}
+		}
+	}
+	if (Locked)
+	{
+		Direction = (ADroppedRangedWeapon::GetSpearAimPoint(Locked) - Drop->GetActorLocation()).GetSafeNormal();
+		UE_LOG(LogTemp, Log, TEXT("[SPEAR_DEBUG] %s locks %s"), *GetName(), *Locked->GetName());
+	}
+	Drop->LaunchSpear(Direction, SpearSpeed, SpearSpinSpeed, SpearStunSeconds, Locked, Locked ? SpearTurnRate : 0.0f);
+}
+
+void AShooterCharacter::SpearSlapBegin()
+{
+	if (!MeleeAttackComponent || !SpearSlapAnimation.AttackMontage)
+	{
+		return;
+	}
+	// The slap's own damage window notify must not open a melee hit: the gun is the blow.
+	bSpearMeleeWasDisabled = MeleeAttackComponent->IsExternallyDisabled();
+	MeleeAttackComponent->SetExternallyDisabled(true);
+	// Placed and dressed by its own melee data, as an ordinary swing is.
+	MeleeAttackComponent->PlayExternalAnimation(SpearSlapAnimation);
+}
+
+void AShooterCharacter::SpearThrowEnd()
+{
+	bSpearThrowActive = false;
+	if (MeleeAttackComponent)
+	{
+		MeleeAttackComponent->ExitExternalAnimation();
+		MeleeAttackComponent->SetExternallyDisabled(bSpearMeleeWasDisabled);
+	}
+
+	// Out with the next gun, if there is one left.
+	if (!CurrentWeapon || !IsValid(CurrentWeapon))
+	{
+		for (AShooterWeapon* const Weapon : OwnedWeapons)
+		{
+			if (IsValid(Weapon) && !Weapon->IsActorBeingDestroyed())
+			{
+				DrawWeaponFromEmptyHands(Weapon);
+				break;
+			}
+		}
+	}
+}
+
+float AShooterCharacter::GetSpearSlapImpactTime() const
+{
+	// The notify's time in the montage, at the rate the montage plays.
+	const float Rate = FMath::Max(0.1f, SpearSlapAnimation.BasePlayRate);
+	if (const UAnimMontage* const Slap = SpearSlapAnimation.AttackMontage)
+	{
+		// Either marker of the hit: the single "Activate Damage Window" notify, or the start of the
+		// "Damage Window State" notify state (the slap carries the state, and looking only for the
+		// single one fell back to SpearSlapImpactFallback on every throw).
+		for (const FAnimNotifyEvent& Event : Slap->Notifies)
+		{
+			if (Cast<UAnimNotify_MeleeActivate>(Event.Notify) || Cast<UAnimNotifyState_MeleeDamageWindow>(Event.NotifyStateClass))
+			{
+				return Event.GetTriggerTime() / Rate;
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[SPEAR_DEBUG] %s has no melee damage window notify: the slap lands at the fallback %.2f s"),
+			*Slap->GetName(), SpearSlapImpactFallback);
+	}
+	return SpearSlapImpactFallback;
+}
+
+bool AShooterCharacter::CanTacticalSprint() const
+{
+	return CurrentWeapon && CurrentWeapon->GetMasteryPerks().bAllowTacticalSprint;
+}
+
+void AShooterCharacter::UpdateADSFatigue(float DeltaTime)
+{
+	if (!IsLocallyControlled() || !CurrentWeapon)
+	{
+		return;
+	}
+
+	const float Delay = CurrentWeapon->ADSFatigueDelay;
+	const float Ramp = FMath::Max(0.05f, CurrentWeapon->ADSFatigueRampTime);
+	if (CurrentADSAlpha >= 0.99f)
+	{
+		// Attachments tire the arms sooner, mastery later.
+		ADSFatigueTime += DeltaTime * CurrentWeapon->GetADSFatigueRateMultiplier();
+	}
+	else
+	{
+		// Rests over RecoveryTime from the worst, so tapping the sight does not reset it.
+		ADSFatigueTime -= DeltaTime * (Delay + Ramp) / FMath::Max(0.05f, CurrentWeapon->ADSFatigueRecoveryTime);
+	}
+	ADSFatigueTime = FMath::Clamp(ADSFatigueTime, 0.0f, Delay + Ramp);
+	ADSFatigueLevel = FMath::Clamp((ADSFatigueTime - Delay) / Ramp, 0.0f, 1.0f);
+}
+
+FRotator AShooterCharacter::GetADSFatigueSway() const
+{
+	const UWorld* const World = GetWorld();
+	if (!World || !CurrentWeapon || ADSFatigueLevel <= 0.0f || CurrentADSAlpha <= 0.0f)
+	{
+		return FRotator::ZeroRotator;
+	}
+
+	const float Amount = CurrentWeapon->ADSFatigueSwayDegrees * CurrentWeapon->GetADSFatigueSwayMultiplier()
+		* ADSFatigueLevel * FMath::Clamp(CurrentADSAlpha, 0.0f, 1.0f);
+	// Two sines that never line up, like the suppression sway: a drift to follow, not a shake. Its own
+	// phase offset, so the two do not move in step when both are on.
+	const float Phase = World->GetTimeSeconds() * CurrentWeapon->ADSFatigueSwayFrequency * 2.0f * PI;
+	return FRotator(FMath::Sin(Phase + 0.7f) * Amount, FMath::Sin(Phase * 0.71f + 2.1f) * Amount * 1.3f, 0.0f);
 }
 
 void AShooterCharacter::DoSwitchWeapon()
@@ -2826,7 +3196,8 @@ void AShooterCharacter::CycleWeapon(int32 Direction)
 	// Don't switch while an ability is casting — swapping weapons re-inits the FP AnimInstance
 	// (SetAnimInstanceClass), which orphans the ability montage's end delegate and can leave the
 	// cast stuck (bIsCasting never cleared).
-	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing())
+		|| IsHandPickupActive())
 	{
 		return;
 	}
@@ -2893,7 +3264,8 @@ void AShooterCharacter::HolsterWeaponByPlayer()
 	{
 		return;
 	}
-	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing())
+		|| IsHandPickupActive())
 	{
 		return;
 	}
@@ -3051,7 +3423,8 @@ void AShooterCharacter::DoWeaponSwitchByAction(UInputAction* Action)
 	}
 
 	// Don't switch while an ability is casting — see DoSwitchWeapon for rationale.
-	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing()))
+	if ((AbilityComponent && AbilityComponent->IsCasting()) || (GrenadeComponent && GrenadeComponent->IsThrowing())
+		|| IsHandPickupActive())
 	{
 		return;
 	}
@@ -3670,6 +4043,23 @@ void AShooterCharacter::CancelWeaponSwitch()
 
 void AShooterCharacter::DoMeleeAttack()
 {
+	// The swing empties the hands at once, and the hand taking an item is not done with them.
+	if (IsHandPickupActive())
+	{
+		return;
+	}
+
+	// Aim + melee with the mastery that opens it throws the gun like a spear [author, 2026-10-16].
+	// The pulses of a held key arrive here too: one throw per press.
+	if (bSpearThrowActive)
+	{
+		return;
+	}
+	if (IsAiming() && TryStartSpearThrow())
+	{
+		return;
+	}
+
 	// With an upgrade that owns a hold attack, the key does not swing on the press: it waits to
 	// learn whether this is a tap (the ordinary swing, on release) or a hold (the hold attack, the
 	// moment its time is up). The pulses of a key that stays down arrive here too, and only the
@@ -3944,8 +4334,8 @@ void AShooterCharacter::DoAbilityPressed()
 		return;
 	}
 
-	// A grenade in the hand owns the arms the same way.
-	if (GrenadeComponent && GrenadeComponent->IsThrowing())
+	// A grenade in the hand owns the arms the same way, and so does the hand taking an item.
+	if ((GrenadeComponent && GrenadeComponent->IsThrowing()) || IsHandPickupActive())
 	{
 		return;
 	}
@@ -4022,29 +4412,303 @@ void AShooterCharacter::DoAbilityReleased()
 
 void AShooterCharacter::DoFetchPressed()
 {
-	// The item the brackets are on, which this machine picked.
-	if (FetchDefinition && !IsWeaponSwitchInProgress())
+	if (bFetchWithHook)
 	{
-		if (AActor* const Target = GrappleFetchTarget.Get())
+		// The item the brackets are on, which this machine picked.
+		if (FetchDefinition && !IsWeaponSwitchInProgress())
 		{
-			Server_FetchItem(Target);
-			return;
+			if (AActor* const Target = GrappleFetchTarget.Get())
+			{
+				Server_FetchItem(Target);
+				return;
+			}
 		}
+
+		// Nothing bracketed: the same key, held, takes the armour off a body at hand [author,
+		// 2026-10-11: no key of its own, it is the key that takes things].
+		if (FieldCareComponent)
+		{
+			FieldCareComponent->BeginStripArmor();
+		}
+		return;
 	}
 
-	// Nothing bracketed: the same key, held, takes the armour off a body at hand [author,
-	// 2026-10-11: no key of its own, it is the key that takes things].
-	if (FieldCareComponent)
+	if (!CanStartHandPickup())
+	{
+		return;
+	}
+
+	// The item the brackets are on, which this machine picked. The hand starts now; the server checks
+	// the claim and hands the item over at the moment the hand closes on it.
+	if (AActor* const Target = GrappleFetchTarget.Get())
+	{
+		BeginHandPickupLocal();
+		Server_HandPickup(Target);
+		return;
+	}
+
+	// Nothing bracketed: the armour of a body at hand, one press and the same reach down [author,
+	// 2026-10-17: it was a two second hold]. It comes off when StripTime runs out, which is kept at
+	// the moment the hand closes (HandPickupGrabTime).
+	if (FieldCareComponent && !FieldCareComponent->IsBusy() && FieldCareComponent->CanStripArmor())
 	{
 		FieldCareComponent->BeginStripArmor();
+		BeginHandPickupLocal();
 	}
 }
 
 void AShooterCharacter::DoFetchReleased()
 {
-	if (FieldCareComponent && FieldCareComponent->GetAction() == EFieldCareAction::StripArmor)
+	// Only the hook's take key is a hold for armour. The hand takes it in one press.
+	if (bFetchWithHook && FieldCareComponent && FieldCareComponent->GetAction() == EFieldCareAction::StripArmor)
 	{
 		FieldCareComponent->Cancel();
+	}
+}
+
+// ==================== Hand pickup ====================
+
+float AShooterCharacter::GetHandPickupLength() const
+{
+	const UAnimMontage* const Montage = HandPickupMontageFP ? HandPickupMontageFP.Get() : HandPickupMontageTP.Get();
+	const float Rate = FMath::Max(HandPickupPlayRate, 0.1f);
+	// No montage at all still takes a moment, so the grant does not land the instant of the press.
+	return Montage ? Montage->GetPlayLength() / Rate : HandPickupGrabTime / Rate + 0.3f;
+}
+
+bool AShooterCharacter::CanStartHandPickup() const
+{
+	// Hands the player emptied themselves are free: picking a gun up is reaching for it. Any other
+	// switch phase means the arms are busy with a swap, a grapple or a swing.
+	const bool bHandsFree = WeaponSwitchPhase == EWeaponSwitchPhase::None
+		|| WeaponSwitchPhase == EWeaponSwitchPhase::StowedByPlayer;
+
+	// The mantle has the left arm (slot LeftArm), and the line has both.
+	const UApexMovementComponent* const Apex = GetApexMovement();
+	const bool bMovementHasHands = Apex && (Apex->IsMantling() || Apex->IsGrappling());
+
+	return IsLocallyControlled() && !bHandPickupActive && bHandsFree && !bMovementHasHands
+		&& !bIsDowned && !IsDead()
+		&& !(AbilityComponent && AbilityComponent->IsCasting())
+		&& !(GrenadeComponent && GrenadeComponent->IsThrowing())
+		&& !(FieldCareComponent && FieldCareComponent->IsBusy());
+}
+
+void AShooterCharacter::BeginHandPickupLocal()
+{
+	bHandPickupActive = true;
+
+	if (CurrentWeapon && WeaponSwitchPhase == EWeaponSwitchPhase::None)
+	{
+		CurrentWeapon->StopFiring();
+
+		// The left hand leaves the gun, and a reload needs it for the magazine: the reload is held the
+		// way a swap holds it and given back at the end. Same rule as the mantle.
+		// @see OnMantleStarted_Handler
+		if (CurrentWeapon->IsReloading())
+		{
+			CurrentWeapon->SuspendReloadForHolster();
+			bHandPickupSuspendedReload = true;
+		}
+	}
+	if (IsAiming())
+	{
+		DoStopADS();
+	}
+
+	const float Length = FMath::Max(GetHandPickupLength(), 0.05f);
+	if (USkeletalMeshComponent* const FPMesh = GetFirstPersonMesh())
+	{
+		UAnimInstance* const FPAnim = FPMesh->GetAnimInstance();
+		if (FPAnim && HandPickupMontageFP)
+		{
+			FPAnim->Montage_Play(HandPickupMontageFP, HandPickupPlayRate);
+		}
+	}
+	GetWorldTimerManager().SetTimer(HandPickupLocalEndTimer, this, &AShooterCharacter::EndHandPickupLocal, Length, false);
+
+	UE_LOG(LogTemp, Log, TEXT("[PICKUP_DEBUG] %s: hand reaches down, %.2fs, montage %s, reload held %d"),
+		*GetName(), Length, *GetNameSafe(HandPickupMontageFP), bHandPickupSuspendedReload ? 1 : 0);
+}
+
+void AShooterCharacter::EndHandPickupLocal()
+{
+	GetWorldTimerManager().ClearTimer(HandPickupLocalEndTimer);
+	if (!bHandPickupActive)
+	{
+		return;
+	}
+	bHandPickupActive = false;
+
+	// The reload goes on from where it stopped. Not when a weapon pickup swapped the gun: the held one
+	// waits for its own draw, the way any swap leaves it.
+	if (bHandPickupSuspendedReload)
+	{
+		bHandPickupSuspendedReload = false;
+		if (CurrentWeapon && CurrentWeapon->HasPendingReloadResume() && WeaponSwitchPhase == EWeaponSwitchPhase::None)
+		{
+			CurrentWeapon->ResumeReloadAfterEquip();
+		}
+	}
+}
+
+void AShooterCharacter::CancelHandPickupLocal()
+{
+	if (HandPickupMontageFP)
+	{
+		if (USkeletalMeshComponent* const FPMesh = GetFirstPersonMesh())
+		{
+			if (UAnimInstance* const FPAnim = FPMesh->GetAnimInstance())
+			{
+				FPAnim->Montage_Stop(0.15f, HandPickupMontageFP);
+			}
+		}
+	}
+	EndHandPickupLocal();
+}
+
+void AShooterCharacter::Client_CancelHandPickup_Implementation()
+{
+	UE_LOG(LogTemp, Log, TEXT("[PICKUP_DEBUG] %s: the take was refused, the hand comes back"), *GetName());
+	CancelHandPickupLocal();
+}
+
+void AShooterCharacter::Server_HandPickup_Implementation(AActor* Target)
+{
+	const auto Refuse = [this, Target](const TCHAR* Why)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] %s: take of %s refused, %s"), *GetName(), *GetNameSafe(Target), Why);
+		Client_CancelHandPickup();
+	};
+
+	if (bHandPickupServerActive || bItemFetchInFlight)
+	{
+		Refuse(TEXT("the hands are already taking something"));
+		return;
+	}
+	if (bIsDowned || IsDead() || (AbilityComponent && AbilityComponent->IsCasting()))
+	{
+		Refuse(TEXT("the hands are busy"));
+		return;
+	}
+
+	// The reach the brackets used, plus slack for the round trip the claim took.
+	static constexpr float HandPickupClaimMarginCm = 100.0f;
+	if (!UAbilityHandler_Grapple::IsFetchable(this, Target, FetchDefinition, HandPickupClaimMarginCm, HandPickupRadius))
+	{
+		Refuse(TEXT("taken or out of reach"));
+		return;
+	}
+
+	bHandPickupServerActive = true;
+	bHandPickupDrawPending = false;
+	bHandPickupDrawGotWeapon = false;
+	HandPickupTarget = Target;
+
+	const float Length = FMath::Max(GetHandPickupLength(), 0.05f);
+
+	// A weapon takes the right hand as well [author, 2026-10-17]: the held gun goes away while the
+	// left hand reaches, the holster stretched to the reach so the two end together, and the new gun
+	// comes out after both. Anything else leaves the gun in the right hand. Asked of the class, not of
+	// FinishesFetchItself: a slot machine card ends its fetch itself too and is no gun.
+	const bool bWeapon = Cast<ADroppedRangedWeapon>(Target) != nullptr;
+	if (bWeapon)
+	{
+		const float HolsterLength = CurrentWeapon ? CurrentWeapon->GetHolsterLength() : 0.0f;
+		BeginWeaponFetchStowAt(HolsterLength > 0.0f ? HolsterLength / Length : 1.0f, 1.0f);
+	}
+
+	if (HandPickupMontageTP)
+	{
+		PlayThirdPersonMontageEverywhere(HandPickupMontageTP, HandPickupPlayRate);
+	}
+
+	const float GrabAt = FMath::Clamp(HandPickupGrabTime / FMath::Max(HandPickupPlayRate, 0.1f), 0.0f, Length);
+	FTimerManager& Timers = GetWorldTimerManager();
+	if (GrabAt > 0.0f)
+	{
+		Timers.SetTimer(HandPickupGrabTimer, this, &AShooterCharacter::OnHandPickupGrab, GrabAt, false);
+	}
+	else
+	{
+		OnHandPickupGrab();
+	}
+	Timers.SetTimer(HandPickupEndTimer, this, &AShooterCharacter::OnHandPickupEnd, Length, false);
+
+	UE_LOG(LogTemp, Log, TEXT("[PICKUP_DEBUG] %s: taking %s, %.0f cm, weapon %d, grab at %.2fs of %.2fs"),
+		*GetName(), *GetNameSafe(Target), FVector::Dist(GetActorLocation(), Target->GetActorLocation()),
+		bWeapon ? 1 : 0, GrabAt, Length);
+}
+
+void AShooterCharacter::OnHandPickupGrab()
+{
+	GetWorldTimerManager().ClearTimer(HandPickupGrabTimer);
+
+	// No reach test now: the hand is already down there. Only "somebody else got there first" refuses,
+	// and the item's own pull gate answers that. The item flies the last bit into the hand and grants
+	// itself on arrival, exactly as a hooked one does.
+	AActor* const Target = HandPickupTarget.Get();
+	IGrappleFetchable* const Fetchable = GrappleFetch::Resolve(Target);
+	if (Fetchable && Fetchable->BeginGrappleFetchPull(this))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[PICKUP_DEBUG] %s: hand closed on %s"), *GetName(), *GetNameSafe(Target));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[PICKUP_DEBUG] %s: hand closed on nothing, %s is gone or taken"),
+		*GetName(), *GetNameSafe(Target));
+
+	// Nothing is coming: a gun put away for it comes back out once the reach is over.
+	FinishWeaponFetch(false);
+}
+
+void AShooterCharacter::OnHandPickupEnd()
+{
+	// A grab due on this same frame goes first, or ending would drop it.
+	if (GetWorldTimerManager().IsTimerActive(HandPickupGrabTimer))
+	{
+		OnHandPickupGrab();
+	}
+	GetWorldTimerManager().ClearTimer(HandPickupEndTimer);
+
+	if (!bHandPickupServerActive)
+	{
+		return;
+	}
+	bHandPickupServerActive = false;
+	HandPickupTarget.Reset();
+
+	// The new gun arrived while the hand was still reaching: draw it now.
+	if (bHandPickupDrawPending)
+	{
+		const bool bGotWeapon = bHandPickupDrawGotWeapon;
+		bHandPickupDrawPending = false;
+		bHandPickupDrawGotWeapon = false;
+		FinishWeaponFetch(bGotWeapon);
+	}
+}
+
+void AShooterCharacter::AbortHandPickup()
+{
+	if (!bHandPickupServerActive)
+	{
+		return;
+	}
+	GetWorldTimerManager().ClearTimer(HandPickupGrabTimer);
+	GetWorldTimerManager().ClearTimer(HandPickupEndTimer);
+	bHandPickupServerActive = false;
+	bHandPickupDrawPending = false;
+	bHandPickupDrawGotWeapon = false;
+	HandPickupTarget.Reset();
+
+	FinishWeaponFetch(false);
+	if (IsLocallyControlled())
+	{
+		CancelHandPickupLocal();
+	}
+	else
+	{
+		Client_CancelHandPickup();
 	}
 }
 
@@ -4182,20 +4846,29 @@ void AShooterCharacter::PollWatchedFetch()
 
 void AShooterCharacter::BeginWeaponFetchStow(const UAbilityDefinition_Grapple* Def)
 {
-	if (!HasAuthority() || !Def || !Def->bStowWeapon || bWeaponStowedForFetch)
+	if (!Def || !Def->bStowWeapon)
+	{
+		return;
+	}
+	BeginWeaponFetchStowAt(Def->WeaponStowSpeedMultiplier, Def->WeaponStowSpeedMultiplier);
+}
+
+void AShooterCharacter::BeginWeaponFetchStowAt(float HolsterSpeed, float DrawSpeed)
+{
+	if (!HasAuthority() || bWeaponStowedForFetch)
 	{
 		return;
 	}
 	bWeaponStowedForFetch = true;
-	FetchStowSpeedMultiplier = Def->WeaponStowSpeedMultiplier;
+	FetchStowSpeedMultiplier = DrawSpeed;
 
 	// The same stow a swing uses, on the same pair of machines SetGrappleLine uses: here, and on the
 	// one that predicts this character. A watching client needs nothing -- the third-person montage
 	// and the weapon's hidden flag reach it on their own.
-	StowWeaponForGrapple(FetchStowSpeedMultiplier);
+	StowWeaponForGrapple(HolsterSpeed);
 	if (!IsLocallyControlled())
 	{
-		Client_BeginWeaponFetchStow(FetchStowSpeedMultiplier);
+		Client_BeginWeaponFetchStow(HolsterSpeed);
 	}
 }
 
@@ -4211,6 +4884,15 @@ void AShooterCharacter::FinishWeaponFetch(bool bGotWeapon)
 {
 	if (!HasAuthority() || !bWeaponStowedForFetch)
 	{
+		return;
+	}
+
+	// A hand pickup still reaching: the draw waits for its end, so the new gun comes out after the
+	// holster and the reach rather than over them. @see OnHandPickupEnd
+	if (bHandPickupServerActive)
+	{
+		bHandPickupDrawPending = true;
+		bHandPickupDrawGotWeapon = bHandPickupDrawGotWeapon || bGotWeapon;
 		return;
 	}
 	bWeaponStowedForFetch = false;
@@ -4487,7 +5169,8 @@ void AShooterCharacter::UpdateGrappleFetchAiming()
 	if (Def && Def->bCanFetchWeapons && !(AbilityComponent && AbilityComponent->IsCasting())
 		&& !bAbilityAiming && !bMeleeFocusReticleActive)
 	{
-		Target = UAbilityHandler_Grapple::FindFetchTarget(this, Def);
+		// The hand's reach, unless the take key still throws the hook.
+		Target = UAbilityHandler_Grapple::FindFetchTarget(this, Def, bFetchWithHook ? -1.0f : HandPickupRadius);
 	}
 
 	APlayerController* PC = Cast<APlayerController>(GetController());
@@ -4890,7 +5573,8 @@ void AShooterCharacter::Tick(float DeltaTime)
 	//
 	// Their stack reads everything about the player from three values, and nothing else. Gait is
 	// their own scale rather than a speed: 0 standing, 1 walking, 2 sprinting, 3 tactical sprint.
-	// We have no tactical sprint, so the top of the range stays unused rather than being faked.
+	// The tactical sprint (weapon mastery, 2026-10-16) is the top of it: their graph already plays
+	// UE5_A_FP_Tactical_Sprint there, gun up.
 	if (UActorComponent* Viewmodel = FindViewmodelController(this))
 	{
 		double Gait = 0.0;
@@ -4920,7 +5604,10 @@ void AShooterCharacter::Tick(float DeltaTime)
 			Gait = FMath::Min(Gait, 1.0);
 		}
 
-		PushObjectDouble(Viewmodel, TEXT("Gait"), FMath::Clamp(Gait, 0.0, 2.0));
+		// The tactical sprint is a state, not a speed: the run is only a quarter faster, and a gun that
+		// rose by speed would come up halfway and hang there.
+		const bool bTacticalSprint = ApexMovement && ApexMovement->IsSprinting() && ApexMovement->IsTacticalSprinting();
+		PushObjectDouble(Viewmodel, TEXT("Gait"), bTacticalSprint ? 3.0 : FMath::Clamp(Gait, 0.0, 2.0));
 		PushObjectBool(Viewmodel, TEXT("IsAiming"), IsAiming());
 		PushObjectBool(Viewmodel, TEXT("IsPressingTrigger"),
 			CurrentWeapon != nullptr && CurrentWeapon->IsFiring());
@@ -4960,7 +5647,12 @@ void AShooterCharacter::Tick(float DeltaTime)
 				FTransform AimPointOnWeapon =
 					Anchor->GetComponentTransform().GetRelativeTransform(WeaponMesh->GetComponentTransform());
 				AimPointOnWeapon.RemoveScaling();
-				AimPointOnWeapon.SetTranslation(-AimPointOnWeapon.GetTranslation());
+				// GetRelativeTransform divides by the weapon mesh's scale, so the offset above is in
+				// UNSCALED mesh units, while the gun the pack moves is drawn at its Blueprint scale.
+				// BP_SiGMCXSpear sits at 0.9: fed unscaled, the pack put the eye 10% too far from the
+				// gun's origin and the sight line ran ~6 mm under the camera (iron sights and optic
+				// alike). Scale 1 weapons are unchanged.
+				AimPointOnWeapon.SetTranslation(-AimPointOnWeapon.GetTranslation() * WeaponMesh->GetRelativeScale3D());
 
 				PushObjectTransform(Viewmodel, TEXT("ActiveAimPoint"), AimPointOnWeapon);
 			}
@@ -5069,6 +5761,7 @@ void AShooterCharacter::Tick(float DeltaTime)
 	}
 
 	UpdateADS(DeltaTime);
+	UpdateADSFatigue(DeltaTime);
 	UpdateRegeneration(DeltaTime);
 	UpdateLeftHandIK(DeltaTime);
 	UpdateLeftHandPose(DeltaTime);
@@ -5201,8 +5894,14 @@ void AShooterCharacter::DoStartADS()
 		return;
 	}
 
-	// Hands busy with a medkit or with a body's armour.
-	if (FieldCareComponent && FieldCareComponent->IsBusy())
+	// Hands busy with a medkit, a body's armour or an item off the floor.
+	if ((FieldCareComponent && FieldCareComponent->IsBusy()) || IsHandPickupActive())
+	{
+		return;
+	}
+
+	// Mid spear throw: nothing in the hands to aim.
+	if (bSpearThrowActive)
 	{
 		return;
 	}
@@ -5384,16 +6083,50 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	// Determine target alpha
 	float TargetAlpha = bWantsToAim ? 1.0f : 0.0f;
 
-	// Interpolate alpha (used by other systems like recoil WeaponFraction)
-	// A stock speeds the sight up and down (ShooterWeapon_Stock.cpp).
-	CurrentADSAlpha = FMath::FInterpTo(
-		CurrentADSAlpha,
-		TargetAlpha,
-		DeltaTime,
-		MovementSettings->ADSInterpSpeed * (CurrentWeapon ? CurrentWeapon->GetStockADSSpeed() : 1.0f)
-			// Under fire the sight comes up slower; it goes down as fast as ever.
-			* ((SuppressionComponent && TargetAlpha > CurrentADSAlpha) ? SuppressionComponent->GetADSSpeedMultiplier() : 1.0f)
-	);
+	// Weapon mastery opens the sight where it starts closed [author, 2026-10-16]: in a slide, in the
+	// air, during a reload. The button stays held, so the sight comes back by itself when the slide,
+	// the jump or the reload is over.
+	UApexMovementComponent* const ApexMove = GetApexMovement();
+	if (bWantsToAim && CurrentWeapon)
+	{
+		const FWeaponMasteryPerks Perks = CurrentWeapon->GetMasteryPerks();
+		const bool bSliding = ApexMove && ApexMove->IsSliding();
+		const bool bAirborne = GetCharacterMovement() && GetCharacterMovement()->IsFalling();
+		if ((bSliding && !Perks.bAllowADSWhileSliding)
+			|| (bAirborne && !Perks.bAllowADSWhileAirborne)
+			|| (CurrentWeapon->IsReloading() && !Perks.bAllowReloadWhileADS))
+		{
+			TargetAlpha = 0.0f;
+		}
+
+		// The speed cap rides the move (it is simulated on both ends), so the controlling machine says
+		// whether it holds: off while the sight is closed, and for good with the mastery that lifts it.
+		if (ApexMove && IsLocallyControlled())
+		{
+			ApexMove->SetAiming(TargetAlpha > 0.0f);
+			ApexMove->SetAimSpeedCapIgnored(Perks.bIgnoreADSMoveSpeedPenalty);
+		}
+	}
+
+	// The weapon tunes full-range transition times in seconds. A constant alpha rate reaches the
+	// endpoint at that time, rather than approaching it asymptotically with an opaque coefficient.
+	if (CurrentWeapon)
+	{
+		const bool bEnteringADS = TargetAlpha > CurrentADSAlpha;
+		const float Duration = bEnteringADS ? CurrentWeapon->GetADSBlendInTime() : CurrentWeapon->GetADSBlendOutTime();
+		float SpeedScale = CurrentWeapon->GetStockADSSpeed();
+		if (bEnteringADS && SuppressionComponent)
+		{
+			SpeedScale *= SuppressionComponent->GetADSSpeedMultiplier();
+		}
+		CurrentADSAlpha = Duration > KINDA_SMALL_NUMBER
+			? FMath::FInterpConstantTo(CurrentADSAlpha, TargetAlpha, DeltaTime, SpeedScale / Duration)
+			: TargetAlpha;
+	}
+	else
+	{
+		CurrentADSAlpha = FMath::FInterpTo(CurrentADSAlpha, TargetAlpha, DeltaTime, MovementSettings->ADSInterpSpeed);
+	}
 
 	DumpADSDiagnostics(this, CurrentADSAlpha, CurrentWeapon);
 
@@ -5460,17 +6193,11 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 		}
 	}
 
-	// Hand the alpha to the FP anim graph. Nothing in animation knew about aiming before this:
-	// the whole difference between hip and aimed was a component transform, so the arms kept
-	// playing the hip idle either way.
-	//
-	// The graph does NOT use this to point the weapon — AccumulateADSSightAlignment does that, and
-	// more precisely than a pose can. What the graph owes us is a CALM hold: the aimed target pose
-	// is the inverse of where the sight sits relative to the mesh, so every degree the idle swings
-	// the gun is a degree the alignment counter-swings the whole mesh, arms included.
-	//
-	// Reflection, like the other pushes here, so this is a silent no-op until an ABP declares a
-	// float named ADSAlpha. See Docs/ADS_Editor_Handoff_WavePistol_2026-08-20.md.
+	// Legacy FP graphs opt into this reflected ADSAlpha for their aimed hold pose. The active
+	// FPS Animation Pack path instead reads GetADSAlpha in UE5_ABP_IK_Ads and assigns it to
+	// AimingPlayback before the pack's easing. Without that handoff the pack would keep its own
+	// timer while native zoom followed CurrentADSAlpha; it has no variable named ADSAlpha.
+	// AccumulateADSSightAlignment handles sight placement only for the old mesh-on-camera path.
 	if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
 	{
 		static const FName ADSAlphaName(TEXT("ADSAlpha"));
@@ -5478,10 +6205,9 @@ void AShooterCharacter::UpdateADS(float DeltaTime)
 	}
 
 	// ==================== Camera Placement ====================
-	// ADS no longer moves the camera. The FP mesh is parented to the camera, so the weapon's
-	// ADSCamera anchor is a descendant of it — chasing that anchor with the camera would be a
-	// runaway feedback loop. Instead AccumulateFirstPersonPose slides the MESH so the anchor
-	// lands on the eye. The camera keeps only its own offsets: shake and the raised shield.
+	// The pack aims ik_hand_gun independently of the neck carrying the camera. The legacy path
+	// aligns the camera-parented mesh in AccumulateFirstPersonPose. Neither path chases the
+	// weapon's ADSCamera anchor with the view camera; the camera keeps shake and shield offsets.
 	UCameraComponent* Camera = GetFirstPersonCameraComponent();
 	if (!Camera)
 	{
@@ -5771,7 +6497,8 @@ void AShooterCharacter::AccumulateADSSightAlignment(FVector& Location, FRotator&
 	//
 	// In that hierarchy the aiming is the pack's to do: its layer moves ik_hand_gun, which is a
 	// different branch from the neck the camera sits on, so the gun can be aimed without dragging
-	// the view. We feed it ActiveAimPoint from Tick.
+	// the view. We feed it ActiveAimPoint from Tick; UE5_ABP_IK_Ads reads GetADSAlpha for its
+	// transition playback, so the weapon's blend times govern both sight movement and zoom.
 	//
 	// Detected rather than configured, so a character still on the old hierarchy (anything whose
 	// arms mesh has no FPCamera socket, see APolarityCharacter::BeginPlay) keeps the old aiming.
@@ -6956,6 +7683,7 @@ void AShooterCharacter::BindMovementSFXDelegates()
 		// New movement event delegates
 		Apex->OnJumpPerformed.AddDynamic(this, &AShooterCharacter::OnJumpPerformed_Handler);
 		Apex->OnMantleStarted.AddDynamic(this, &AShooterCharacter::OnMantleStarted_Handler);
+		Apex->OnMantleEnded.AddDynamic(this, &AShooterCharacter::OnMantleEnded_Handler);
 		Apex->OnAirDashStarted.AddDynamic(this, &AShooterCharacter::OnAirDashStarted_Handler);
 		Apex->OnAirDashEnded.AddDynamic(this, &AShooterCharacter::OnAirDashEnded_Handler);
 	}
@@ -6974,6 +7702,7 @@ void AShooterCharacter::UnbindMovementSFXDelegates()
 		// New movement event delegates
 		Apex->OnJumpPerformed.RemoveDynamic(this, &AShooterCharacter::OnJumpPerformed_Handler);
 		Apex->OnMantleStarted.RemoveDynamic(this, &AShooterCharacter::OnMantleStarted_Handler);
+		Apex->OnMantleEnded.RemoveDynamic(this, &AShooterCharacter::OnMantleEnded_Handler);
 		Apex->OnAirDashStarted.RemoveDynamic(this, &AShooterCharacter::OnAirDashStarted_Handler);
 		Apex->OnAirDashEnded.RemoveDynamic(this, &AShooterCharacter::OnAirDashEnded_Handler);
 	}
@@ -7428,7 +8157,9 @@ FRotator AShooterCharacter::GetViewRotation() const
 	const FRotator Punch = RecoilComponent->GetPunchRotation();
 	// Under fire the sight wanders while aiming. Here and not in the camera manager, so that the
 	// round goes where the sight is: the sway is something to aim through, not a lie about the aim.
-	const FRotator Sway = SuppressionComponent ? SuppressionComponent->GetSwayRotation(CurrentADSAlpha) : FRotator::ZeroRotator;
+	// Tired arms wander the same way, and on top of it [author, 2026-10-16].
+	const FRotator Sway = (SuppressionComponent ? SuppressionComponent->GetSwayRotation(CurrentADSAlpha) : FRotator::ZeroRotator)
+		+ GetADSFatigueSway();
 
 	ViewRotation.Pitch = FMath::Clamp(ViewRotation.Pitch + Punch.Pitch + Sway.Pitch, -89.0f, 89.0f);
 	ViewRotation.Yaw += Punch.Yaw + Sway.Yaw;
@@ -7479,6 +8210,15 @@ FVector AShooterCharacter::GetWeaponTargetLocation()
 	FVector Start, End;
 	GetAimRay(MaxAimDistance, Start, End);
 
+	// In a sprint, a jump, a slide or a wall run the round goes down the barrel, not to the screen
+	// centre [author, 2026-10-15]: the same line the laser draws, so the laser never lies.
+	if (TacticalDeviceComponent)
+	{
+		FVector ShotOrigin, ShotDirection;
+		TacticalDeviceComponent->GetShotAim(ShotOrigin, ShotDirection);
+		End = Start + ShotDirection * FVector::Dist(Start, End);
+	}
+
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
@@ -7510,8 +8250,13 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 	AShooterWeapon* WeaponToDrop,
 	const FVector& LocalSpawnOffset,
 	const FVector& LocalLinearImpulse,
-	const FVector& AngularImpulse)
+	const FVector& AngularImpulse,
+	ADroppedRangedWeapon** OutDrop)
 {
+	if (OutDrop)
+	{
+		*OutDrop = nullptr;
+	}
 	if (!Self || !WeaponToDrop)
 	{
 		return false;
@@ -7549,6 +8294,10 @@ static bool DropOwnedRangedWeaponForPickupReplacement(
 
 		ADroppedRangedWeapon* Discarded = ADroppedRangedWeapon::SpawnFor(Self->GetWorld(),
 			WeaponToDrop->GetClass(), FTransform(SpawnRot, SpawnLoc));
+		if (OutDrop)
+		{
+			*OutDrop = Discarded;
+		}
 
 		if (Discarded)
 		{
@@ -9627,6 +10376,7 @@ void AShooterCharacter::Die()
 		GrenadeComponent->CancelThrow();
 	}
 	AbortItemFetch();
+	AbortHandPickup();
 	SetCloaked(false);
 
 	// Same reason as the cast above: the character is reused, so a swap caught mid-animation would
@@ -9682,7 +10432,7 @@ void AShooterCharacter::Die()
 	// death; what they no longer do is take everybody else back to the menu with them.
 	if (UGameInstance* GI = GetGameInstance())
 	{
-		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>(); Run && Run->IsRunActive())
+		if (URunSubsystem* Run = GI->GetSubsystem<URunSubsystem>(); Run && Run->IsRunActive() && !ABenchLoadoutButton::HasHubSpawn(GetWorld()))
 		{
 			const bool bRunIsOver = ShouldRunEndOnThisDeath();
 			if (bRunIsOver)
@@ -9801,6 +10551,11 @@ void AShooterCharacter::ReturnToMainMenuAfterRunDeath()
 
 void AShooterCharacter::OnRespawn()
 {
+	if (ABenchLoadoutButton::HasHubSpawn(GetWorld()))
+	{
+		Destroy(); // The controller selects the tagged hub start, regardless of run/checkpoint state.
+		return;
+	}
 	// Try to respawn at checkpoint first
 	if (UCheckpointSubsystem* CheckpointSubsystem = GetWorld()->GetSubsystem<UCheckpointSubsystem>())
 	{
@@ -10075,6 +10830,14 @@ void AShooterCharacter::UpdateLeftHandIK(float DeltaTime)
 	{
 		TargetLeftHandIKAlpha = 0.0f;
 	}
+	// Mantle: the left hand goes to the ledge. Keyed to the montage playing, like the reload above,
+	// so a mantle with no animation keeps the hand on the gun instead of letting it hang. The body
+	// is checked for the same reason as there: on a teammate's screen only the body animates.
+	else if (IsMontagePlayingOnMesh(GetFirstPersonMesh(), ActiveMantleMontageFP)
+		|| IsMontagePlayingOnMesh(GetMesh(), ActiveMantleMontageTP))
+	{
+		TargetLeftHandIKAlpha = 0.0f;
+	}
 	else
 	{
 		const UChargeAnimationComponent* ChargeComp = FindComponentByClass<UChargeAnimationComponent>();
@@ -10184,6 +10947,116 @@ void AShooterCharacter::OnJumpPerformed_Handler(bool bIsDoubleJump)
 void AShooterCharacter::OnMantleStarted_Handler()
 {
 	PlayMantleSound();
+
+	UApexMovementComponent* Apex = GetApexMovement();
+	if (!Apex)
+	{
+		return;
+	}
+
+	// Fires on every machine that sees this character mantle: the owner and the server from the
+	// movement simulation, everybody else from the replicated mantle kind. The arms exist only for
+	// the player at this screen; the body is what everyone else looks at.
+	const bool bHigh = Apex->GetMantleKind() == EApexMantleKind::High;
+	const float Duration = Apex->GetMantleDuration();
+
+	auto RateFor = [this, Duration](const UAnimMontage* Montage)
+	{
+		return (bFitMantleMontagesToDuration && Duration > KINDA_SMALL_NUMBER)
+			? Montage->GetPlayLength() / Duration
+			: 1.0f;
+	};
+
+	ActiveMantleMontageFP = bHigh ? MantleHighMontageFP : MantleLowMontageFP;
+	ActiveMantleMontageTP = bHigh ? MantleHighMontageTP : MantleLowMontageTP;
+
+	if (IsLocallyControlled())
+	{
+		// The mantle takes the left hand, and a reload needs it for the magazine, so the mantle wins:
+		// the reload is put on hold exactly as a weapon switch puts it on hold (animation stopped,
+		// position and sound time recorded), and OnMantleEnded_Handler resumes it from there. Only
+		// with the gun in hand: in any switch phase the reload is already held by the switch, and
+		// the switch's own draw resumes it.
+		if (CurrentWeapon && CurrentWeapon->IsReloading() && WeaponSwitchPhase == EWeaponSwitchPhase::None)
+		{
+			CurrentWeapon->SuspendReloadForHolster();
+			UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] reload suspended for the mantle"));
+		}
+
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			UAnimInstance* FPAnim = FPMesh->GetAnimInstance();
+			if (FPAnim && ActiveMantleMontageFP)
+			{
+				// Slot LeftArm: the arms graph lays it over the left arm only, so the right hand and the
+				// gun stay where the pose puts them. The slot is still in DefaultGroup (the skeletons
+				// have no other group with slots in it), and starting a montage stops every montage of
+				// its group. The reload was put on hold above; a draw, a holster or a grenade is not
+				// cut in half for the ledge, the mantle plays without arms then.
+				const UAnimMontage* Busy = FPAnim->GetCurrentActiveMontage();
+				if (Busy && Busy != ActiveMantleMontageFP)
+				{
+					UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] FP montage skipped: %s is playing"), *GetNameSafe(Busy));
+					ActiveMantleMontageFP = nullptr;
+				}
+				else
+				{
+					const float Played = FPAnim->Montage_Play(ActiveMantleMontageFP, RateFor(ActiveMantleMontageFP));
+					UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] FP montage %s rate=%.2f played=%.2f animClass=%s"),
+						*GetNameSafe(ActiveMantleMontageFP), RateFor(ActiveMantleMontageFP), Played,
+						*GetNameSafe(FPAnim->GetClass()));
+				}
+			}
+		}
+
+		if (UCameraShakeComponent* Shake = GetCameraShake())
+		{
+			Shake->TriggerMantleShake(bHigh);
+		}
+	}
+
+	if (ActiveMantleMontageTP)
+	{
+		PlayThirdPersonMontageLocal(ActiveMantleMontageTP, RateFor(ActiveMantleMontageTP));
+	}
+}
+
+void AShooterCharacter::OnMantleEnded_Handler()
+{
+	// A finished mantle has played its montages out already (they are fitted to its duration). This
+	// is for the one that was cut short, so the arms do not finish the climb on flat ground.
+	constexpr float BlendOut = 0.15f;
+
+	if (ActiveMantleMontageFP)
+	{
+		if (USkeletalMeshComponent* FPMesh = GetFirstPersonMesh())
+		{
+			if (UAnimInstance* FPAnim = FPMesh->GetAnimInstance())
+			{
+				FPAnim->Montage_Stop(BlendOut, ActiveMantleMontageFP);
+			}
+		}
+	}
+
+	if (ActiveMantleMontageTP)
+	{
+		if (UAnimInstance* TPAnim = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			TPAnim->Montage_Stop(BlendOut, ActiveMantleMontageTP);
+		}
+	}
+
+	ActiveMantleMontageFP = nullptr;
+	ActiveMantleMontageTP = nullptr;
+
+	// The reload the mantle put on hold goes on from where it stopped, blending in from the current
+	// pose. Not during a switch: then the hold is the switch's, and its draw resumes it.
+	if (IsLocallyControlled() && CurrentWeapon && CurrentWeapon->HasPendingReloadResume()
+		&& WeaponSwitchPhase == EWeaponSwitchPhase::None)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] reload resumed after the mantle"));
+		CurrentWeapon->ResumeReloadAfterEquip();
+	}
 }
 
 void AShooterCharacter::OnAirDashStarted_Handler()

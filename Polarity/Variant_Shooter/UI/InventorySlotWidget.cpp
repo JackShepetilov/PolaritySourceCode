@@ -6,6 +6,9 @@
 #include "Upgrades/DispenserUpgradePool.h"
 #include "Upgrades/UpgradeDefinition.h"
 #include "Variant_Shooter/Inventory/InventoryIconSettings.h"
+#include "Variant_Shooter/Grenades/GrenadeComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition.h"
+#include "GameFramework/Pawn.h"
 
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
@@ -146,9 +149,23 @@ void UInventorySlotWidget::ApplyLook(UTexture2D* InIcon, float FillRatio, bool b
 
 		if (bShowCount)
 		{
-			CountText->SetText(Kind == EInventorySlotKind::AbilityUpgrade
+			FText Shown = Kind == EInventorySlotKind::AbilityUpgrade
 				? FText::Format(NSLOCTEXT("Inventory", "UpgradeLevel", "Lv {0}"), FText::AsNumber(Count))
-				: FText::AsNumber(Count));
+				: FText::AsNumber(Count);
+
+			// A grenade says which one it is: the types share a picture. The one G throws is marked.
+			if (Kind == EInventorySlotKind::Grenade)
+			{
+				if (const UGrenadeDefinition* const Type = Cast<UGrenadeDefinition>(CurrentPayload))
+				{
+					const APawn* const Pawn = GetOwningPlayerPawn();
+					const UGrenadeComponent* const Grenades = Pawn ? Pawn->FindComponentByClass<UGrenadeComponent>() : nullptr;
+					const bool bSelected = Grenades && Grenades->GetSelectedType() == Type;
+					const FString Name = Type->DisplayName.IsEmpty() ? Type->GetName() : Type->DisplayName.ToString();
+					Shown = FText::FromString(FString::Printf(TEXT("%s %d%s"), *Name, Count, bSelected ? TEXT(" [G]") : TEXT("")));
+				}
+			}
+			CountText->SetText(Shown);
 			CountText->SetColorAndOpacity(FSlateColor(KindColor));
 		}
 	}

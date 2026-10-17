@@ -13,6 +13,7 @@
 #include "GrenadeDefinition.generated.h"
 
 class AGrenadeProjectile;
+class UStaticMesh;
 class UNiagaraSystem;
 class USoundBase;
 class USoundAttenuation;
@@ -47,15 +48,29 @@ public:
 
 	// ==================== Bag ====================
 
-	/** How many of this type fit in one cell of the bag. */
+	/** Not a limit any more: grenades left the bag's cells for the gadget section on 2026-10-16, and
+	 *  how many are carried is UInventoryComponent's (GetGadgetsPerKind, GetGadgetTotalLimit). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Bag", meta = (ClampMin = "1"))
 	int32 MaxPerCell = 3;
+
+	/** What a pile of this type looks like on the floor: a pickup dropped to make room for another kind,
+	 *  or one put down without a mesh of its own. Empty: an invisible pickup, as before. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Bag")
+	TObjectPtr<UStaticMesh> PickupMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Bag")
+	FVector PickupMeshScale = FVector::OneVector;
 
 	// ==================== What the enemy makes of it ====================
 
 	/** How close to the grenade an enemy feels it has to get away. Usually the radius where it hurts. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|AI", meta = (ClampMin = "0.0", Units = "cm"))
 	float DangerRadius = 650.0f;
+
+	/** An enemy this close to where it bounces hears it land, whatever it was looking at (cm). Small on
+	 *  purpose: at nine metres every grenade was heard [author, 2026-10-15]. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|AI", meta = (ClampMin = "0.0", Units = "cm"))
+	float BounceHearRadius = 400.0f;
 
 	// ==================== Going off ====================
 
@@ -75,4 +90,48 @@ public:
 
 	/** What it does where it went off. Authority only; the picture and the sound are the projectile's. */
 	virtual void Detonate(AGrenadeProjectile* Grenade, const FVector& Origin) const {}
+
+	// ==================== Working on after it goes off ====================
+	// A grenade that does not just go off but keeps working where it lies for a while (the
+	// microwave). Zero ActiveSeconds: an ordinary grenade, gone with the bang.
+
+	/** Seconds it keeps working after going off. 0: it is spent the moment it goes off. */
+	virtual float GetActiveSeconds() const { return 0.0f; }
+
+	/** While working: Pulse every this many seconds. */
+	virtual float GetPulseInterval() const { return 0.5f; }
+
+	/** While working, every GetPulseInterval. Authority. */
+	virtual void Pulse(AGrenadeProjectile* Grenade, const FVector& Origin) const {}
+
+	/** While working, how far from it an enemy wants to be. */
+	virtual float GetWorkingDangerRadius() const { return DangerRadius; }
+
+	/** While working, how far it reaches at all: the size its effects are drawn at (User.Radius). */
+	virtual float GetWorkingEffectRadius() const { return GetWorkingDangerRadius(); }
+
+	/** A wall between it and a soldier protects him: he may hide behind one instead of running out. */
+	virtual bool DoWallsProtect() const { return true; }
+
+	/** While working, the enemies backing out of its reach shoot at it. */
+	virtual bool IsShotAtWhileWorking() const { return false; }
+
+	/** While working, the chance a round aimed at it lands, whoever fires it. Below 0: the shooter's
+	 *  own aim decides. @see IAimTargetInterface::GetAimHitChanceOverride */
+	virtual float GetWorkingHitChance() const { return -1.0f; }
+
+	/** While working, this many hits from the enemy's side break it. 0: nothing breaks it. */
+	virtual int32 GetHitsToBreak() const { return 0; }
+
+	/** Looping on it while it works, on every machine. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Presentation")
+	TObjectPtr<USoundBase> WorkingLoopSound;
+
+	/** Played at every pulse while it works, on every machine. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Presentation")
+	TObjectPtr<UNiagaraSystem> PulseFX;
+
+	/** Played when it stops working, on every machine. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade|Presentation")
+	TObjectPtr<USoundBase> WorkingEndSound;
 };

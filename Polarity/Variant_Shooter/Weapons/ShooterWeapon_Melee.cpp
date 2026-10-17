@@ -28,6 +28,7 @@
 #include "Field/FieldSystemObjects.h"
 #include "Variant_Shooter/AnimNotify_MeleeWindow.h"
 #include "Animation/AnimMontage.h"
+#include "Variant_Shooter/ShoveComponent.h"
 
 AShooterWeapon_Melee::AShooterWeapon_Melee()
 {
@@ -799,7 +800,11 @@ void AShooterWeapon_Melee::ApplyCharacterImpulse(AActor* HitActor, const FVector
 	{
 		// NPC will apply its own multiplier, so divide it out
 		float DistanceForNPC = KnockbackDistance / NPCMultiplier;
-		NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDur, PlayerCenter);
+		// The shove with its reaction, as every melee hit now. @see UShoveComponent
+		if (!UShoveComponent::TryShove(NPC, PlayerCenter, DistanceForNPC, KnockbackDur, nullptr))
+		{
+			NPC->ApplyKnockback(KnockbackDirection, DistanceForNPC, KnockbackDur, PlayerCenter);
+		}
 		return;
 	}
 

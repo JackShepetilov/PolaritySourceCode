@@ -74,6 +74,7 @@ UCLASS(BlueprintType, meta = (BlueprintSpawnableComponent))
 class POLARITY_API UUpgradeManagerComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 

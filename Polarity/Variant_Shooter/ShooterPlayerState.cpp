@@ -5,6 +5,8 @@
 #include "Variant_Shooter/Buildables/BuildableDefinition.h"
 #include "Variant_Shooter/Pickups/MetalPickup.h"
 #include "Variant_Shooter/Shop/ShopComponent.h"
+#include "Variant_Shooter/Progression/RunLevelComponent.h"
+#include "Variant_Shooter/Progression/WeaponMasteryComponent.h"
 #include "Variant_Shooter/Pickups/LootDropComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "GameFramework/Pawn.h"
@@ -16,6 +18,8 @@
 AShooterPlayerState::AShooterPlayerState()
 {
 	Shop = CreateDefaultSubobject<UShopComponent>(TEXT("Shop"));
+	RunLevel = CreateDefaultSubobject<URunLevelComponent>(TEXT("RunLevel"));
+	WeaponMastery = CreateDefaultSubobject<UWeaponMasteryComponent>(TEXT("WeaponMastery"));
 }
 
 void AShooterPlayerState::BeginPlay()

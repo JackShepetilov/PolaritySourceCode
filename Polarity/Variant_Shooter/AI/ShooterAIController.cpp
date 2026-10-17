@@ -26,6 +26,7 @@
 #include "NavigationSystem.h"
 #include "AI/Coordination/AICombatCoordinator.h"
 #include "AI/Components/CoverFinderComponent.h"
+#include "AI/Components/AIAccuracyComponent.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Variant_Shooter/AI/SquadSpawn/Squad.h"
 
@@ -33,6 +34,11 @@ static TAutoConsoleVariable<int32> CVarAITargetChoice(
 	TEXT("polarity.ai.targetchoice"),
 	1,
 	TEXT("1: a soldier picks whom to fight by score, of those its side knows of (in view, near, hurt it lately, not already taken by its mates). 0: whoever it saw last, as before."));
+
+static TAutoConsoleVariable<float> CVarAICalloutDelay(
+	TEXT("polarity.ai.calloutdelay"),
+	1.75f,
+	TEXT("Seconds from a soldier seeing an enemy, or being hit, to its whole side knowing. Killed before that, the side does not learn it from him."));
 
 // The numbers of AShooterAIController's knowledge, in one place. Starting values, for the author to turn.
 namespace Knowledge
@@ -46,8 +52,9 @@ namespace Knowledge
 	/** Closer than this it is noticed whatever way the soldier faces: somebody at its elbow. cm. */
 	constexpr float TouchDistance = 150.0f;
 
-	/** Seeing, or being hit, to the side knowing it: the time it takes to say. Killed sooner, not said. */
-	constexpr float CalloutDelay = 1.0f;
+	/** Seeing, or being hit, to the side knowing it: the time it takes to say. Killed sooner, not said.
+	 *  A console variable and not a constant: it is tuned against how long a soldier lives under fire. */
+	inline float CalloutDelay() { return FMath::Max(0.05f, CVarAICalloutDelay.GetValueOnGameThread()); }
 
 	/** A hit this soon after a shot was heard from the one who hit is tied to that shot. A round that flies takes a while. */
 	constexpr float HitLinksToShotWithin = 1.5f;
@@ -233,10 +240,10 @@ void AShooterAIController::OnPawnDeath(AShooterNPC* DeadNPC)
 			AShooterAIController* const Mate = *It;
 			AShooterNPC* const MateNPC = Cast<AShooterNPC>(Mate->GetPawn());
 			if (Mate != this && Mate->bInfantry && MateNPC && Mate->GetGenericTeamId() == GetGenericTeamId()
-				&& Mate->IsInViewCone(Fell) && Mate->SeesWithOwnEyes(DeadNPC))
+				&& !Mate->HasHeadache() && Mate->IsInViewCone(Fell) && Mate->SeesWithOwnEyes(DeadNPC))
 			{
 				MateNPC->SayTactic(TEXT("MAN DOWN: saw him fall, calling the place"));
-				Mate->CallOutLater(Knowledge::CalloutDelay, [Mate, Fell]()
+				Mate->CallOutLater(Knowledge::CalloutDelay(), [Mate, Fell]()
 				{
 					Mate->TurnMatesTowards(Fell, Knowledge::TurnersPerShout);
 				});
@@ -627,17 +634,24 @@ void AShooterAIController::UpdateSeenEnemies(float Now)
 
 		// The side has it once it has been said, and for as long as it stays in view after that:
 		// "somebody sees him now" is read off how fresh this is.
-		if (Now - Seen->FirstSeenTime >= Knowledge::CalloutDelay)
+		if (Now - Seen->FirstSeenTime >= Knowledge::CalloutDelay())
 		{
-			if (!Seen->bCalledOut)
+			if (HasHeadache())
 			{
-				Seen->bCalledOut = true;
-				if (NPC)
-				{
-					NPC->SayTactic(TEXT("CONTACT: calling where he is"));
-				}
+				// Sees him, says nothing.
 			}
-			BroadcastContactAt(Candidate, Where, /*bSeenNow*/ true);
+			else
+			{
+				if (!Seen->bCalledOut)
+				{
+					Seen->bCalledOut = true;
+					if (NPC)
+					{
+						NPC->SayTactic(TEXT("CONTACT: calling where he is"));
+					}
+				}
+				BroadcastContactAt(Candidate, Where, /*bSeenNow*/ true);
+			}
 		}
 	}
 
@@ -1037,7 +1051,7 @@ void AShooterAIController::TurnMatesTowards(const FVector& Place, int32 Count)
 	{
 		AShooterAIController* const Mate = *It;
 		if (Mate != this && Mate->bInfantry && Mate->GetPawn() && Mate->GetGenericTeamId() == GetGenericTeamId()
-			&& !Mate->SeesAnyEnemy())
+			&& !Mate->SeesAnyEnemy() && !Mate->HasHeadache())
 		{
 			Mates.Add(Mate);
 		}
@@ -1084,9 +1098,13 @@ void AShooterAIController::ReportShotNoise(const UObject* WorldContext, APawn* S
 		Listener->HeardShooter = Shooter;
 		Listener->HeardPlace = Location;
 		Listener->HeardTime = Now;
+		if (const AShooterNPC* const NPC = Cast<AShooterNPC>(Body); NPC && NPC->GetAccuracyComponent())
+		{
+			NPC->GetAccuracyComponent()->NoteAlert();
+		}
 
 		// With somebody in view it has a fight of its own.
-		if (!Listener->SeesAnyEnemy())
+		if (!Listener->SeesAnyEnemy() && !Listener->HasHeadache())
 		{
 			Free.Add(Listener);
 		}
@@ -1100,12 +1118,68 @@ void AShooterAIController::ReportShotNoise(const UObject* WorldContext, APawn* S
 	});
 	for (int32 Index = 0; Index < Free.Num() && Index < Knowledge::TurnersPerSound; ++Index)
 	{
+		// Said when the head turns, not on every round of a burst: 116 lines of it in one fight.
+		const bool bWasLooking = Free[Index]->bLookingAround;
 		Free[Index]->LookTowards(Location, Knowledge::LookSeconds);
-		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Free[Index]->GetPawn()))
+		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Free[Index]->GetPawn()); NPC && !bWasLooking && Free[Index]->bLookingAround)
 		{
 			NPC->SayTactic(TEXT("SHOT over there, not ours: looking who"));
 		}
 	}
+}
+
+void AShooterAIController::ReportMovementNoise(const UObject* WorldContext, APawn* Mover, const FVector& Location, float Range)
+{
+	UWorld* const World = WorldContext ? WorldContext->GetWorld() : nullptr;
+	if (!World || !Mover || Range <= 0.0f || World->GetNetMode() == NM_Client || !UFactionContactMemory::IsKnowledgeOn())
+	{
+		return;
+	}
+
+	const float RangeSq = FMath::Square(Range);
+	TArray<AShooterAIController*, TInlineAllocator<16>> Free;
+	for (TActorIterator<AShooterAIController> It(World); It; ++It)
+	{
+		AShooterAIController* const Listener = *It;
+		const APawn* const Body = Listener->GetPawn();
+		if (!Listener->bInfantry || !Body || Body == Mover || !Listener->IsHostileTo(Mover)
+			|| FVector::DistSquared(Body->GetActorLocation(), Location) > RangeSq)
+		{
+			continue;
+		}
+
+		// Somebody is moving about over there: the gun comes up. Who, it does not know.
+		if (const AShooterNPC* const NPC = Cast<AShooterNPC>(Body); NPC && NPC->GetAccuracyComponent())
+		{
+			NPC->GetAccuracyComponent()->NoteAlert();
+		}
+		if (!Listener->SeesAnyEnemy() && !Listener->HasHeadache())
+		{
+			Free.Add(Listener);
+		}
+	}
+
+	// The nearest few turn to it and hold there: whoever comes through that way meets a gun on him.
+	Free.Sort([&Location](const AShooterAIController& A, const AShooterAIController& B)
+	{
+		return FVector::DistSquared(Location, A.GetPawn()->GetActorLocation()) < FVector::DistSquared(Location, B.GetPawn()->GetActorLocation());
+	});
+	for (int32 Index = 0; Index < Free.Num() && Index < Knowledge::TurnersPerSound; ++Index)
+	{
+		const bool bWasLooking = Free[Index]->bLookingAround;
+		Free[Index]->LookTowards(Location, Knowledge::LookSeconds);
+		if (AShooterNPC* const NPC = Cast<AShooterNPC>(Free[Index]->GetPawn()); NPC && !bWasLooking && Free[Index]->bLookingAround)
+		{
+			NPC->SayTactic(TEXT("HEARD somebody moving over there: holding on it"));
+		}
+	}
+}
+
+bool AShooterAIController::HasHeadache() const
+{
+	const AShooterNPC* const NPC = Cast<AShooterNPC>(GetPawn());
+	const UAIAccuracyComponent* const Accuracy = NPC ? NPC->GetAccuracyComponent() : nullptr;
+	return Accuracy && Accuracy->HasHeadache();
 }
 
 void AShooterAIController::NoteHitFrom(AActor* Source, float Damage)
@@ -1146,10 +1220,10 @@ void AShooterAIController::NoteHitFrom(AActor* Source, float Damage)
 	}
 
 	const bool bHeardTheShot = HeardShooter.Get() == Source && Now - HeardTime <= Knowledge::HitLinksToShotWithin;
-	const bool bMayCall = Now >= NextHitCalloutTime;
+	const bool bMayCall = Now >= NextHitCalloutTime && !HasHeadache();
 	if (bMayCall)
 	{
-		NextHitCalloutTime = Now + Knowledge::CalloutDelay + 0.5f;
+		NextHitCalloutTime = Now + Knowledge::CalloutDelay() + 0.5f;
 	}
 
 	if (bHeardTheShot)
@@ -1163,11 +1237,11 @@ void AShooterAIController::NoteHitFrom(AActor* Source, float Damage)
 			BelievedTime = Now;
 		}
 		LookTowards(Place, Knowledge::LookSeconds);
-		NPC->SayTactic(TEXT("HIT: the fire is from over there"));
 
 		if (bMayCall)
 		{
-			CallOutLater(Knowledge::CalloutDelay, [this, WeakSource = TWeakObjectPtr<AActor>(Source), Place]()
+			NPC->SayTactic(TEXT("HIT: the fire is from over there"));
+			CallOutLater(Knowledge::CalloutDelay(), [this, WeakSource = TWeakObjectPtr<AActor>(Source), Place]()
 			{
 				if (AActor* const Enemy = WeakSource.Get())
 				{
@@ -1186,11 +1260,11 @@ void AShooterAIController::NoteHitFrom(AActor* Source, float Damage)
 	const FVector Here = NPC->GetActorLocation();
 	const FVector Place = Here + (Source->GetActorLocation() - Here).GetSafeNormal2D() * Knowledge::DirectionLookDistance;
 	LookTowards(Place, Knowledge::LookSeconds);
-	NPC->SayTactic(TEXT("HIT: from that side, did not hear the shot"));
 
 	if (bMayCall)
 	{
-		CallOutLater(Knowledge::CalloutDelay, [this, Place]()
+		NPC->SayTactic(TEXT("HIT: from that side, did not hear the shot"));
+		CallOutLater(Knowledge::CalloutDelay(), [this, Place]()
 		{
 			TurnMatesTowards(Place, Knowledge::TurnersPerShout);
 			if (AShooterNPC* const Caller = Cast<AShooterNPC>(GetPawn()))

@@ -135,9 +135,27 @@ public:
 	virtual void OnDeactivated() override;
 	virtual void TickActive(float DeltaTime) override;
 
+	/** Normal costs NormalDuration (free at 0), Active costs ActiveDuration. */
+	virtual float GetDrainPerSecond() const override;
+
 private:
 
 	const UTacticalDevice_Light* GetLight() const;
+
+	/** The laser's burner: the definition's BurnBone, in the beam, in sight, inside BurnRange. */
+	bool FindBurnPoint(const AShooterNPC* Enemy, const FVector& Origin, const FVector& Direction, float CosHalf, FVector& OutPoint) const;
+
+	/** Server: the soldiers that see the light (the lamp, or the laser's beam) turn to it, and with
+	 *  the burner on, the side learns where the shooter is. */
+	void ScanSeen(const FVector& Origin, const FVector& Direction, const FVector& End, bool bActive);
+
+	/** Server: the laser's dot (or its beam) held on or by a soldier pins it. */
+	void ScanPainted(float ScanDeltaTime, const FVector& Origin, const FVector& End);
+
+	float SeenTimer = 0.0f;
+
+	/** Last time each soldier was said to have seen the light, so the log says it once a while. */
+	TMap<TWeakObjectPtr<AShooterNPC>, float> SeenLogTime;
 
 	/** Seconds the light has been held on each enemy, and when it last was. Server. */
 	struct FLitRecord

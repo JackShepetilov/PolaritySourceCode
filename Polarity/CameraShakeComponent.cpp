@@ -208,6 +208,12 @@ void UCameraShakeComponent::UpdateActiveShakes(float DeltaTime)
 		float PitchValue = UpdateDampedOscillator(JumpPitchOsc, DeltaTime);
 		CurrentRotationOffset.Pitch += PitchValue;
 	}
+
+	// Mantle shake - pitch
+	if (MantlePitchOsc.bActive)
+	{
+		CurrentRotationOffset.Pitch += UpdateDampedOscillator(MantlePitchOsc, DeltaTime);
+	}
 }
 
 // ==================== Procedural Bob (Titanfall 2/Apex) ====================
@@ -343,6 +349,14 @@ void UCameraShakeComponent::TriggerJumpShake(bool bIsDoubleJump)
 	float PitchDamp = Settings->JumpShakeDamping;
 
 	TriggerOscillator(JumpPitchOsc, PitchAmp, PitchFreq, PitchDamp);
+}
+
+void UCameraShakeComponent::TriggerMantleShake(bool bHigh)
+{
+	if (!Settings || !Settings->bEnableMantleShake) return;
+
+	const float PitchAmp = Settings->MantleCameraDip * (bHigh ? 1.0f : 0.5f) * Settings->CameraShakeIntensity;
+	TriggerOscillator(MantlePitchOsc, PitchAmp, Settings->MantleShakeFrequency, Settings->MantleShakeDamping);
 }
 
 void UCameraShakeComponent::TriggerSlideStart()

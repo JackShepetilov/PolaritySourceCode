@@ -9,6 +9,7 @@
 #include "ApexMovementComponent.h"
 #include "TutorialTypes.h"
 #include "Variant_Shooter/Classes/PlayerClassDefinition.h"
+#include "Variant_Shooter/MeleeAttackComponent.h"
 #include "ShooterCharacter.generated.h"
 
 class AShooterWeapon;
@@ -44,6 +45,7 @@ class UNiagaraSystem;
 class UNiagaraComponent;
 class AEMFPhysicsProp;
 class ADroppedRangedWeapon;
+class UCurveVector;
 class AInventoryPickup;
 class ARiotShield;
 struct FCheckpointData;
@@ -190,6 +192,7 @@ UCLASS(abstract)
 class POLARITY_API AShooterCharacter : public APolarityCharacter, public IShooterWeaponHolder
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 	/** AI Noise emitter component */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -1165,6 +1168,33 @@ protected:
 	/** Volume for mantle sound */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SFX|Mantle", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float MantleSoundVolume = 1.0f;
+
+	// ==================== Animation|Mantle ====================
+	// Which montage plays is UApexMovementComponent::GetMantleKind (by ledge height). Every slot may
+	// stay empty: the mantle moves the same without animation.
+
+	/** First person arms, the hop over a low ledge. Slot LeftArm: UE5_ABP_Viewmodel lays it over
+	 *  the left arm only, so the right hand and the gun keep the pose. A running reload is put on
+	 *  hold for the mantle and resumed after it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Mantle")
+	TObjectPtr<UAnimMontage> MantleLowMontageFP;
+
+	/** First person arms, the pull up onto a high ledge. Same slot rule as the low one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Mantle")
+	TObjectPtr<UAnimMontage> MantleHighMontageFP;
+
+	/** Third person body, the low mantle: what teammates see. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Mantle")
+	TObjectPtr<UAnimMontage> MantleLowMontageTP;
+
+	/** Third person body, the high mantle. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Mantle")
+	TObjectPtr<UAnimMontage> MantleHighMontageTP;
+
+	/** Play each montage at the rate that makes it last exactly as long as the mantle (its time
+	 *  depends on the ledge height). Off: the montages play at rate 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Animation|Mantle")
+	bool bFitMantleMontagesToDuration = true;
 
 	// ==================== SFX|Weapon ====================
 
@@ -2193,6 +2223,121 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapons")
 	AShooterWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
 
+	/** The weapon a swap is bringing out, null outside a swap. */
+	AShooterWeapon* GetPendingWeapon() const { return PendingWeapon; }
+
+	/** World time of this player's last kill on this machine: the server hears it from the enemy
+	 *  (AShooterNPC::ReportDamageNumber), the owner from the hit confirmation. For the fast swap after
+	 *  a kill (FWeaponMasteryPerks::bFastSwapAfterKill). */
+	float GetLastKillTime() const { return LastKillTime; }
+	void NoteKill();
+
+	/** The gun in hand opens the tactical sprint (weapon mastery). */
+	virtual bool CanTacticalSprint() const override;
+
+	/** 0..1: how tired the arms are in the sight. Owning machine only. @see UpdateADSFatigue */
+	UFUNCTION(BlueprintPure, Category = "Weapons")
+	float GetADSFatigue() const { return ADSFatigueLevel; }
+
+	// ==================== Spear throw (weapon mastery) ====================
+	// Aim + melee with FWeaponMasteryPerks::bCanThrowWeapon: the gun leaves the hands with a pistol
+	// holster, is tossed up in front of the camera, and the slap (MeleeGroundRightCross) sends it
+	// forward point first, spinning, to stun what it hits [author, 2026-10-16].
+	// ADroppedRangedWeapon::BeginSpearToss / LaunchSpear fly it.
+
+	/** Owning machine, from the melee key while aiming. True when the throw started. */
+	bool TryStartSpearThrow();
+
+	UFUNCTION(BlueprintPure, Category = "Weapons|Spear")
+	bool IsSpearThrowing() const { return bSpearThrowActive; }
+
+	/** The arms put the gun away with this (a pistol's holster). Empty: straight to the slap. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear")
+	TObjectPtr<UAnimMontage> SpearHolsterMontage;
+
+	/** The slap, set up like any melee animation of the melee component (montage, play rate, mesh
+	 *  offset and rotation, hidden bones). Its "Melee: Activate Damage Window" notify is the moment of
+	 *  the slap; the window itself opens no melee hit. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear")
+	FMeleeAnimationData SpearSlapAnimation;
+
+	/** How long the holster plays before the slap starts; the montage is fitted to it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "0.0", Units = "s"))
+	float SpearHolsterTime = 0.3f;
+
+	/** The slap's moment when its montage has no damage window notify. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "0.0", Units = "s"))
+	float SpearSlapImpactFallback = 0.25f;
+
+	/** Where in front of the eyes the slap meets the gun (X forward, Y right, Z up). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear")
+	FVector SpearTossEndOffset = FVector(55.0f, 6.0f, -4.0f);
+
+	/** How far the toss rises above the line from the hand to that point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "0.0", Units = "cm"))
+	float SpearTossApex = 25.0f;
+
+	/** Turns in the toss, about SpearTossSpinAxis. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Tumble", meta = (ClampMin = "0.0"))
+	float SpearTossTurns = 1.0f;
+
+	/** The tumble's axis in view space: (0,1,0) end over end, (1,0,0) a barrel roll, (0,0,1) a flat
+	 *  spin; anything in between tilts it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Tumble")
+	FVector SpearTossSpinAxis = FVector(0.0f, 1.0f, 0.0f);
+
+	/** How the tumble slows towards the slap: 1 even all the way, higher slows sooner. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Tumble", meta = (ClampMin = "1.0"))
+	float SpearTossSpinEase = 2.0f;
+
+	/** Optional, draws the turn by hand and replaces the three above: time 0..1 over the toss, X roll,
+	 *  Y pitch, Z yaw in degrees about the view's axes. End at 0,0,0 (or whole turns) to meet the slap
+	 *  pointing forward. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Tumble")
+	TObjectPtr<UCurveVector> SpearTossRotationCurve;
+
+	/** Optional: extra path over the toss, time 0..1, X forward / Y right / Z up in cm from the arc.
+	 *  End at 0,0,0 to meet the slap where SpearTossEndOffset says. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Tumble")
+	TObjectPtr<UCurveVector> SpearTossPathCurve;
+
+	/** Target lock: at the slap the enemy nearest the crosshair within this cone (and range, and in
+	 *  sight) is locked, and the flight turns towards him. 0 switches the lock off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Lock", meta = (ClampMin = "0.0", ClampMax = "45.0", Units = "deg"))
+	float SpearLockConeDegrees = 10.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Lock", meta = (ClampMin = "0.0", Units = "cm"))
+	float SpearLockRange = 4000.0f;
+
+	/** How fast the flight may turn towards the locked enemy. Higher catches sharper dodges and bends
+	 *  round more. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear|Lock", meta = (ClampMin = "0.0", Units = "deg"))
+	float SpearTurnRate = 120.0f;
+
+	/** Where the slap sends it, in view space: (1,0,0) straight along the sight, (1,0,0.05) a little up. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear")
+	FVector SpearLaunchDirection = FVector(1.0f, 0.0f, 0.05f);
+
+	/** Flight speed after the slap (Air Mail's kick: 4500). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "100.0", Units = "cm/s"))
+	float SpearSpeed = 4500.0f;
+
+	/** Spin about the flight (Air Mail's kick: 720). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "0.0"))
+	float SpearSpinSpeed = 720.0f;
+
+	/** Stun of the enemy it hits, as the flashbang stuns. No damage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapons|Spear", meta = (ClampMin = "0.1", Units = "s"))
+	float SpearStunSeconds = 2.5f;
+
+	/** Clear owner-side animation timers before the bench replaces the weapon actors. */
+	UFUNCTION(Client, Reliable)
+	void Client_ResetBenchLoadoutPresentation();
+	UFUNCTION(Client, Reliable)
+	void Client_SaveBenchPreset(class ABenchLoadoutButton* BenchButton);
+	UFUNCTION(Server, Reliable)
+	void Server_SaveBenchPreset(class ABenchLoadoutButton* BenchButton, const TArray<AShooterWeapon*>& Weapons, const TArray<int32>& Bullets);
+
 	// ==================== Lunge reach ====================
 	// There are TWO lunges in this project and only one of them runs at a time: the bare-handed one
 	// in UMeleeAttackComponent, and the copy inside AShooterWeapon_Melee, which disables the
@@ -2355,6 +2500,48 @@ protected:
 
 	/** Update ADS state and apply effects */
 	void UpdateADS(float DeltaTime);
+
+	/** Owning machine: tire the arms while the sight is up, rest them while it is down. */
+	void UpdateADSFatigue(float DeltaTime);
+
+	/** The wander of a tired sight, for GetViewRotation. */
+	FRotator GetADSFatigueSway() const;
+
+	/** Seconds the sight has been held, worn down while it is not; GetADSFatigue is read off it. */
+	float ADSFatigueTime = 0.0f;
+	float ADSFatigueLevel = 0.0f;
+
+	// ---- Spear throw ----
+
+	/** The owning machine asks; Offset/Rotation: where the gun was in the hand, in view space. */
+	UFUNCTION(Server, Reliable)
+	void Server_SpearThrow(FVector HandOffset, FRotator HandRotation);
+
+	/** Authority: drop the gun into the toss and arm the slap. */
+	void ServerSpearThrow(const FVector& HandOffset, const FQuat& HandRotation);
+
+	/** Authority, at the slap: send it flying. */
+	void SpearLaunch();
+
+	/** Owning machine: the slap on the melee mesh. */
+	void SpearSlapBegin();
+
+	/** Owning machine: back to the arms, and out with the next gun. */
+	void SpearThrowEnd();
+
+	/** Seconds from the start of the slap montage to the slap. */
+	float GetSpearSlapImpactTime() const;
+
+	bool bSpearThrowActive = false;
+	bool bSpearMeleeWasDisabled = false;
+	FTimerHandle SpearSlapTimer;
+	FTimerHandle SpearLaunchTimer;
+	FTimerHandle SpearEndTimer;
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<ADroppedRangedWeapon> SpearDrop;
+
+	float LastKillTime = -1000.0f;
 
 	/** Start a swap to NewWeapon: the held weapon plays its holster montage, and the swap happens at
 	 *  that montage's notify. Falls back to an instant equip when the weapon has no holster montage,
@@ -2522,6 +2709,18 @@ protected:
 	/** Handler for mantle start event */
 	UFUNCTION()
 	void OnMantleStarted_Handler();
+
+	/** Stops whatever mantle montage is still playing (a mantle that was cut short). */
+	UFUNCTION()
+	void OnMantleEnded_Handler();
+
+	/** The mantle montages playing now, so the end can stop exactly them and UpdateLeftHandIK can
+	 *  ask whether the arms are being animated. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveMantleMontageFP;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveMantleMontageTP;
 
 	/** Handler for air dash start event - plays sound and starts VFX */
 	UFUNCTION()
@@ -2818,6 +3017,92 @@ public:
 	 *  so the draw waits for OnRep_CurrentWeapon to deliver it (with a short timeout). */
 	UFUNCTION(Client, Reliable)
 	void Client_FinishWeaponFetch(AShooterWeapon* Expected, float SpeedMultiplier, bool bGotWeapon);
+
+	// ==================== Hand pickup ====================
+	// The take key, up close: the left hand picks the item off the floor with the pack's pickup
+	// animation, the item flies the last bit into it and is granted by its own code, exactly as a
+	// hooked item is. A weapon also sends the held one away: the holster plays on the right hand at
+	// the same time, stretched to last as long as the pickup, and the new gun comes out when both are
+	// done. The hook (StartItemFetch) stays for a perk or an ability.
+	// @see Docs/Pickup_Hand_Plan_2026-10-17.md
+
+	/** True while the left hand is taking something. Owning client only, from the press on (a
+	 *  prediction); false everywhere else. Hands busy: no firing, aiming, reloading, swapping. */
+	bool IsHandPickupActive() const { return bHandPickupActive; }
+
+	/** The take key throws the hook (StartItemFetch) instead of reaching with the hand. Off: the hook
+	 *  is going to be a perk or an ability. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand")
+	bool bFetchWithHook = false;
+
+	/** How near an item has to be for the hand. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand", meta = (ClampMin = "50.0", Units = "cm"))
+	float HandPickupRadius = 200.0f;
+
+	/** First person arms. Slot LeftArm: the arms graph lays it over the left arm only. Carries the
+	 *  camera curves, so the view nods down to the floor with the hand. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand")
+	TObjectPtr<UAnimMontage> HandPickupMontageFP;
+
+	/** Third person body, what teammates see. Empty: the body does not animate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand")
+	TObjectPtr<UAnimMontage> HandPickupMontageTP;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand", meta = (ClampMin = "0.1"))
+	float HandPickupPlayRate = 1.0f;
+
+	/** When the hand closes on the item, in seconds into the montage at rate 1. The item starts
+	 *  flying into the hand here. Keep UFieldCareComponent::StripTime the same: the armour off a body
+	 *  comes off at this moment too. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Pickup|Hand", meta = (ClampMin = "0.0", Units = "s"))
+	float HandPickupGrabTime = 0.4f;
+
+	/** Owning client asks to take the item its brackets are on. */
+	UFUNCTION(Server, Reliable)
+	void Server_HandPickup(AActor* Target);
+
+	/** The server refused the take: stop the hand the press started. */
+	UFUNCTION(Client, Reliable)
+	void Client_CancelHandPickup();
+
+	/** Authority: drop a pickup in progress (downed, died). */
+	void AbortHandPickup();
+
+protected:
+	/** Wall clock length of the pickup: the montage at its rate. */
+	float GetHandPickupLength() const;
+
+	/** Owning client: nothing else has the hands and the press may start a pickup. */
+	bool CanStartHandPickup() const;
+
+	/** Owning client: the hand starts at once, before the server has answered. */
+	void BeginHandPickupLocal();
+	void EndHandPickupLocal();
+	void CancelHandPickupLocal();
+
+	/** Authority: the hand has closed on the item, and its end. */
+	void OnHandPickupGrab();
+	void OnHandPickupEnd();
+
+	/** BeginWeaponFetchStow with the speeds given rather than read from a grapple definition. */
+	void BeginWeaponFetchStowAt(float HolsterSpeed, float DrawSpeed);
+
+	/** Owning client. @see IsHandPickupActive */
+	bool bHandPickupActive = false;
+
+	/** Owning client: the pickup put a running reload on hold and gives it back at its end. */
+	bool bHandPickupSuspendedReload = false;
+
+	/** Authority: a pickup is running. A draw asked for meanwhile (FinishWeaponFetch) waits for it. */
+	bool bHandPickupServerActive = false;
+	bool bHandPickupDrawPending = false;
+	bool bHandPickupDrawGotWeapon = false;
+	TWeakObjectPtr<AActor> HandPickupTarget;
+	FTimerHandle HandPickupGrabTimer;
+	FTimerHandle HandPickupEndTimer;
+	FTimerHandle HandPickupLocalEndTimer;
+
+public:
 
 	// ==================== Ability aiming (hold to aim, release to fire) ====================
 

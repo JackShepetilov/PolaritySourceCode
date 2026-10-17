@@ -38,6 +38,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Shop")
 	class UShopComponent* GetShop() const { return Shop; }
 
+	/** This player's run level. Here for the reason the metal is: it outlives the body. */
+	UFUNCTION(BlueprintPure, Category = "Run Level")
+	class URunLevelComponent* GetRunLevel() const { return RunLevel; }
+
 	// ==================== Metal ====================
 
 	/** Most metal one player can hold. What does not fit stays on the floor for somebody else. */
@@ -112,6 +116,13 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Shop")
 	TObjectPtr<class UShopComponent> Shop;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Run Level")
+	TObjectPtr<class URunLevelComponent> RunLevel;
+
+	/** Mastery of every weapon fought with this run. Here for the reason the run level is. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Mastery")
+	TObjectPtr<class UWeaponMasteryComponent> WeaponMastery;
 
 	UPROPERTY(ReplicatedUsing = OnRep_OwnedBuildables)
 	TArray<TObjectPtr<ABuildableActor>> OwnedBuildables;

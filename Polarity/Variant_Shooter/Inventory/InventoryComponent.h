@@ -34,6 +34,7 @@ UCLASS(ClassGroup = (Polarity), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UInventoryComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 
@@ -90,16 +91,55 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	int32 GetMedkitStackSize() const { return FMath::Max(1, MedkitStackSize); }
 
-	/** Grenades of this type in the bag; null counts every grenade. @see EInventorySlotKind::Grenade */
-	UFUNCTION(BlueprintPure, Category = "Inventory")
+	// ==================== Gadgets ====================
+	//
+	// Grenades and thrown drones live in their own section, not in the cells [author, 2026-10-16]:
+	// GadgetKinds kinds at most, GadgetsPerKind of each, and GadgetKindsForTotal x GadgetsPerKind of
+	// all of them together. The total does not grow with the kinds: a perk for a third kind gives
+	// choice, not more grenades. A kind the player runs out of frees its place.
+
+	/** Gadgets of this type; null counts every gadget. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Gadgets")
 	int32 GetGrenadeCount(const UGrenadeDefinition* Definition) const;
 
-	/** Spend grenades of this type. Returns how many were taken. Server only, like ConsumeAmmo. */
-	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	/** Spend gadgets of this type. Returns how many were taken. Server only, like ConsumeAmmo. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Gadgets")
 	int32 ConsumeGrenades(const UGrenadeDefinition* Definition, int32 Count);
 
-	/** Every type of grenade in the bag, each once, in the order of the cells. */
+	/** Every kind carried, in the order of the section: the first is the first place, and so on. */
 	void GetGrenadeTypes(TArray<UGrenadeDefinition*>& OutTypes) const;
+
+	UFUNCTION(BlueprintPure, Category = "Inventory|Gadgets")
+	const TArray<FGadgetStack>& GetGadgets() const { return Gadgets; }
+
+	/** How many kinds may be carried. 2; a soldier's perk makes it 3. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Gadgets")
+	int32 GetGadgetKinds() const { return FMath::Max(1, GadgetKinds); }
+
+	/** How many of one kind may be carried: GadgetsPerKind, or what the owner's run level gives when
+	 *  that is more (URunLevelComponent). 3 at the start, up to 5 with the level. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Gadgets")
+	int32 GetGadgetsPerKind() const;
+
+	/** How many gadgets may be carried altogether: GadgetKindsForTotal x GadgetsPerKind. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Gadgets")
+	int32 GetGadgetTotalLimit() const { return FMath::Max(1, GadgetKindsForTotal) * GetGadgetsPerKind(); }
+
+	/** The soldier's perk. Fewer kinds than are carried drops the last ones on the floor. Server only. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Inventory|Gadgets")
+	void SetGadgetKinds(int32 NewKinds);
+
+	/** The run level. Server only. Lowering it keeps what is already carried until it is thrown. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Inventory|Gadgets")
+	void SetGadgetsPerKind(int32 NewPerKind);
+
+	/** A new kind is coming and every place is taken: drop Outgoing whole on the floor to make room, in
+	 *  its place, so the new kind takes the same place. Outgoing not carried means the last kind. False,
+	 *  with nothing changed, when no room has to be made. Server only. */
+	bool SwapOutGadgetFor(const UGrenadeDefinition* Incoming, const UGrenadeDefinition* Outgoing);
+
+	/** Put one kind on the floor, all of it. Server only. */
+	bool DropGadgetToWorld(const UGrenadeDefinition* Type);
 
 	/** The most medkits this player may carry. A medic carries twice as many [author, 2026-10-11];
 	 *  whatever makes a player a medic says so through SetMaxMedkits. */
@@ -388,6 +428,22 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory", meta = (ClampMin = "0"))
 	int32 StartingMedkits = 3;
 
+	/** The gadget section, in place order. @see GetGadgets */
+	UPROPERTY(ReplicatedUsing = OnRep_Slots)
+	TArray<FGadgetStack> Gadgets;
+
+	/** @see GetGadgetKinds */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing = OnRep_Slots, Category = "Inventory|Gadgets", meta = (ClampMin = "1"))
+	int32 GadgetKinds = 2;
+
+	/** @see GetGadgetsPerKind */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing = OnRep_Slots, Category = "Inventory|Gadgets", meta = (ClampMin = "1"))
+	int32 GadgetsPerKind = 3;
+
+	/** The kinds the total limit is counted for. Stays 2 when a perk raises GadgetKinds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory|Gadgets", meta = (ClampMin = "1"))
+	int32 GadgetKindsForTotal = 2;
+
 	UFUNCTION()
 	void OnRep_Slots();
 
@@ -452,6 +508,18 @@ protected:
 	float DropForwardDistance = 150.0f;
 
 private:
+
+	/** Place of this kind in the gadget section, or INDEX_NONE. */
+	int32 FindGadget(const UGrenadeDefinition* Type) const;
+
+	/** How many of Item the gadget section would take now. */
+	int32 GetGadgetRoomFor(const FInventoryItem& Item) const;
+
+	/** TryAdd for EInventorySlotKind::Grenade. Returns what did not fit. */
+	int32 AddGadgets(const FInventoryItem& Item);
+
+	/** Where the next new kind goes: the place SwapOutGadgetFor just emptied, else the end. */
+	int32 PendingGadgetPlace = INDEX_NONE;
 
 	/** Index of a partial stack that would accept more of Item, or INDEX_NONE. */
 	int32 FindStackWithRoom(const FInventoryItem& Item) const;

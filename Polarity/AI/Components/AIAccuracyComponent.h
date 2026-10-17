@@ -13,6 +13,51 @@ class ACharacter;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSuppressionStart, float, Duration);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSuppressionEnd);
 
+/** How used to a fight this shooter is. Picks one of the three tunings on UAIAccuracyComponent. */
+UENUM(BlueprintType)
+enum class EAIExperience : uint8
+{
+	Rookie,
+	Regular,
+	Veteran
+};
+
+/** The numbers that make a rookie a rookie and a veteran a veteran. */
+USTRUCT(BlueprintType)
+struct FAIExperienceTuning
+{
+	GENERATED_BODY()
+
+	FAIExperienceTuning() = default;
+	FAIExperienceTuning(float InReaction, float InAimedShare, float InHitStill, float InHitDodging, float InStressGain)
+		: ReactionSeconds(InReaction), AimedShare(InAimedShare), HitChanceStill(InHitStill)
+		, HitChanceDodging(InHitDodging), StressGainScale(InStressGain)
+	{
+	}
+
+	/** Seconds the target has to be in view before a round may be meant to hit it. Until then the
+	 *  trigger may go down, but every round misses on purpose. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experience", meta = (ClampMin = "0.0", Units = "s"))
+	float ReactionSeconds = 0.35f;
+
+	/** Share of the rounds that are aimed, once reacted. The rest pass close by on purpose: they are
+	 *  there to frighten and pin, not to kill. Spread evenly through the string of fire. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experience", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AimedShare = 0.6f;
+
+	/** Chance an aimed round lands, point-blank, on a target not moving across the line of fire. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experience", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HitChanceStill = 0.85f;
+
+	/** ...and on one moving across it at DodgeReferenceSpeed or faster. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experience", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HitChanceDodging = 0.63f;
+
+	/** Every stress event counts this much of itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experience", meta = (ClampMin = "0.0"))
+	float StressGainScale = 0.8f;
+};
+
 /**
  * Component that calculates NPC aim accuracy based on target's movement speed.
  * Faster targets are harder to hit. Wall running provides additional spread bonus.
@@ -128,14 +173,10 @@ public:
 	float MaxSuppressiveFireSpread = 9.0f;
 
 	// ==================== Settling on a target ====================
-	// How the shooter gives ground to whoever it shoots at. A fresh string of fire opens with a round
-	// that misses on purpose (the warning: "you are being shot at, move") and starts loose; the spread
-	// tightens the longer the string runs. So a target that keeps breaking the line is shot at badly,
-	// and one that stands in the open is shot at well.
-
-	/** The first round of a fresh string of fire misses on purpose. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling")
-	bool bFirstShotMisses = true;
+	// How the shooter gives ground to whoever it shoots at. A fresh string of fire starts loose and
+	// the spread tightens the longer the string runs. So a target that keeps breaking the line is shot
+	// at badly, and one that stands in the open is shot at well. The warning round that used to open
+	// every string is the reaction below now: everything fired before it has run out misses.
 
 	/** Spread multiplier at the start of a string of fire. 1 disables the ramp. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Settling", meta = (ClampMin = "1.0", ClampMax = "10.0"))
@@ -174,6 +215,239 @@ public:
 
 	bool IsPinFire() const { return bPinFire; }
 
+	// ==================== Fire discipline: reaction, aimed rounds, stress ====================
+	// [author, 2026-10-14] Up close the cone above is a few centimetres wide and every round of an
+	// automatic landed: the player died in half a second at four metres. The gun still fires at its
+	// own rate, but only some of the rounds are meant to hit:
+	//   - none until the target has been in view for the reaction time;
+	//   - after that AimedShare of the rounds are aimed, the rest pass close by on purpose;
+	//   - an aimed round lands with a chance rolled for it (HitChanceStill / HitChanceDodging, less
+	//     with range, the shooter moving, the target in the air, a light in the eyes), and lands on
+	//     the body; a failed roll passes close by like the rest. The cone above is not used.
+	//   - stress (being suppressed, hit, wounded, a friend dying near) worsens all of it.
+	// Damage per magazine is then known before the fight: rounds x AimedShare x chance x damage.
+	// Regular, AKX203 (20 x 20), point-blank, calm: 0.6 x 0.85 = 204 standing, 0.6 x 0.63 = 151 dodging.
+	// Only shooters that report what they see (UpdateSight) are held to this; the rest shoot as before.
+
+	/** Which tuning this shooter uses. Spawners and blueprints set it; Regular when nobody did. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline")
+	EAIExperience Experience = EAIExperience::Regular;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline")
+	FAIExperienceTuning RookieTuning = { 0.5f, 0.45f, 0.75f, 0.5f, 1.0f };
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline")
+	FAIExperienceTuning RegularTuning = { 0.35f, 0.6f, 0.85f, 0.63f, 0.8f };
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline")
+	FAIExperienceTuning VeteranTuning = { 0.25f, 0.75f, 0.9f, 0.7f, 0.6f };
+
+	/** The share of each round wanders this much either way, so aimed rounds do not fall on a beat. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	float AimedRoundJitter = 0.3f;
+
+	/** Speed across the line of fire (cm/s) at which the target counts as fully dodging. Running
+	 *  straight at the shooter or away from it is not dodging. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "1.0", Units = "cm/s"))
+	float DodgeReferenceSpeed = 400.0f;
+
+	/** Up to this range the hit chance is whole (cm)... */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float HitChanceFullRange = 800.0f;
+
+	/** ...and from this range on it is FarHitChanceScale of it (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float HitChanceFarRange = 4000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FarHitChanceScale = 0.35f;
+
+	/** A landing round goes this far at most from the point aimed at (cm): inside the torso. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float HitPlacementRadius = 18.0f;
+
+	// ==================== Readiness ====================
+	// [author, 2026-10-14] At arm's length the one who was ready wins, not the better shot. A rush
+	// into a room that heard it coming meets guns already on the door; a quiet entry from a side
+	// nobody watches meets soldiers that have to turn and react. What a new sight costs:
+	//   - calm (nothing heard for AlertSeconds): the experience's reaction;
+	//   - alert (heard, hit, called, saw somebody): AlertReactionScale of it;
+	//   - holding (alert within HoldFreshSeconds, and the eyes within HoldConeDegrees of where he
+	//     shows): HoldReactionSeconds, and then every round of FirstVolleySeconds is aimed;
+	//   - not holding, the eyes elsewhere: up to TurnReactionSeconds more, at 90 degrees off and past.
+
+	/** Alert this long after the last thing that alerted it (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", Units = "s"))
+	float AlertSeconds = 20.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AlertReactionScale = 0.7f;
+
+	/** Within this angle of where its eyes are it is holding on him (degrees). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", ClampMax = "90.0", Units = "deg"))
+	float HoldConeDegrees = 15.0f;
+
+	/** Reaction of one holding the place he shows at (s). Stress still lengthens it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", Units = "s"))
+	float HoldReactionSeconds = 0.1f;
+
+	/** Holding wears off: this long after the last thing that alerted it, or the gun last held on
+	 *  him, it is only alert (s). Make a noise, wait, come in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", Units = "s"))
+	float HoldFreshSeconds = 5.0f;
+
+	/** One holding the place: every round this long after its reaction is aimed (s). At 0.5 a very
+	 *  skilled player sliding into two regulars holding the door wins about one time in four
+	 *  (simulated 2026-10-14; 0.3 gives a half). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", Units = "s"))
+	float FirstVolleySeconds = 0.5f;
+
+	/** Added to the reaction when he shows 90 degrees or more off where its eyes are (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Readiness", meta = (ClampMin = "0.0", Units = "s"))
+	float TurnReactionSeconds = 0.3f;
+
+	// ==================== Headache (stress grenade) ====================
+	// Through walls and over a wide area. While it lasts: stress no lower than its strength, the
+	// reaction longer still, no holding and no first volley, no calling to its side, and a friend
+	// falling near freezes it for a moment.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Headache", meta = (ClampMin = "1.0"))
+	float HeadacheReactionMultiplier = 1.6f;
+
+	/** A friend falling within StressAllyDeathRadius freezes one with a headache this long (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Headache", meta = (ClampMin = "0.0", Units = "s"))
+	float AllyDeathFlinchSeconds = 0.6f;
+
+	/** Out of view for less than this and the reaction is not started over (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "s"))
+	float SightLossResetSeconds = 1.0f;
+
+	/** The gun was held on the place the target went down behind (NoteAiming): the reaction to it
+	 *  coming up there again is this share of the usual. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WatchedReactionScale = 0.5f;
+
+	/** A round that misses on purpose passes this far outside the target's body at the least (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float MissClearanceMin = 40.0f;
+
+	/** Added to the capsule before the clearance: the arms and the gun reach out of the capsule, and a
+	 *  round is a projectile with a body of its own. Without it a fifth of the hits at 2.6 m came from
+	 *  rounds meant to miss, most of them into the arms (CORNER bench, 2026-10-14). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float MissBodyMargin = 45.0f;
+
+	/** ...and this far at the most (cm). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "0.0", Units = "cm"))
+	float MissClearanceMax = 120.0f;
+
+	/** Reaction multiplier while blinded by a tactical light. The reaction also starts over. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Discipline", meta = (ClampMin = "1.0"))
+	float DazzleReactionMultiplier = 2.5f;
+
+	/** Stress added when this shooter gets suppressed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressFromSuppression = 0.5f;
+
+	/** Stress added per hit taken. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressFromHit = 0.25f;
+
+	/** Stress added when somebody of its own side dies within StressAllyDeathRadius. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressFromAllyDeath = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", Units = "cm"))
+	float StressAllyDeathRadius = 1500.0f;
+
+	/** The stress from events stays whole this long after the last of them (s)... */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", Units = "s"))
+	float StressHoldSeconds = 3.0f;
+
+	/** ...then fades to nothing over this long (s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.01", Units = "s"))
+	float StressFadeSeconds = 12.0f;
+
+	/** Share of the lost health that is stress for good: wounds do not fade. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressFromWounds = 0.6f;
+
+	/** At full stress the share of aimed rounds is this much of the calm one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressAimedShareMultiplier = 0.6f;
+
+	/** At full stress an aimed round lands this much as often. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float StressHitChanceMultiplier = 0.8f;
+
+	/** At full stress a reload keeps the trigger up this many times as long. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "1.0"))
+	float StressReloadMultiplier = 1.5f;
+
+	/** At full stress the reaction takes this many times as long. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Stress", meta = (ClampMin = "1.0"))
+	float StressReactionMultiplier = 1.5f;
+
+	/** What this shooter sees of the target it is fighting, reported a few times a second by its
+	 *  owner. The first call also puts the shooter under fire discipline. */
+	void UpdateSight(AActor* Target, bool bInView);
+
+	/** Where the round of the shot about to be aimed leaves from (the muzzle), when that is not the
+	 *  eye: a round meant to miss has to clear the body from there too. Set before each aim. */
+	void SetShotOrigin(const FVector& Origin) { ShotOrigin = Origin; bHasShotOrigin = true; }
+
+	/** This shooter reports what it sees and is held to the reaction and the aimed rounds. */
+	bool IsUnderFireDiscipline() const { return bFireDiscipline; }
+
+	/** Has Target been in view long enough for a round to be meant to hit it. Always true for a
+	 *  shooter that is not under fire discipline. */
+	bool IsReactionDone(const AActor* Target) const;
+
+	/** The reaction this shooter has right now: experience, stress, a light in its eyes. */
+	float GetReactionSeconds() const;
+
+	/** A stress event. Scaled by the experience's StressGainScale. */
+	void AddStress(float Amount);
+
+	/** How much of its health the owner has lost, 0 to 1. */
+	void SetWoundFraction(float Fraction) { WoundFraction = FMath::Clamp(Fraction, 0.0f, 1.0f); }
+
+	/** 0 calm, 1 as bad as it gets. */
+	UFUNCTION(BlueprintPure, Category = "Accuracy|Stress")
+	float GetStress() const;
+
+	/** How many times the usual a reload keeps this shooter's trigger up. */
+	float GetReloadTimeMultiplier() const { return FMath::Lerp(1.0f, StressReloadMultiplier, GetStress()); }
+
+	/** The last round from CalculateAimDirection was meant to miss: not reacted yet, between aimed
+	 *  rounds, suppressed, or pinning. For the record of the fight. */
+	bool WasLastRoundDeliberateMiss() const { return bLastRoundDeliberateMiss; }
+
+	/** The last round was placed, to land or to miss: the weapon must not scatter it further. */
+	bool WasLastRoundPlaced() const { return bLastRoundDeliberateMiss || bLastRoundPlaced; }
+
+	UFUNCTION(BlueprintCallable, Category = "Accuracy|Discipline")
+	void SetExperience(EAIExperience InExperience) { Experience = InExperience; }
+
+	const FAIExperienceTuning& GetTuning() const;
+
+	/** Something alerted it: a noise heard, a hit, a shout, an enemy in view. @see AlertSeconds */
+	void NoteAlert();
+
+	bool IsAlert() const;
+
+	/** A headache of Strength (0 to 1) for Seconds. Breaks the hold and the reaction it had. */
+	void ApplyHeadache(float Strength, float Seconds);
+
+	bool HasHeadache() const;
+
+	/** Whatever it had seen of the target, the reaction to it starts over. */
+	void RestartReaction() { LastSightTime = -1000.0f; }
+
+	/** Every soldier within Radius of Center gets a headache, walls or not. Returns how many. Server. */
+	UFUNCTION(BlueprintCallable, Category = "Accuracy|Headache", meta = (WorldContext = "WorldContext"))
+	static int32 ApplyHeadacheInRadius(const UObject* WorldContext, FVector Center, float Radius, float Strength, float Seconds);
+
 	// ==================== Runtime State ====================
 
 	/** Last calculated spread value (for debugging) */
@@ -201,10 +475,12 @@ public:
 	 * During suppression, uses donut pattern instead of normal spread.
 	 * @param TargetLocation - World location to aim at
 	 * @param Target - Target actor (used to get velocity and movement state)
+	 * @param ExtraMissDegrees - A round meant to miss stays this much further out: the half-angle of a
+	 *        pellet pattern, which is laid around this direction after it is chosen.
 	 * @return Direction vector with spread applied
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Accuracy")
-	FVector CalculateAimDirection(const FVector& TargetLocation, AActor* Target);
+	FVector CalculateAimDirection(const FVector& TargetLocation, AActor* Target, float ExtraMissDegrees = 0.0f);
 
 	/**
 	 * Get current effective spread for a target (degrees).
@@ -263,6 +539,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppression")
 	bool IsSuppressed() const { return bIsSuppressed; }
 
+	// ==================== Painted by a laser [author, 2026-10-15] ====================
+
+	/** Painted for this long after the last time a laser's dot was held on it or by it. */
+	void NotePainted(float Seconds);
+
+	bool IsPainted() const;
+
+	/** Seconds it has been painted without a break (0 when it is not). */
+	float GetPaintedSeconds() const;
+
+	/** A reason to stay down behind its cover: rounds coming past, or a laser on it. */
+	bool IsPinnedDown() const { return bIsSuppressed || IsPainted(); }
+
+	/** Painted this long without a break, it gives the corner up for another one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Accuracy|Painted", meta = (ClampMin = "0.0", Units = "s"))
+	float PaintedRelocateSeconds = 2.0f;
+
 	/** Returns remaining suppression time (0 if not suppressed) */
 	UFUNCTION(BlueprintPure, Category = "Accuracy|Suppression")
 	float GetSuppressionTimeRemaining() const { return SuppressionTimeRemaining; }
@@ -284,8 +577,9 @@ public:
 	// ==================== Dazzle ====================
 
 	/** Spread multiplier while this NPC is blinded by a tactical light (AShooterNPC::ApplyDazzle).
-	 *  1 = not dazzled. Set and cleared by the NPC, which owns how long the dazzle lasts. */
-	void SetDazzleSpreadMultiplier(float Multiplier) { DazzleSpreadMultiplier = FMath::Max(1.0f, Multiplier); }
+	 *  1 = not dazzled. Set and cleared by the NPC, which owns how long the dazzle lasts. Also the
+	 *  device side of the reaction: a light in the eyes stretches it and starts it over. */
+	void SetDazzleSpreadMultiplier(float Multiplier);
 
 	float GetDazzleSpreadMultiplier() const { return DazzleSpreadMultiplier; }
 
@@ -309,6 +603,21 @@ protected:
 	 *  shooter is rolled again. A round meant to pass the target's ear must not go into the corner the
 	 *  shooter is leaning round, which is where a few degrees off puts it [author, 2026-10-11]. */
 	FVector ApplyDonutSpreadClearOfOwnCover(const FVector& BaseDirection, float InnerSpread, float OuterSpread) const;
+
+	/** A round that misses on purpose, measured in centimetres at the target and not in degrees: a
+	 *  ring of degrees is a few centimetres wide at two metres and lands in the body. Passes
+	 *  MissClearanceMin..Max outside the target's capsule, never into the shooter's own cover. */
+	FVector MakeDeliberateMiss(const FVector& TargetLocation, const AActor* Target, float ExtraMissDegrees) const;
+
+	/** Direction as it is when its round passes clear of a pawn target, a MakeDeliberateMiss when it
+	 *  would land in him. For the rings in degrees (suppressed, pinning), which hit at close range. */
+	FVector KeepClearOfBody(const FVector& Direction, const FVector& TargetLocation, const AActor* Target, float ExtraMissDegrees) const;
+
+	/** How far from the body's axis a round meant to miss has to pass at the least. */
+	float GetMissMustClear(float Range, float BodyRadius, float ExtraMissDegrees) const;
+
+	/** The closest the round's lines (from the eye, from the muzzle) come to the body's axis. */
+	float GetMissPassDistance(const FVector& Direction, float Range, const FVector& AxisTop, const FVector& AxisBottom) const;
 
 private:
 	/** True when NPC is in suppression state (forced misses) */
@@ -334,4 +643,68 @@ private:
 	TWeakObjectPtr<AActor> SettleTarget;
 	float SettleStartTime = -1000.0f;
 	float LastAimTime = -1000.0f;
+
+	/** @see UpdateSight. Only a shooter that reports what it sees is held to the discipline. */
+	bool bFireDiscipline = false;
+
+	/** Whom the sight below is about, when it came into view, when it was last in view. */
+	TWeakObjectPtr<AActor> SightTarget;
+	float SightSince = -1000.0f;
+	float LastSightTime = -1000.0f;
+
+	/** The reaction the current sight started with: decided when it starts, so the watched-corner
+	 *  discount and a light in the eyes apply to that one. */
+	float SightReaction = 0.0f;
+
+	/** Last time the gun was held on the place the target went down behind. */
+	float LastWatchTime = -1000.0f;
+
+	/** The first aimed round of this sight has gone: written to the record once. */
+	bool bReactionAnnounced = false;
+
+	/** Last thing that alerted it. @see NoteAlert */
+	float LastAlertTime = -1000.0f;
+
+	/** The current sight started on one holding the place: rounds aimed until then. */
+	float VolleyUntil = -1000.0f;
+
+	/** How the current sight started, for the record: 0 calm, 1 alert, 2 holding; and how far off
+	 *  the eyes it was (degrees). */
+	uint8 SightReadiness = 0;
+	float SightAngle = 0.0f;
+
+	float HeadacheStrength = 0.0f;
+	float HeadacheUntil = -1000.0f;
+
+	/** Shares of a round gathered towards the next aimed one: at 1 a round is aimed. Starts full on
+	 *  every new sight, so the first round after the reaction is aimed. */
+	float AimedCredit = 1.0f;
+
+	/** The chance an aimed round at Target lands right now. @see FAIExperienceTuning::HitChanceStill */
+	float GetHitChance(const AActor* Target, float Range) const;
+
+	/** Towards a point on the body around TargetLocation: a round that lands. */
+	FVector MakeHit(const FVector& TargetLocation, float Range) const;
+
+	/** Stress from events at the time of the last one, and when that was. */
+	float EventStress = 0.0f;
+	float LastStressEventTime = -1000.0f;
+
+	float WoundFraction = 0.0f;
+
+	/** Above 1 while a light is in its eyes. */
+	float DeviceReactionMultiplier = 1.0f;
+
+	bool bLastRoundDeliberateMiss = false;
+	bool bLastRoundPlaced = false;
+
+	float PaintedUntil = -1000.0f;
+	float PaintedSince = -1000.0f;
+
+	/** @see SetShotOrigin */
+	FVector ShotOrigin = FVector::ZeroVector;
+	bool bHasShotOrigin = false;
+
+	/** The reaction for a sight starting now. */
+	float ComputeReactionForNewSight(float Now, const AActor* Target, uint8& OutReadiness, float& OutAngle) const;
 };

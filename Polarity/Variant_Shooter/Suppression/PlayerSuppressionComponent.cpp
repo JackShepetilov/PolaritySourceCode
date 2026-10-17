@@ -3,8 +3,12 @@
 #include "Variant_Shooter/Suppression/PlayerSuppressionComponent.h"
 
 #include "AI/PolarityTeams.h"
+#include "Variant_Shooter/Progression/RunLevelComponent.h"
 #include "Coop/CoopPlayers.h"
 #include "Engine/PostProcessVolume.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "ApexMovementComponent.h"
+#include "GameFramework/Character.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
@@ -114,20 +118,112 @@ void UPlayerSuppressionComponent::ApplyLocally(float Amount)
 		return;
 	}
 
-	Level = FMath::Clamp(Level + Amount * (1.0f - FMath::Clamp(Resistance, 0.0f, 1.0f)), 0.0f, 1.0f);
+	// The run level raises the resistance [author, 2026-10-16]; the higher of the two stands.
+	const URunLevelComponent* const RunLevel = URunLevelComponent::FindFor(GetOwner());
+	const float Resist = FMath::Clamp(FMath::Max(Resistance, RunLevel ? RunLevel->GetSuppressionResistance() : 0.0f), 0.0f, 1.0f);
+	Level = FMath::Clamp(Level + Amount * (1.0f - Resist), 0.0f, 1.0f);
 	LastNearMissTime = World->GetTimeSeconds();
 	SetComponentTickEnabled(true);
 }
 
 float UPlayerSuppressionComponent::GetADSSpeedMultiplier() const
 {
-	return FMath::Lerp(1.0f, ADSSpeedAtFull, Level);
+	return FMath::Lerp(1.0f, ADSSpeedAtFull, FMath::Max(Level, GetHeadacheLevel()));
+}
+
+// ==================== Headache ====================
+
+void UPlayerSuppressionComponent::ApplyHeadache(float Strength, float Seconds)
+{
+	if (Strength <= 0.0f || Seconds <= 0.0f)
+	{
+		return;
+	}
+	ApplyHeadacheLocally(Strength, Seconds);
+
+	// The server keeps its own copy as well: it is the one that has to refuse the sprint and the
+	// slide to the moves it replays.
+	if (GetOwner() && GetOwner()->HasAuthority() && !IsOwnerLocal())
+	{
+		Client_ApplyHeadache(Strength, Seconds);
+	}
+}
+
+void UPlayerSuppressionComponent::Client_ApplyHeadache_Implementation(float Strength, float Seconds)
+{
+	ApplyHeadacheLocally(Strength, Seconds);
+}
+
+void UPlayerSuppressionComponent::ApplyHeadacheLocally(float Strength, float Seconds)
+{
+	const UWorld* const World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+	const bool bHeld = Now < HeadacheUntil;
+	HeadacheStrength = FMath::Clamp(bHeld ? FMath::Max(HeadacheStrength, Strength) : Strength, 0.0f, 1.0f);
+	HeadacheUntil = FMath::Max(HeadacheUntil, Now + Seconds);
+	SetComponentTickEnabled(true);
+}
+
+float UPlayerSuppressionComponent::GetHeadacheLevel() const
+{
+	const UWorld* const World = GetWorld();
+	if (!World || HeadacheStrength <= 0.0f)
+	{
+		return 0.0f;
+	}
+	const float Past = World->GetTimeSeconds() - HeadacheUntil;
+	if (Past <= 0.0f)
+	{
+		return HeadacheStrength;
+	}
+	return HeadacheStrength * FMath::Clamp(1.0f - Past / FMath::Max(HeadacheFadeSeconds, 0.05f), 0.0f, 1.0f);
+}
+
+void UPlayerSuppressionComponent::UpdateHeadachePicture()
+{
+	if (!IsOwnerLocal())
+	{
+		return;
+	}
+	const float Ache = GetHeadacheLevel();
+	UWorld* const World = GetWorld();
+	if (!HeadacheVolume && Ache > 0.0f && World && HeadacheMaterial)
+	{
+		FActorSpawnParameters Params;
+		Params.Owner = GetOwner();
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		Params.ObjectFlags |= RF_Transient;
+		HeadacheVolume = World->SpawnActor<APostProcessVolume>(GetOwner()->GetActorLocation(), FRotator::ZeroRotator, Params);
+		if (HeadacheVolume)
+		{
+			HeadacheVolume->bUnbound = true;
+			HeadacheVolume->Priority = 11.0f;
+			HeadacheMID = UMaterialInstanceDynamic::Create(HeadacheMaterial, this);
+			HeadacheVolume->Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, HeadacheMID));
+		}
+	}
+	if (HeadacheVolume)
+	{
+		if (HeadacheMID)
+		{
+			HeadacheMID->SetScalarParameterValue(TEXT("Strength"), Ache);
+		}
+		HeadacheVolume->BlendWeight = Ache > 0.0f ? 1.0f : 0.0f;
+		HeadacheVolume->bEnabled = Ache > 0.0f;
+	}
 }
 
 FRotator UPlayerSuppressionComponent::GetSwayRotation(float ADSAlpha) const
 {
 	const UWorld* const World = GetWorld();
-	const float Amount = SwayDegreesAtFull * Level * FMath::Clamp(ADSAlpha, 0.0f, 1.0f);
+	const float Aim = FMath::Clamp(ADSAlpha, 0.0f, 1.0f);
+	// The headache sways from the hip as well: the head, not the nerves under fire.
+	const float Amount = FMath::Max(SwayDegreesAtFull * Level * Aim,
+		HeadacheSwayDegreesAtFull * GetHeadacheLevel() * FMath::Lerp(HeadacheHipSwayShare, 1.0f, Aim));
 	if (!World || Amount <= KINDA_SMALL_NUMBER)
 	{
 		return FRotator::ZeroRotator;
@@ -150,7 +246,21 @@ void UPlayerSuppressionComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 	UpdateVignette();
 
-	if (Level <= 0.0f)
+	// While the headache holds: no sprint and no slide, here and on the server alike, renewed every
+	// frame so they come back on their own when it runs out.
+	const bool bAching = World && World->GetTimeSeconds() < HeadacheUntil && HeadacheStrength > 0.0f;
+	if (bAching)
+	{
+		const ACharacter* const Body = Cast<ACharacter>(GetOwner());
+		if (UApexMovementComponent* const Apex = Body ? Cast<UApexMovementComponent>(Body->GetCharacterMovement()) : nullptr)
+		{
+			Apex->SuppressSprint(0.2f);
+			Apex->SuppressSlide(0.2f);
+		}
+	}
+	UpdateHeadachePicture();
+
+	if (Level <= 0.0f && GetHeadacheLevel() <= 0.0f)
 	{
 		SetComponentTickEnabled(false);
 	}
@@ -196,10 +306,37 @@ void UPlayerSuppressionComponent::EndPlay(const EEndPlayReason::Type EndPlayReas
 		VignetteVolume->Destroy();
 		VignetteVolume = nullptr;
 	}
+	if (HeadacheVolume)
+	{
+		HeadacheVolume->Destroy();
+		HeadacheVolume = nullptr;
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
 // ==================== Console ====================
+
+static FAutoConsoleCommandWithWorldAndArgs GCmdHeadacheMe(
+	TEXT("polarity.suppress.headache"),
+	TEXT("A microwave headache on every player: strength 0-1 (default 0.85), seconds (default 6). To look at the picture."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World)
+		{
+			return;
+		}
+		const float Strength = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 0.85f;
+		const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 6.0f;
+		TArray<APawn*> Pawns;
+		CoopPlayers::GetAll(World, Pawns);
+		for (APawn* const Pawn : Pawns)
+		{
+			if (UPlayerSuppressionComponent* const Suppression = Pawn ? Pawn->FindComponentByClass<UPlayerSuppressionComponent>() : nullptr)
+			{
+				Suppression->ApplyHeadache(Strength, Seconds);
+			}
+		}
+	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GCmdSuppressMe(
 	TEXT("polarity.suppress.me"),

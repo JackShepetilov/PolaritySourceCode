@@ -412,7 +412,7 @@ void UFightRecorderSubsystem::Sample()
 	}
 }
 
-void UFightRecorderSubsystem::NoteShot(const AActor* Shooter, const AActor* Target, bool bPinFire)
+void UFightRecorderSubsystem::NoteShot(const AActor* Shooter, const AActor* Target, bool bPinFire, bool bMeantToMiss)
 {
 	UFightRecorderSubsystem* const Recorder = Get(Shooter);
 	if (!Recorder || !Recorder->bRecording)
@@ -423,7 +423,7 @@ void UFightRecorderSubsystem::NoteShot(const AActor* Shooter, const AActor* Targ
 	const float Time = Recorder->FightTime();
 	FTally& Tally = Recorder->TallyOf(Shooter);
 	++Tally.Shots;
-	Tally.PinShots += bPinFire ? 1 : 0;
+	Tally.PinShots += (bPinFire || bMeantToMiss) ? 1 : 0;
 	if (Tally.FirstShotTime < 0.0f)
 	{
 		Tally.FirstShotTime = Time;
@@ -444,7 +444,7 @@ void UFightRecorderSubsystem::NoteShot(const AActor* Shooter, const AActor* Targ
 	}
 
 	Recorder->PendingEvents += FString::Printf(TEXT("%.2f,shot,%s,%s,%d,%.0f\n"), Time, *Tally.Name,
-		*Recorder->NameOf(Target), bPinFire ? 1 : 0,
+		*Recorder->NameOf(Target), bPinFire ? 1 : (bMeantToMiss ? 2 : 0),
 		Target ? FVector::Dist(Shooter->GetActorLocation(), Target->GetActorLocation()) : -1.0f);
 }
 

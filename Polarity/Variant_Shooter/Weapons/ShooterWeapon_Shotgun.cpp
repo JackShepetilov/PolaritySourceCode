@@ -96,8 +96,8 @@ float AShooterWeapon_Shotgun::GetAimConeDegrees() const
 FVector AShooterWeapon_Shotgun::GetPelletDirection(const FVector& AimDirection, const FVector2D& PatternOffset) const
 {
 	// The CURRENT width, not the authored one: this is where the state of the player and the
-	// trigger reach the pellets.
-	const float SpreadAngle = GetPelletSpreadAngle();
+	// trigger reach the pellets. The first of a string with a laser on is tighter. @see IsLaserFirstShot
+	const float SpreadAngle = GetPelletSpreadAngle() * (IsLaserFirstShot() ? SpreadConfig.LaserFirstShotPatternScale : 1.0f);
 
 	if (SpreadAngle <= 0.0f)
 	{

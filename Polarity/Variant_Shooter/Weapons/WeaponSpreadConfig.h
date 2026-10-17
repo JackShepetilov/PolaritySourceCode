@@ -131,4 +131,25 @@ struct FWeaponSpreadConfig
 	 *  at the weapon's plain AimVariance, exactly as it did before this system existed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread")
 	bool bApplyToAIOwners = false;
+
+	// ==================== Side rail device [author, 2026-10-15] ====================
+
+	/** How fast the aim line goes over to the barrel and back as the body starts and stops a sprint,
+	 *  a jump, a slide or a wall run (per second). @see AShooterWeapon::GetDeviceBarrelWeight */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Device", meta = (ClampMin = "0.1"))
+	float BarrelBlendSpeed = 6.0f;
+
+	/** How fast the side rail device's beam settles on its line, in the aim's own frame (per second):
+	 *  turning the view carries it at once, only its swing off the centre and back is eased. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Device", meta = (ClampMin = "0.1"))
+	float BeamEaseSpeed = 8.0f;
+
+	/** With a laser on and the feet planted, a shot is the first of a string while the bloom is under
+	 *  this share of one shot's degrees (PerShotDegrees): it goes exactly where the laser is. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Device", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LaserFirstShotBloomShare = 0.25f;
+
+	/** A shotgun's pellet pattern on that first shot is this much of its width. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread|Device", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LaserFirstShotPatternScale = 0.7f;
 };

@@ -376,6 +376,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
 	void TriggerAirDash();
 
+	/** Pitch nod at the start of a mantle; bHigh for the pull-up, which nods harder than the hop. */
+	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
+	void TriggerMantleShake(bool bHigh);
+
 	/** Start wallrun bob effect */
 	UFUNCTION(BlueprintCallable, Category = "Camera Shake")
 	void TriggerWallrunStart();
@@ -503,6 +507,7 @@ protected:
 	FDampedOscillator LandingPitchOsc;
 	FDampedOscillator LandingZOsc;
 	FDampedOscillator JumpPitchOsc;
+	FDampedOscillator MantlePitchOsc;
 
 	// ==================== Procedural Bob ====================
 

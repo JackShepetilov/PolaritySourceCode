@@ -59,6 +59,7 @@ UCLASS(ClassGroup = (Combat), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UAbilityComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 
@@ -330,6 +331,7 @@ protected:
 
 	/** Full length of the running cooldown. Authority side; the HUD of a remote client does not get
 	 *  cooldown events at all yet (TODO(COOP), same gap as OnCooldownStarted). */
+	UPROPERTY(Replicated)
 	float CooldownTotal = 0.0f;
 
 	/** The always-on ability, owner-only for the same reason the slots are: nobody else's screen has

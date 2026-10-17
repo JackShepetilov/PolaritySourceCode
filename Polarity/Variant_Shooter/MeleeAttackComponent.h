@@ -852,6 +852,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Melee|External")
 	void PlayMontageOnMeleeMesh(UAnimMontage* Montage, float PlayRate = 1.0f);
 
+	/** External: show the melee mesh placed and dressed for Animation exactly as an ordinary swing
+	 *  would be (its mesh offsets, its hidden bones) and play its montage at its rate. No damage
+	 *  window of its own: the caller disables that if the montage carries one. Animation must outlive
+	 *  the view (a member of the caller). Close with ExitExternalAnimation. */
+	void PlayExternalAnimation(const FMeleeAnimationData& Animation);
+
+	/** Back to the arms after PlayExternalAnimation. */
+	void ExitExternalAnimation();
+
 	// ==================== Animation Notify API ====================
 	// All three notify entry points are idempotent within a single attack — calling
 	// them twice in the same phase is a no-op. Fallback state-machine timers honour

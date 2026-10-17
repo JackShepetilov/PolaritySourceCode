@@ -54,3 +54,15 @@ def shot():
         p = "C:/Users/Professional/Documents/Unreal Projects/Polarity_Main5_8/Saved/grenade_stand.png"
         open(p, "wb").write(base64.b64decode(data))
         print("saved", p)
+
+
+def racks():
+    w = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    print("level:", w.get_package().get_name() if w else None)
+    for a in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+        if isinstance(a, unreal.BenchGrenadeRack):
+            t = a.get_editor_property("grenade_type")
+            m = a.get_editor_property("pickup_mesh")
+            print(a.get_actor_label(), a.get_actor_location(), t.get_name() if t else None, a.get_editor_property("count"),
+                  m.get_name() if m else None)
+    print("dirty:", [p.get_name() for p in unreal.EditorLoadingAndSavingUtils.get_dirty_map_packages()])

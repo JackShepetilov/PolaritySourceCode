@@ -7,6 +7,7 @@
 #include "Variant_Shooter/Abilities/AbilityComponent.h"
 #include "Variant_Shooter/Health/FieldCareComponent.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/UI/GadgetWheelWidget.h"
 #include "EnhancedInputComponent.h"
 #include "Engine/PostProcessVolume.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -98,10 +99,16 @@ void UGrenadeComponent::RefreshSelection()
 
 	TArray<UGrenadeDefinition*> Types;
 	Bag->GetGrenadeTypes(Types);
-	if (!SelectedType || !Types.Contains(SelectedType))
+	const int32 Found = SelectedType ? Types.IndexOfByKey(SelectedType) : INDEX_NONE;
+	if (Found != INDEX_NONE)
 	{
-		SelectedType = Types.Num() > 0 ? Types[0] : nullptr;
+		SelectedPlace = Found;
+		return;
 	}
+
+	// The kind is gone. Stay on its place: a kind picked up in exchange for it sits right there.
+	SelectedPlace = Types.Num() > 0 ? FMath::Clamp(SelectedPlace, 0, Types.Num() - 1) : 0;
+	SelectedType = Types.IsValidIndex(SelectedPlace) ? Types[SelectedPlace] : nullptr;
 }
 
 int32 UGrenadeComponent::GetSelectedCount() const
@@ -127,6 +134,8 @@ void UGrenadeComponent::BindInput(UEnhancedInputComponent* Input)
 	if (GrenadeCycleAction)
 	{
 		Input->BindAction(GrenadeCycleAction, ETriggerEvent::Started, this, &UGrenadeComponent::OnCyclePressed);
+		Input->BindAction(GrenadeCycleAction, ETriggerEvent::Completed, this, &UGrenadeComponent::OnCycleReleased);
+		Input->BindAction(GrenadeCycleAction, ETriggerEvent::Canceled, this, &UGrenadeComponent::OnCycleReleased);
 	}
 }
 
@@ -161,6 +170,32 @@ void UGrenadeComponent::OnGrenadeReleased()
 
 void UGrenadeComponent::OnCyclePressed()
 {
+	// Tap or hold is only known when it is let go or held long enough: wait for one of the two.
+	bCycleKeyHeld = true;
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(WheelHoldTimer, this, &UGrenadeComponent::OpenWheel, WheelHoldTime, false);
+	}
+}
+
+void UGrenadeComponent::OnCycleReleased()
+{
+	if (!bCycleKeyHeld)
+	{
+		return;
+	}
+	bCycleKeyHeld = false;
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(WheelHoldTimer);
+	}
+
+	if (bWheelOpen)
+	{
+		CloseWheel(true);
+		return;
+	}
+
 	if (GetOwner() && GetOwner()->HasAuthority())
 	{
 		CycleType();
@@ -174,6 +209,7 @@ void UGrenadeComponent::OnCyclePressed()
 void UGrenadeComponent::Server_BeginThrow_Implementation() { BeginThrow(); }
 void UGrenadeComponent::Server_ReleaseThrow_Implementation() { ReleaseThrow(); }
 void UGrenadeComponent::Server_CycleType_Implementation() { CycleType(); }
+void UGrenadeComponent::Server_SelectType_Implementation(UGrenadeDefinition* Type) { SelectType(Type); }
 
 // ==================== The throw (authority) ====================
 
@@ -188,7 +224,8 @@ void UGrenadeComponent::BeginThrow()
 	// The hands are somebody else's: a swap, an ability, a medkit. The press is dropped, not queued.
 	const UAbilityComponent* const Abilities = Character->GetAbilityComponent();
 	const UFieldCareComponent* const Care = Character->FindComponentByClass<UFieldCareComponent>();
-	if (Character->IsWeaponSwitchInProgress() || (Abilities && Abilities->IsCasting()) || (Care && Care->IsBusy()))
+	if (Character->IsWeaponSwitchInProgress() || (Abilities && Abilities->IsCasting()) || (Care && Care->IsBusy())
+		|| Character->IsHandPickupActive())
 	{
 		UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s: hands busy, no throw"), *GetNameSafe(Character));
 		return;
@@ -271,8 +308,146 @@ void UGrenadeComponent::CycleType()
 	}
 
 	const int32 Current = Types.IndexOfByKey(SelectedType);
-	SelectedType = Types[(Current + 1) % Types.Num()];
+	SelectedPlace = (Current + 1) % Types.Num();
+	SelectedType = Types[SelectedPlace];
 	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s selects %s"), *GetNameSafe(GetOwner()), *GetNameSafe(SelectedType));
+}
+
+void UGrenadeComponent::SelectType(UGrenadeDefinition* Type)
+{
+	const UInventoryComponent* const Bag = GetOwner() ? GetOwner()->FindComponentByClass<UInventoryComponent>() : nullptr;
+	if (bThrowing || !Bag || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	TArray<UGrenadeDefinition*> Types;
+	Bag->GetGrenadeTypes(Types);
+	const int32 Place = Types.IndexOfByKey(Type);
+	if (Place == INDEX_NONE)
+	{
+		return;
+	}
+	SelectedPlace = Place;
+	SelectedType = Type;
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s selects %s on the wheel"), *GetNameSafe(GetOwner()), *GetNameSafe(SelectedType));
+}
+
+// ==================== The wheel (owning client) ====================
+
+void UGrenadeComponent::OpenWheel()
+{
+	const AShooterCharacter* const Character = GetCharacter();
+	APlayerController* const PC = Character ? Cast<APlayerController>(Character->GetController()) : nullptr;
+	const UInventoryComponent* const Bag = Character ? Character->FindComponentByClass<UInventoryComponent>() : nullptr;
+	if (!bCycleKeyHeld || bWheelOpen || !PC || !Bag || !Character->IsLocallyControlled())
+	{
+		return;
+	}
+
+	TArray<UGrenadeDefinition*> Types;
+	Bag->GetGrenadeTypes(Types);
+	if (Types.Num() == 0)
+	{
+		return;
+	}
+
+	if (!Wheel)
+	{
+		Wheel = CreateWidget<UGadgetWheelWidget>(PC, WheelWidgetClass ? WheelWidgetClass.Get() : UGadgetWheelWidget::StaticClass());
+	}
+	if (!Wheel)
+	{
+		return;
+	}
+
+	WheelTypes.Reset();
+	for (UGrenadeDefinition* const Type : Types)
+	{
+		WheelTypes.Add(Type);
+	}
+	WheelCursor = FVector2D::ZeroVector;
+	WheelHovered = WheelTypes.IndexOfByKey(SelectedType);
+	bWheelOpen = true;
+
+	// CloseWheel takes it off the screen every time, so it is never on it here.
+	Wheel->AddToPlayerScreen(12);
+	Wheel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	RefreshWheel();
+}
+
+void UGrenadeComponent::RefreshWheel()
+{
+	const UInventoryComponent* const Bag = GetOwner() ? GetOwner()->FindComponentByClass<UInventoryComponent>() : nullptr;
+	if (!Wheel || !Bag)
+	{
+		return;
+	}
+
+	TArray<FGadgetWheelEntry> Entries;
+	for (const UGrenadeDefinition* const Type : WheelTypes)
+	{
+		FGadgetWheelEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Label = !Type ? FText::GetEmpty() : (Type->DisplayName.IsEmpty() ? FText::FromString(Type->GetName()) : Type->DisplayName);
+		Entry.Count = Bag->GetGrenadeCount(Type);
+	}
+	Wheel->SetEntries(Entries, Bag->GetGadgetsPerKind(), WheelTypes.IndexOfByKey(SelectedType));
+	Wheel->SetHover(WheelHovered, WheelCursor / FMath::Max(0.1f, WheelPickDistance));
+}
+
+bool UGrenadeComponent::HandleLookForWheel(float Yaw, float Pitch)
+{
+	if (!bWheelOpen)
+	{
+		return false;
+	}
+
+	// The look's pitch is up-positive; the wheel's y is the screen's, down-positive.
+	WheelCursor = (WheelCursor + FVector2D(Yaw, -Pitch)).GetClampedToMaxSize(WheelPickDistance);
+	if (WheelCursor.Size() >= WheelPickDistance * 0.5f && WheelTypes.Num() > 0)
+	{
+		const FVector2D Direction = WheelCursor.GetSafeNormal();
+		float Best = -2.0f;
+		for (int32 Index = 0; Index < WheelTypes.Num(); ++Index)
+		{
+			const float Dot = FVector2D::DotProduct(Direction, UGadgetWheelWidget::GetEntryDirection(Index, WheelTypes.Num()));
+			if (Dot > Best)
+			{
+				Best = Dot;
+				WheelHovered = Index;
+			}
+		}
+	}
+	RefreshWheel();
+	return true;
+}
+
+void UGrenadeComponent::CloseWheel(bool bApply)
+{
+	if (!bWheelOpen)
+	{
+		return;
+	}
+	bWheelOpen = false;
+
+	UGrenadeDefinition* const Picked = WheelTypes.IsValidIndex(WheelHovered) ? WheelTypes[WheelHovered].Get() : nullptr;
+	if (bApply && Picked && Picked != SelectedType)
+	{
+		if (GetOwner() && GetOwner()->HasAuthority())
+		{
+			SelectType(Picked);
+		}
+		else
+		{
+			Server_SelectType(Picked);
+		}
+	}
+
+	WheelTypes.Reset();
+	if (Wheel)
+	{
+		Wheel->RemoveFromParent();
+	}
 }
 
 // ==================== The arc (owning client) ====================
@@ -282,6 +457,13 @@ void UGrenadeComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	TickBurn();
+
+	// The counts can change under an open wheel (a throw, a pickup); the owner's copy of the section
+	// arrives by replication, with no event on this side.
+	if (bWheelOpen)
+	{
+		RefreshWheel();
+	}
 
 	// bThrowing is the authority's answer, so a press it refused never draws an arc.
 	const AShooterCharacter* const Character = GetCharacter();
@@ -409,6 +591,11 @@ void UGrenadeComponent::EndDeafness()
 
 void UGrenadeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (UWorld* const World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(WheelHoldTimer);
+	}
+	CloseWheel(false);
 	EndDeafness();
 	if (BurnVolume)
 	{

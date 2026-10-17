@@ -6,6 +6,7 @@
 #include "Weapons/ShooterWeapon_Melee.h"
 #include "ShooterCharacter.h"
 #include "AI/MeleeNPC.h"
+#include "AI/NPCMeleeStrikeComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Character.h"
 
@@ -90,6 +91,14 @@ void UAnimNotify_MeleeActivate::Notify(USkeletalMeshComponent* MeshComp, UAnimSe
 	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
 	{
 		MeleeNPC->NotifyDamageWindowStart();
+		return;
+	}
+
+	// A shooter striking with its gun away. @see UNPCMeleeStrikeComponent
+	if (UNPCMeleeStrikeComponent* const Strike = MeshComp && MeshComp->GetOwner()
+		? MeshComp->GetOwner()->FindComponentByClass<UNPCMeleeStrikeComponent>() : nullptr)
+	{
+		Strike->ActivateDamageWindow();
 	}
 }
 
@@ -129,6 +138,13 @@ void UAnimNotify_MeleeDeactivate::Notify(USkeletalMeshComponent* MeshComp, UAnim
 	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
 	{
 		MeleeNPC->NotifyDamageWindowEnd();
+		return;
+	}
+
+	if (UNPCMeleeStrikeComponent* const Strike = MeshComp && MeshComp->GetOwner()
+		? MeshComp->GetOwner()->FindComponentByClass<UNPCMeleeStrikeComponent>() : nullptr)
+	{
+		Strike->DeactivateDamageWindow();
 	}
 }
 
@@ -168,6 +184,14 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyBegin(USkeletalMeshComponent* Mes
 	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
 	{
 		MeleeNPC->NotifyDamageWindowStart();
+		return;
+	}
+
+	// A shooter striking with its gun away. @see UNPCMeleeStrikeComponent
+	if (UNPCMeleeStrikeComponent* const Strike = MeshComp && MeshComp->GetOwner()
+		? MeshComp->GetOwner()->FindComponentByClass<UNPCMeleeStrikeComponent>() : nullptr)
+	{
+		Strike->ActivateDamageWindow();
 	}
 }
 
@@ -193,6 +217,13 @@ void UAnimNotifyState_MeleeDamageWindow::NotifyEnd(USkeletalMeshComponent* MeshC
 	if (AMeleeNPC* MeleeNPC = GetMeleeNPCFromMesh(MeshComp))
 	{
 		MeleeNPC->NotifyDamageWindowEnd();
+		return;
+	}
+
+	if (UNPCMeleeStrikeComponent* const Strike = MeshComp && MeshComp->GetOwner()
+		? MeshComp->GetOwner()->FindComponentByClass<UNPCMeleeStrikeComponent>() : nullptr)
+	{
+		Strike->DeactivateDamageWindow();
 	}
 }
 
@@ -215,6 +246,15 @@ void UAnimNotify_MeleeReady::Notify(USkeletalMeshComponent* MeshComp, UAnimSeque
 	if (UMeleeAttackComponent* MeleeComp = GetMeleeComponentFromMesh(MeshComp))
 	{
 		MeleeComp->NotifyMeleeReadyFromNotify();
+		return;
+	}
+
+	// A shooter striking with its gun away: the next strike, or the way back to the gun, from here.
+	// Declared here and defined in NPCMeleeStrikeComponent.cpp, so no header changes for it.
+	extern void NPCMeleeStrike_NotifyReady(AActor* Owner);
+	if (MeshComp && MeshComp->GetOwner())
+	{
+		NPCMeleeStrike_NotifyReady(MeshComp->GetOwner());
 	}
 }
 

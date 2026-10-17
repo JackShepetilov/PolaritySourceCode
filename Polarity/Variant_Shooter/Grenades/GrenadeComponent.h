@@ -17,6 +17,7 @@ class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class APostProcessVolume;
 class AShooterCharacter;
+class UGadgetWheelWidget;
 
 /** What a flashbang did to one player, worked out by the authority and sent to his machine. */
 USTRUCT(BlueprintType)
@@ -70,12 +71,12 @@ struct FGrenadeStock
 };
 
 /**
- * Docs/Grenades_Plan_2026-10-14.md. The grenades themselves are cells of the bag
- * (EInventorySlotKind::Grenade); this is the hand that throws them.
+ * Docs/Grenades_Plan_2026-10-14.md. The grenades themselves are in the inventory's gadget section
+ * (UInventoryComponent::GetGadgets); this is the hand that throws them.
  *
  * IA_Grenade (G): press winds up, holding draws the arc, letting go throws; a quick tap throws at
  * once. The same pipeline the thrown abilities use (UAbilityHandler_Throw), run without a slot or a
- * cooldown. IA_GrenadeCycle: the next type in the bag.
+ * cooldown. IA_GrenadeCycle (H): a tap is the next kind, held it is the wheel.
  *
  * Like the abilities, the throw is decided and run on the authority; the owning client draws the arc
  * itself. TODO(COOP): as for every ability, the throw montage plays on the server only, so a client
@@ -85,6 +86,7 @@ UCLASS(ClassGroup = (Polarity), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UGrenadeComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 
@@ -99,9 +101,21 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> GrenadeAction;
 
-	/** Select the next type in the bag. */
+	/** H. A tap selects the next kind; held, it opens the wheel [author, 2026-10-16]. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> GrenadeCycleAction;
+
+	/** Held longer than this, H opens the wheel instead of cycling. */
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel", meta = (ClampMin = "0.05", Units = "s"))
+	float WheelHoldTime = 0.25f;
+
+	/** How far the look has to move, in look input, to pick a kind on the wheel. */
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel", meta = (ClampMin = "0.1"))
+	float WheelPickDistance = 4.0f;
+
+	/** The wheel. Empty: the plain painted one. */
+	UPROPERTY(EditAnywhere, Category = "Input|Wheel")
+	TSubclassOf<UGadgetWheelWidget> WheelWidgetClass;
 
 	/** Put in the bag when the player spawns. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grenade")
@@ -129,6 +143,13 @@ public:
 	 *  stays thrown. */
 	void CancelThrow();
 
+	/** Owning client, from the character's look: while the wheel is open the look moves the pick, not
+	 *  the camera. True when it took the input. */
+	bool HandleLookForWheel(float Yaw, float Pitch);
+
+	UFUNCTION(BlueprintPure, Category = "Grenade")
+	bool IsWheelOpen() const { return bWheelOpen; }
+
 	// ==================== Flash ====================
 
 	/** Owning client: a burn on the eye where the flash was on the screen (fades over BurnTime), and
@@ -150,6 +171,9 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void Server_CycleType();
 
+	UFUNCTION(Server, Reliable)
+	void Server_SelectType(UGrenadeDefinition* Type);
+
 	UFUNCTION()
 	void OnInventoryChanged();
 
@@ -158,11 +182,18 @@ private:
 	void OnGrenadePressed();
 	void OnGrenadeReleased();
 	void OnCyclePressed();
+	void OnCycleReleased();
 
 	void BeginThrow();
 	void ReleaseThrow();
 	void CycleType();
+	void SelectType(UGrenadeDefinition* Type);
 	void OnThrowFinished(bool bCompleted);
+
+	/** Owning client: the wheel. */
+	void OpenWheel();
+	void CloseWheel(bool bApply);
+	void RefreshWheel();
 
 	/** Keep the selection on a type there is some of. Authority. */
 	void RefreshSelection();
@@ -176,6 +207,25 @@ private:
 
 	UPROPERTY(Replicated)
 	TObjectPtr<UGrenadeDefinition> SelectedType;
+
+	/** Authority: the place in the gadget section the selection was at. When that kind is gone (thrown
+	 *  out, or dropped for a new one that took its place) the selection stays on the place. */
+	int32 SelectedPlace = 0;
+
+	/** Owning client: H. */
+	bool bCycleKeyHeld = false;
+	bool bWheelOpen = false;
+	FTimerHandle WheelHoldTimer;
+
+	/** Owning client, while the wheel is open: the kinds as drawn, the look so far, the pick. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UGrenadeDefinition>> WheelTypes;
+
+	FVector2D WheelCursor = FVector2D::ZeroVector;
+	int32 WheelHovered = INDEX_NONE;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UGadgetWheelWidget> Wheel;
 
 	UPROPERTY(Replicated)
 	bool bThrowing = false;

@@ -44,6 +44,7 @@ void UAbilityComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME_CONDITION(UAbilityComponent, ActiveSlotIndex, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UAbilityComponent, bIsCasting, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UAbilityComponent, CooldownTimeRemaining, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UAbilityComponent, CooldownTotal, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UAbilityComponent, PassiveDefinition, COND_OwnerOnly);
 }
 

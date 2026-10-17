@@ -14,6 +14,8 @@
 #include "Variant_Shooter/Weapons/ShooterWeapon.h"
 #include "Upgrades/UpgradeManagerComponent.h"
 #include "Variant_Shooter/Grenades/GrenadeDefinition.h"
+#include "Variant_Shooter/Pickups/GrenadePickup.h"
+#include "Variant_Shooter/Progression/RunLevelComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogInventory, Log, All);
 
@@ -33,6 +35,9 @@ void UInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME_CONDITION(UInventoryComponent, Slots, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UInventoryComponent, FreeAttachmentSlots, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(UInventoryComponent, MaxAmmoCells, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UInventoryComponent, Gadgets, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UInventoryComponent, GadgetKinds, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UInventoryComponent, GadgetsPerKind, COND_OwnerOnly);
 }
 
 void UInventoryComponent::BeginPlay()
@@ -189,14 +194,16 @@ int32 UInventoryComponent::ConsumeMedkits(int32 Count)
 	return Consumed;
 }
 
+// ==================== Gadgets ====================
+
 int32 UInventoryComponent::GetGrenadeCount(const UGrenadeDefinition* Definition) const
 {
 	int32 Total = 0;
-	for (const FInventorySlot& Slot : Slots)
+	for (const FGadgetStack& Stack : Gadgets)
 	{
-		if (Slot.Kind == EInventorySlotKind::Grenade && (!Definition || Slot.Payload == Definition))
+		if (!Definition || Stack.Type == Definition)
 		{
-			Total += Slot.Count;
+			Total += Stack.Count;
 		}
 	}
 	return Total;
@@ -210,48 +217,185 @@ int32 UInventoryComponent::ConsumeGrenades(const UGrenadeDefinition* Definition,
 		return 0;
 	}
 
-	// From the last cell of the type backwards: a half-used stack goes before a full one is opened.
-	int32 Remaining = Count;
-	for (int32 Index = Slots.Num() - 1; Index >= 0 && Remaining > 0; --Index)
+	const int32 Index = FindGadget(Definition);
+	if (Index == INDEX_NONE)
 	{
-		FInventorySlot& Slot = Slots[Index];
-		if (Slot.Kind != EInventorySlotKind::Grenade || Slot.Payload != Definition)
-		{
-			continue;
-		}
-
-		const int32 Taken = FMath::Min(Slot.Count, Remaining);
-		Slot.Count -= Taken;
-		Remaining -= Taken;
-
-		// The last one out frees the cell.
-		if (Slot.Count <= 0)
-		{
-			Slot = FInventorySlot();
-		}
+		return 0;
 	}
 
-	const int32 Consumed = Count - Remaining;
-	if (Consumed > 0)
+	FGadgetStack& Stack = Gadgets[Index];
+	const int32 Taken = FMath::Min(Stack.Count, Count);
+	Stack.Count -= Taken;
+
+	// The last one out frees the place for another kind.
+	if (Stack.Count <= 0)
+	{
+		Gadgets.RemoveAt(Index);
+	}
+
+	if (Taken > 0)
 	{
 		OnInventoryChanged.Broadcast();
 	}
-	return Consumed;
+	return Taken;
 }
 
 void UInventoryComponent::GetGrenadeTypes(TArray<UGrenadeDefinition*>& OutTypes) const
 {
 	OutTypes.Reset();
-	for (const FInventorySlot& Slot : Slots)
+	for (const FGadgetStack& Stack : Gadgets)
 	{
-		if (Slot.Kind == EInventorySlotKind::Grenade && Slot.Count > 0)
+		if (Stack.Type && Stack.Count > 0)
 		{
-			if (UGrenadeDefinition* const Type = Cast<UGrenadeDefinition>(Slot.Payload))
-			{
-				OutTypes.AddUnique(Type);
-			}
+			OutTypes.AddUnique(Stack.Type);
 		}
 	}
+}
+
+int32 UInventoryComponent::GetGadgetsPerKind() const
+{
+	const URunLevelComponent* const RunLevel = URunLevelComponent::FindFor(GetOwner());
+	return FMath::Max3(1, GadgetsPerKind, RunLevel ? RunLevel->GetGadgetsPerKind() : 0);
+}
+
+int32 UInventoryComponent::FindGadget(const UGrenadeDefinition* Type) const
+{
+	return Type ? Gadgets.IndexOfByPredicate([Type](const FGadgetStack& Stack) { return Stack.Type == Type; }) : INDEX_NONE;
+}
+
+int32 UInventoryComponent::GetGadgetRoomFor(const FInventoryItem& Item) const
+{
+	const UGrenadeDefinition* const Type = Cast<UGrenadeDefinition>(Item.Payload);
+	if (!Type)
+	{
+		return 0;
+	}
+
+	const int32 Index = FindGadget(Type);
+	if (Index == INDEX_NONE && Gadgets.Num() >= GetGadgetKinds())
+	{
+		return 0;
+	}
+
+	const int32 OfKind = Index != INDEX_NONE ? Gadgets[Index].Count : 0;
+	const int32 KindRoom = GetGadgetsPerKind() - OfKind;
+	const int32 TotalRoom = GetGadgetTotalLimit() - GetGrenadeCount(nullptr);
+	return FMath::Max(0, FMath::Min(KindRoom, TotalRoom));
+}
+
+int32 UInventoryComponent::AddGadgets(const FInventoryItem& Item)
+{
+	UGrenadeDefinition* const Type = Cast<UGrenadeDefinition>(Item.Payload);
+	const int32 Moved = FMath::Min(Item.Count, GetGadgetRoomFor(Item));
+	if (!Type || Moved <= 0)
+	{
+		PendingGadgetPlace = INDEX_NONE;
+		UE_LOG(LogInventory, Log, TEXT("[GADGET_DEBUG] %s: no room for %s (%d kinds of %d, %d of %d in all)"),
+			*GetNameSafe(GetOwner()), *GetNameSafe(Type), Gadgets.Num(), GetGadgetKinds(), GetGrenadeCount(nullptr), GetGadgetTotalLimit());
+		return Item.Count;
+	}
+
+	int32 Index = FindGadget(Type);
+	if (Index == INDEX_NONE)
+	{
+		FGadgetStack NewStack;
+		NewStack.Type = Type;
+		NewStack.PickupClass = Item.PickupClass;
+		Index = Gadgets.IsValidIndex(PendingGadgetPlace) || PendingGadgetPlace == Gadgets.Num()
+			? Gadgets.Insert(NewStack, PendingGadgetPlace)
+			: Gadgets.Add(NewStack);
+	}
+	PendingGadgetPlace = INDEX_NONE;
+
+	Gadgets[Index].Count += Moved;
+	UE_LOG(LogInventory, Log, TEXT("[GADGET_DEBUG] %s takes %d %s at place %d (%d of %d of the kind, %d of %d in all)"),
+		*GetNameSafe(GetOwner()), Moved, *GetNameSafe(Type), Index, Gadgets[Index].Count, GetGadgetsPerKind(),
+		GetGrenadeCount(nullptr), GetGadgetTotalLimit());
+
+	OnInventoryChanged.Broadcast();
+	return Item.Count - Moved;
+}
+
+bool UInventoryComponent::SwapOutGadgetFor(const UGrenadeDefinition* Incoming, const UGrenadeDefinition* Outgoing)
+{
+	if (GetOwnerRole() != ROLE_Authority || !Incoming || FindGadget(Incoming) != INDEX_NONE
+		|| Gadgets.Num() < GetGadgetKinds() || Gadgets.Num() == 0)
+	{
+		return false;
+	}
+
+	int32 Place = FindGadget(Outgoing);
+	if (Place == INDEX_NONE)
+	{
+		Place = Gadgets.Num() - 1;
+	}
+
+	const UGrenadeDefinition* const Dropped = Gadgets[Place].Type;
+	if (!DropGadgetToWorld(Dropped))
+	{
+		return false;
+	}
+	PendingGadgetPlace = Place;
+	UE_LOG(LogInventory, Log, TEXT("[GADGET_DEBUG] %s drops %s from place %d to take %s"),
+		*GetNameSafe(GetOwner()), *GetNameSafe(Dropped), Place, *GetNameSafe(Incoming));
+	return true;
+}
+
+bool UInventoryComponent::DropGadgetToWorld(const UGrenadeDefinition* Type)
+{
+	const int32 Index = FindGadget(Type);
+	if (GetOwnerRole() != ROLE_Authority || Index == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const FGadgetStack Stack = Gadgets[Index];
+	FInventoryItem Item;
+	Item.Kind = EInventorySlotKind::Grenade;
+	Item.Payload = Stack.Type;
+	Item.Count = Stack.Count;
+	Item.StackMax = FMath::Max(1, Stack.Count);
+	// No pickup of its own and none set per kind: a plain grenade pickup, which shows the
+	// definition's PickupMesh, rather than refusing the drop and losing the place.
+	Item.PickupClass = Stack.PickupClass ? Stack.PickupClass
+		: (DropClassByKind.Contains(EInventorySlotKind::Grenade) ? DropClassByKind[EInventorySlotKind::Grenade]
+		: TSubclassOf<AInventoryPickup>(AGrenadePickup::StaticClass()));
+
+	if (Stack.Count > 0 && !DropItemToWorld(Item))
+	{
+		return false;
+	}
+
+	Gadgets.RemoveAt(Index);
+	OnInventoryChanged.Broadcast();
+	return true;
+}
+
+void UInventoryComponent::SetGadgetKinds(int32 NewKinds)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+	GadgetKinds = FMath::Max(1, NewKinds);
+	while (Gadgets.Num() > GadgetKinds)
+	{
+		if (!DropGadgetToWorld(Gadgets.Last().Type))
+		{
+			Gadgets.Pop();
+		}
+	}
+	OnInventoryChanged.Broadcast();
+}
+
+void UInventoryComponent::SetGadgetsPerKind(int32 NewPerKind)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+	GadgetsPerKind = FMath::Max(1, NewPerKind);
+	OnInventoryChanged.Broadcast();
 }
 
 int32 UInventoryComponent::GetAmmoCellCount() const
@@ -1046,6 +1190,15 @@ bool UInventoryComponent::CanAccept(const FInventoryItem& Item, int32& OutSlotIn
 		return false;
 	}
 
+	// Gadgets never take a cell: their own section, their own limits. A new kind with every place
+	// taken still fits: the pickup swaps out the selected kind for it (SwapOutGadgetFor).
+	if (Item.Kind == EInventorySlotKind::Grenade)
+	{
+		const bool bNewKindSwaps = FindGadget(Cast<UGrenadeDefinition>(Item.Payload)) == INDEX_NONE
+			&& Gadgets.Num() >= GetGadgetKinds() && Gadgets.Num() > 0;
+		return bNewKindSwaps || GetGadgetRoomFor(Item) > 0;
+	}
+
 	// Topping up an existing stack comes first: it costs no capacity at all, so a player with a
 	// full bag and a half-filled money cell can still pick money up.
 	OutSlotIndex = FindStackWithRoom(Item);
@@ -1088,6 +1241,11 @@ int32 UInventoryComponent::TryAdd(const FInventoryItem& Item)
 	if (!Item.IsValid())
 	{
 		return 0;
+	}
+
+	if (Item.Kind == EInventorySlotKind::Grenade)
+	{
+		return AddGadgets(Item);
 	}
 
 	int32 Remaining = Item.Count;
@@ -1692,8 +1850,55 @@ namespace InventoryDebug
 				Index, KindName(Slots[Index].Kind), Slots[Index].Count, Slots[Index].StackMax,
 				Slots[Index].bInstalled ? TEXT(" (installed)") : TEXT(""));
 		}
+
+		UE_LOG(LogInventory, Log, TEXT("[INV_DEBUG] gadgets: %d of %d kinds, %d per kind, %d of %d in all"),
+			Inventory->GetGadgets().Num(), Inventory->GetGadgetKinds(), Inventory->GetGadgetsPerKind(),
+			Inventory->GetGrenadeCount(nullptr), Inventory->GetGadgetTotalLimit());
+		for (int32 Index = 0; Index < Inventory->GetGadgets().Num(); ++Index)
+		{
+			const FGadgetStack& Stack = Inventory->GetGadgets()[Index];
+			UE_LOG(LogInventory, Log, TEXT("[INV_DEBUG]   gadget [%d] %s x%d"), Index, *GetNameSafe(Stack.Type), Stack.Count);
+		}
+	}
+
+	static void CmdGadgetKinds(const TArray<FString>& Args, UWorld* World)
+	{
+		UInventoryComponent* Inventory = FindLocalInventory(World);
+		if (!Inventory || Args.Num() < 1)
+		{
+			UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] usage: polarity.gadgets.kinds <n>"));
+			return;
+		}
+		Inventory->SetGadgetKinds(FCString::Atoi(*Args[0]));
+		UE_LOG(LogInventory, Log, TEXT("[INV_DEBUG] gadget kinds now %d, total limit %d"),
+			Inventory->GetGadgetKinds(), Inventory->GetGadgetTotalLimit());
+	}
+
+	static void CmdGadgetsPerKind(const TArray<FString>& Args, UWorld* World)
+	{
+		UInventoryComponent* Inventory = FindLocalInventory(World);
+		if (!Inventory || Args.Num() < 1)
+		{
+			UE_LOG(LogInventory, Warning, TEXT("[INV_DEBUG] usage: polarity.gadgets.perkind <n>"));
+			return;
+		}
+		Inventory->SetGadgetsPerKind(FCString::Atoi(*Args[0]));
+		UE_LOG(LogInventory, Log, TEXT("[INV_DEBUG] gadgets per kind now %d, total limit %d"),
+			Inventory->GetGadgetsPerKind(), Inventory->GetGadgetTotalLimit());
 	}
 }
+
+static FAutoConsoleCommandWithWorldAndArgs CmdGadgetKindsCmd(
+	TEXT("polarity.gadgets.kinds"),
+	TEXT("How many gadget kinds the local player may carry (the perk). Usage: polarity.gadgets.kinds <n>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&InventoryDebug::CmdGadgetKinds)
+);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdGadgetsPerKindCmd(
+	TEXT("polarity.gadgets.perkind"),
+	TEXT("How many of one gadget kind the local player may carry (the run level). Usage: polarity.gadgets.perkind <n>"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&InventoryDebug::CmdGadgetsPerKind)
+);
 
 static FAutoConsoleCommandWithWorldAndArgs CmdInvAdd(
 	TEXT("polarity.inv.add"),

@@ -117,7 +117,7 @@ for e in events:
     elif e["event"] == "tactic":
         notes[e["who"]].append((e["t"], e["extra"]))
     elif e["event"] == "shot":
-        shots[e["who"]].append((e["t"], e["other"], e["value"] == "1"))
+        shots[e["who"]].append((e["t"], e["other"], e["value"] in ("1", "2")))
     elif e["event"] == "hit":
         last_hit = (e["t"], e["who"], e["other"])
         hits[e["who"]].append((e["t"], e["other"], float(e["value"])))

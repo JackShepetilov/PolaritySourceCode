@@ -37,6 +37,16 @@ static TAutoConsoleVariable<int32> CVarGrappleReleaseDebug(
 	TEXT("Lines persist for 4 seconds. Log tag [GRAPPLE_RELEASE]."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarMantleDebug(
+	TEXT("polarity.mantle.debug"),
+	0,
+	TEXT("Draw the mantle ledge search, for 2 seconds per search.\n")
+	TEXT("  yellow = the wall found in front\n")
+	TEXT("  cyan   = the ledge search down past the wall face (red when it found no ledge)\n")
+	TEXT("  green  = the capsule where the mantle would put the character\n")
+	TEXT("Searches run every falling frame while pushing forward into a wall. Log tag [MANTLE_DEBUG]."),
+	ECVF_Cheat);
+
 static TAutoConsoleVariable<int32> CVarWallRunForAll(
 	TEXT("polarity.movement.wallrunforall"),
 	0,
@@ -152,6 +162,7 @@ void UApexMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (PawnOwner && PawnOwner->IsLocallyControlled())
 	{
 		bWantsToSprint = bSprintKeyHeld && !IsSprintSuppressed();
+		UpdateTacticalSprint();
 	}
 
 	// The gun the move is made with, on the same terms: the controlling machine decides, the server
@@ -331,7 +342,8 @@ float UApexMovementComponent::GetMaxSpeed() const
 	}
 	else if (IsSprinting())
 	{
-		BaseSpeed = MovementSettings->SprintSpeed * (Gun ? Gun->SprintSpeedScale : 1.0f);
+		BaseSpeed = MovementSettings->SprintSpeed * (Gun ? Gun->SprintSpeedScale : 1.0f)
+			* (bTacticalSprinting ? MovementSettings->TacticalSprintSpeedMultiplier : 1.0f);
 	}
 	else
 	{
@@ -356,7 +368,7 @@ float UApexMovementComponent::GetMaxSpeed() const
 	// cap simply wins over it. Deliberately grounded only, so a shot taken mid-jump does not brake
 	// the jump, and deliberately not applied to the slide, wallrun or dash, whose speeds are the
 	// mechanic itself.
-	if (bIsAiming && MovementSettings->ADSSpeed > 0.0f
+	if (bIsAiming && !bAimSpeedCapIgnored && MovementSettings->ADSSpeed > 0.0f
 		&& !bIsSliding && !bIsWallRunning && !bIsGroundDashing && !bIsAirDashing
 		&& (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
 	{
@@ -813,6 +825,56 @@ void UApexMovementComponent::StartSprint()
 	// Only the key state. bWantsToSprint is derived from it once per frame, so that the value the
 	// move is packed with is the same one the character actually moved at.
 	bSprintKeyHeld = true;
+
+	// A second press soon after the first asks for the tactical sprint; UpdateTacticalSprint decides.
+	if (const UWorld* const World = GetWorld())
+	{
+		const float Now = World->GetTimeSeconds();
+		const float Window = MovementSettings ? MovementSettings->TacticalSprintDoubleTapWindow : 0.3f;
+		bTacticalSprintRequested = Now - LastSprintPressTime <= Window;
+		LastSprintPressTime = Now;
+		// A new sprint: the slow gun-up belongs to the tactical one that ended before it.
+		bLastSprintWasTactical = false;
+	}
+}
+
+void UApexMovementComponent::UpdateTacticalSprint()
+{
+	const UWorld* const World = GetWorld();
+	if (!World || !MovementSettings)
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+
+	if (bTacticalSprintRequested && !bTacticalSprinting && bWantsToSprint && Now >= TacticalSprintReadyTime)
+	{
+		const APolarityCharacter* const PolChar = Cast<APolarityCharacter>(PawnOwner);
+		if (PolChar && PolChar->CanTacticalSprint())
+		{
+			bTacticalSprinting = true;
+			TacticalSprintEndTime = Now + MovementSettings->TacticalSprintDuration;
+			UE_LOG(LogTemp, Log, TEXT("[TACSPRINT_DEBUG] %s: tactical sprint for %.1f s"), *GetNameSafe(PawnOwner), MovementSettings->TacticalSprintDuration);
+		}
+	}
+	bTacticalSprintRequested = false;
+
+	// Over when the time is up or the sprint itself is (key let go, a shot, a slide, off the ground).
+	if (bTacticalSprinting && (Now >= TacticalSprintEndTime || !bWantsToSprint || (IsMovingOnGround() && !IsSprinting())))
+	{
+		bTacticalSprinting = false;
+		TacticalSprintReadyTime = Now + MovementSettings->TacticalSprintCooldown;
+		// Out of the sprint straight from the tactical one: the gun comes up slower.
+		bLastSprintWasTactical = !bWantsToSprint || !IsSprinting();
+		UE_LOG(LogTemp, Log, TEXT("[TACSPRINT_DEBUG] %s: tactical sprint over, ready again in %.1f s"),
+			*GetNameSafe(PawnOwner), MovementSettings->TacticalSprintCooldown);
+	}
+}
+
+float UApexMovementComponent::GetTacticalSprintCooldownRemaining() const
+{
+	const UWorld* const World = GetWorld();
+	return World ? FMath::Max(0.0f, TacticalSprintReadyTime - World->GetTimeSeconds()) : 0.0f;
 }
 
 bool UApexMovementComponent::IsSprintSuppressed() const
@@ -834,6 +896,20 @@ void UApexMovementComponent::SuppressSprint(float Duration)
 	// Never shorten an existing veto: two systems suppressing at once should give the longer of
 	// the two, not whichever one happened to run last this frame.
 	SprintSuppressedUntil = FMath::Max(SprintSuppressedUntil, World->GetTimeSeconds() + Length);
+}
+
+void UApexMovementComponent::SuppressSlide(float Duration)
+{
+	if (const UWorld* const World = GetWorld(); World && Duration > 0.0f)
+	{
+		SlideSuppressedUntil = FMath::Max(SlideSuppressedUntil, World->GetTimeSeconds() + Duration);
+	}
+}
+
+bool UApexMovementComponent::IsSlideSuppressed() const
+{
+	const UWorld* const World = GetWorld();
+	return World && World->GetTimeSeconds() < SlideSuppressedUntil;
 }
 
 void UApexMovementComponent::StopSprint()
@@ -878,6 +954,9 @@ uint32 UApexMovementComponent::PackPolarityMoveFlags() const
 
 	Set(bSlideFireStreak,        EPolarityMoveFlag::SlideFireStreak);
 
+	Set(bTacticalSprinting,      EPolarityMoveFlag::TacticalSprinting);
+	Set(bAimSpeedCapIgnored,     EPolarityMoveFlag::AimSpeedCapIgnored);
+
 	return Flags;
 }
 
@@ -906,6 +985,10 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 	// Only the client runs Fire() for its own gun, so only it knows whether the shots come without a
 	// break. What that is worth is asked of this side's own upgrade in UpdateSlide.
 	bSlideFireStreak = Has(EPolarityMoveFlag::SlideFireStreak);
+
+	// The tactical sprint and the lifted ADS cap: the client's answer, like sprint itself.
+	bTacticalSprinting  = Has(EPolarityMoveFlag::TacticalSprinting);
+	bAimSpeedCapIgnored = Has(EPolarityMoveFlag::AimSpeedCapIgnored);
 
 	// States that need a real entry. Each Start* sets up friction, gravity, direction and speed;
 	// a side that only flipped the bool kept simulating normally and finished the move somewhere
@@ -961,6 +1044,12 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 
 	// Mantle moves the character along a path it computed from the ledge it found. Same rule as
 	// wallrun: the decision travels, the ledge is re-found locally.
+	//
+	// Normally both ends find the start inside the simulation on the same move and this does
+	// nothing. When the server missed the ledge on that move it starts here one move late, and then
+	// it is also one move late at the top: the client's next move says "done" while the server is
+	// on its last step of the over leg, which is why that case finishes the mantle rather than
+	// dropping it.
 	const bool bWantsMantle = Has(EPolarityMoveFlag::Mantling);
 	if (bWantsMantle && !bIsMantling)
 	{
@@ -968,7 +1057,7 @@ void UApexMovementComponent::ApplyPolarityMoveFlags(uint32 Flags)
 	}
 	else if (!bWantsMantle && bIsMantling)
 	{
-		bIsMantling = false;
+		EndMantle(true);
 	}
 
 	// The lunge is four plain decisions and a destination, all taken as given; the destination
@@ -1022,6 +1111,8 @@ void UApexMovementComponent::ApplyPolarityMoveFlagsForReplay(uint32 Flags)
 	bGrappleWanted          = Has(EPolarityMoveFlag::Grappling);
 
 	bIsAiming               = Has(EPolarityMoveFlag::Aiming);
+	bTacticalSprinting      = Has(EPolarityMoveFlag::TacticalSprinting);
+	bAimSpeedCapIgnored     = Has(EPolarityMoveFlag::AimSpeedCapIgnored);
 
 	// bIsMeleeLunging is restored by PrepMoveFor around this call, not from the flags: it is the
 	// state the move started in, and the flags carry the decision the move was made with. The gravity
@@ -1152,8 +1243,11 @@ void UApexMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bWantsToSprint, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsSliding, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAiming, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, bTacticalSprinting, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsWallRunning, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsMantling, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, MantleKind, COND_SimulatedOnly);
+	DOREPLIFETIME_CONDITION(UApexMovementComponent, MantleDuration, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsAirDashing, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsGroundDashing, COND_SimulatedOnly);
 	DOREPLIFETIME_CONDITION(UApexMovementComponent, bIsGrappling, COND_SimulatedOnly);
@@ -1449,7 +1543,7 @@ bool UApexMovementComponent::CanSlide() const
 		return false;
 	}
 
-	if (SlideCooldownRemaining > 0.0f)
+	if (SlideCooldownRemaining > 0.0f || IsSlideSuppressed())
 	{
 		return false;
 	}
@@ -2856,176 +2950,297 @@ void UApexMovementComponent::PerformWallBounce(const FHitResult& WallHit)
 }
 
 // ==================== Mantle ====================
+//
+// Runs inside the movement simulation like everything else that owns Velocity: the start is found
+// from the falling branch of UpdateCharacterStateBeforeMovement on every machine that simulates the
+// move (owning client, server, a corrected client's replay), and the motion is a Velocity that
+// PhysFlying integrates with full collision. Nothing here moves the actor directly.
+//
+// TODO(COOP): a correction that lands mid-mantle replays it with today's progress (MantleElapsed,
+// the leg), not the progress of the replayed move, because the saved move carries only the
+// Mantling bit. The replay then finishes the mantle early. Not measured on the coop bench yet.
+
+bool UApexMovementComponent::IsMantleAllowedNow() const
+{
+	return MovementSettings && MovementSettings->bEnableMantle && CharacterOwner && IsFalling()
+		&& !bIsMantling && !bIsSliding && !bIsWallRunning && !bIsAirDashing && !bIsGroundDashing
+		&& !bIsGrappling && !bIsMeleeLunging && !bRunLaunchActive;
+}
 
 bool UApexMovementComponent::CanMantle() const
 {
-	if (!MovementSettings || bIsMantling || bIsSliding || bIsWallRunning || !IsFalling())
-	{
-#if ENABLE_DRAW_DEBUG
-		if (GEngine && IsFalling())
-		{
-			GEngine->AddOnScreenDebugMessage(8799, 0.0f, FColor::Orange,
-				FString::Printf(TEXT("MANTLE BLOCKED: Settings=%d Mantling=%d Sliding=%d WallRun=%d Falling=%d"),
-					MovementSettings ? 1 : 0, bIsMantling, bIsSliding, bIsWallRunning, IsFalling()));
-		}
-#endif
-		return false;
-	}
-
-	FHitResult Hit;
-	return TraceMantleSurface(Hit);
+	FApexMantleLedge Ledge;
+	return IsMantleAllowedNow() && FindMantleLedge(Ledge);
 }
 
 void UApexMovementComponent::TryMantle()
 {
-	FHitResult Hit;
-	if (!TraceMantleSurface(Hit))
+	FApexMantleLedge Ledge;
+	if (!IsMantleAllowedNow() || !FindMantleLedge(Ledge))
 	{
 		return;
 	}
 
+	const FVector Start = UpdatedComponent->GetComponentLocation();
+	const float UpDistance = FMath::Max(0.0f, Ledge.TargetLocation.Z - Start.Z);
+	const float OverDistance = FVector::Dist2D(Start, Ledge.TargetLocation);
+
+	const float HeightRange = FMath::Max(1.0f, MovementSettings->MantleMaxHeight - MovementSettings->MantleMinHeight);
+	const float HeightAlpha = FMath::Clamp((Ledge.Height - MovementSettings->MantleMinHeight) / HeightRange, 0.0f, 1.0f);
+	const float Duration = FMath::Max(0.05f,
+		FMath::Lerp(MovementSettings->MantleDurationAtMinHeight, MovementSettings->MantleDurationAtMaxHeight, HeightAlpha));
+
 	bIsMantling = true;
-	MantleStartLocation = CharacterOwner->GetActorLocation();
-	MantleTargetLocation = Hit.Location + FVector(0, 0, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
-	MantleAlpha = 0.0f;
+	MantleKind = Ledge.Height <= MovementSettings->MantleLowMaxHeight ? EApexMantleKind::Low : EApexMantleKind::High;
+	MantleDuration = Duration;
+	MantleStartLocation = Start;
+	MantleTargetLocation = Ledge.TargetLocation;
+	MantleExitDirection = Ledge.ExitDirection;
+	MantleEntrySpeed = Velocity.Size2D();
+	MantleElapsed = 0.0f;
+	MantleUpDuration = Duration * UpDistance / FMath::Max(1.0f, UpDistance + OverDistance);
+	bMantleOverLeg = false;
+
 	Velocity = FVector::ZeroVector;
 	SetMovementMode(MOVE_Flying);
 
-#if ENABLE_DRAW_DEBUG
-	if (GEngine)
+	// Edge only and never from a replay: a correction re-runs this move and would print and play it
+	// twice. @see StartMeleeLunge for the same rule.
+	if (!CharacterOwner->bClientUpdating)
 	{
-		const float MantleDist = FVector::Dist(MantleStartLocation, MantleTargetLocation);
-		GEngine->AddOnScreenDebugMessage(8804, 2.0f, FColor::Green,
-			FString::Printf(TEXT("MANTLE START! From Z=%.0f → To Z=%.0f (dist=%.0f, duration=%.2fs)"),
-				MantleStartLocation.Z, MantleTargetLocation.Z, MantleDist, MovementSettings->MantleDuration));
-	}
-	DrawDebugLine(GetWorld(), MantleStartLocation, MantleTargetLocation, FColor::Green, false, 2.0f, 0, 3.0f);
-#endif
+		UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] START %s role=%d own=%d kind=%s height=%.0f up=%.0f over=%.0f duration=%.2f entrySpeed=%.0f"),
+			*GetNameSafe(CharacterOwner), (int32)CharacterOwner->GetLocalRole(),
+			CharacterOwner->IsLocallyControlled() ? 1 : 0,
+			MantleKind == EApexMantleKind::Low ? TEXT("Low") : TEXT("High"),
+			Ledge.Height, UpDistance, OverDistance, Duration, MantleEntrySpeed);
 
-	// Broadcast mantle started event
-	OnMantleStarted.Broadcast();
+		OnMantleStarted.Broadcast();
+	}
 }
 
 void UApexMovementComponent::UpdateMantle(float DeltaTime)
 {
-	if (!MovementSettings)
+	if (!MovementSettings || !UpdatedComponent)
 	{
-		bIsMantling = false;
-		SetMovementMode(MOVE_Falling);
+		EndMantle(false);
 		return;
 	}
 
-	MantleAlpha += DeltaTime / MovementSettings->MantleDuration;
-
-	if (MantleAlpha >= 1.0f)
+	// Something else took the character mid-mantle (a launch, a knockback): let it have it.
+	if (MovementMode != MOVE_Flying)
 	{
-		CharacterOwner->SetActorLocation(MantleTargetLocation);
-		bIsMantling = false;
-		SetMovementMode(MOVE_Walking);
-
-		// Broadcast mantle ended event
-		OnMantleEnded.Broadcast();
+		EndMantle(false);
 		return;
 	}
 
-	const float SmoothAlpha = FMath::InterpEaseOut(0.0f, 1.0f, MantleAlpha, 2.0f);
-	CharacterOwner->SetActorLocation(FMath::Lerp(MantleStartLocation, MantleTargetLocation, SmoothAlpha));
+	if (DeltaTime <= 0.0f)
+	{
+		return;
+	}
+
+	// Each leg aims at its end point so that it arrives exactly when its time runs out: the time
+	// left is measured BEFORE this move, and when less than one move is left the whole remainder is
+	// covered in this one. The velocity is re-aimed every move, so the friction PhysFlying applies
+	// and a corner that shaves a little off are corrected on the next one instead of adding up.
+	const FVector Location = UpdatedComponent->GetComponentLocation();
+	const float ElapsedBefore = MantleElapsed;
+	MantleElapsed += DeltaTime;
+
+	// Up leg: straight up until the capsule is at standing height over the ledge. Over early when it
+	// gets there early, and on time whatever happened, so a ledge a little lower than measured never
+	// leaves the character hanging.
+	if (!bMantleOverLeg)
+	{
+		const float Remaining = MantleTargetLocation.Z - Location.Z;
+		const float TimeLeft = MantleUpDuration - ElapsedBefore;
+		if (Remaining > 1.0f && TimeLeft > 0.0f)
+		{
+			Velocity = FVector(0.0f, 0.0f, Remaining / FMath::Max(TimeLeft, DeltaTime));
+			return;
+		}
+		bMantleOverLeg = true;
+	}
+
+	// Over leg: across the edge to the target, holding the height.
+	const FVector ToTarget = MantleTargetLocation - Location;
+	const bool bArrived = ToTarget.Size2D() <= 2.0f && FMath::Abs(ToTarget.Z) <= 5.0f;
+	const float TimeLeft = MantleDuration - ElapsedBefore;
+	if (bArrived || TimeLeft <= 0.0f)
+	{
+		EndMantle(true);
+		return;
+	}
+
+	Velocity = ToTarget / FMath::Max(TimeLeft, DeltaTime);
 }
 
-bool UApexMovementComponent::TraceMantleSurface(FHitResult& OutHit) const
+void UApexMovementComponent::EndMantle(bool bReachedTop)
 {
-	if (!CharacterOwner || !MovementSettings)
+	if (!bIsMantling)
+	{
+		return;
+	}
+
+	bIsMantling = false;
+	MantleKind = EApexMantleKind::None;
+	MantleDuration = 0.0f;
+	bMantleOverLeg = false;
+
+	if (bReachedTop && MovementSettings)
+	{
+		// Walking, not Falling: Falling would land on the next move and run the landing camera kick
+		// and slide-on-land for a step the player never fell. Walking with no floor under it drops
+		// to Falling by itself.
+		Velocity = MantleExitDirection * (MantleEntrySpeed * FMath::Clamp(MovementSettings->MantleMomentumRetention, 0.0f, 1.0f));
+		SetMovementMode(MOVE_Walking);
+
+		// Standing on the ledge is a landing, but it never goes through ProcessLanded, so its resets
+		// are done here. Without them the jump that reached the ledge stayed counted: on the ground
+		// DoJump saw CurrentJumpCount >= MaxJumps and the next press did nothing, and with no jump
+		// there was no air for the next mantle either, until some fall landed somewhere.
+		CurrentJumpCount = 0;
+		bAirJumpedThisFlight = false;
+		LastWallRunEndReason = EWallRunEndReason::None;
+		ResetAirAbilities();
+	}
+	else if (MovementMode == MOVE_Flying)
+	{
+		// Dropped mid-air: fall from here. Any other mode means whoever ended it already set the
+		// character's mode and velocity, and those stay.
+		Velocity = FVector::ZeroVector;
+		SetMovementMode(MOVE_Falling);
+	}
+
+	if (CharacterOwner && !CharacterOwner->bClientUpdating)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[MANTLE_DEBUG] END %s reachedTop=%d elapsed=%.2f exitSpeed=%.0f"),
+			*GetNameSafe(CharacterOwner), bReachedTop ? 1 : 0, MantleElapsed, Velocity.Size2D());
+
+		OnMantleEnded.Broadcast();
+	}
+}
+
+void UApexMovementComponent::OnRep_MantleKind()
+{
+	// Watching machines only (COND_SimulatedOnly): the owner and the server broadcast from
+	// TryMantle / EndMantle themselves.
+	if (MantleKind != EApexMantleKind::None)
+	{
+		OnMantleStarted.Broadcast();
+	}
+	else
+	{
+		OnMantleEnded.Broadcast();
+	}
+}
+
+bool UApexMovementComponent::FindMantleLedge(FApexMantleLedge& OutLedge) const
+{
+	if (!CharacterOwner || !MovementSettings || !UpdatedComponent)
 	{
 		return false;
 	}
 
-	const FVector CharLoc = CharacterOwner->GetActorLocation();
-	const FVector Start = CharLoc + FVector(0, 0, 50.0f);
-	const FVector Forward = CharacterOwner->GetActorForwardVector();
-	const FVector End = Start + Forward * MovementSettings->MantleTraceDistance;
+	// Only while pushing forward: a player falling past a ledge without wanting it keeps falling.
+	if (!IsAccelerationForward())
+	{
+		return false;
+	}
 
-	FCollisionQueryParams Params;
-	Params.AddIgnoredActor(CharacterOwner);
+	const UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
+	const float Radius = Capsule->GetScaledCapsuleRadius();
+	const float HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	const FVector Location = UpdatedComponent->GetComponentLocation();
+	const float FeetZ = Location.Z - HalfHeight;
+	const FVector Forward = Acceleration.GetSafeNormal2D();
 
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ApexMantle), false, CharacterOwner);
 #if ENABLE_DRAW_DEBUG
-	// Debug: wall trace (yellow = searching for wall)
-	DrawDebugLine(GetWorld(), Start, End, FColor::Yellow, false, 0.5f, 0, 2.0f);
-	DrawDebugPoint(GetWorld(), Start, 8.0f, FColor::Yellow, false, 0.5f);
+	const bool bDebug = CVarMantleDebug.GetValueOnGameThread() != 0;
 #endif
 
+	// 1. A wall in front, anywhere along the capsule. The capsule itself is swept, slightly thinner
+	//    so that the floor it may be grazing does not count as the wall.
 	FHitResult WallHit;
-	if (!GetWorld()->LineTraceSingleByChannel(WallHit, Start, End, ECC_Visibility, Params))
+	const FVector WallEnd = Location + Forward * MovementSettings->MantleTraceDistance;
+	if (!GetWorld()->SweepSingleByChannel(WallHit, Location, WallEnd, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeCapsule(Radius * 0.9f, HalfHeight - 5.0f), Params)
+		|| WallHit.bStartPenetrating)
 	{
+		return false;
+	}
+
+	FVector WallNormal = WallHit.ImpactNormal;
+	WallNormal.Z = 0.0f;
+	if (!WallNormal.Normalize() || FMath::Abs(WallHit.ImpactNormal.Z) > 0.3f)
+	{
+		return false;
+	}
+
+	// Facing the wall, not brushing it at an angle. This is the wallrun's case.
+	if (FVector::DotProduct(Forward, -WallNormal) < MovementSettings->MantleMinWallFacingDot)
+	{
+		return false;
+	}
+
+	// 2. The ledge top: straight down just past the wall face, from the highest reachable point to
+	//    the lowest height that is a mantle and not a step.
+	const FVector Into = -WallNormal;
+	const FVector Probe = WallHit.ImpactPoint + Into * 15.0f;
+	const FVector LedgeStart(Probe.X, Probe.Y, FeetZ + MovementSettings->MantleMaxHeight);
+	const FVector LedgeEnd(Probe.X, Probe.Y, FeetZ + MovementSettings->MantleMinHeight);
+
+	FHitResult LedgeHit;
+	const bool bLedge = GetWorld()->SweepSingleByChannel(LedgeHit, LedgeStart, LedgeEnd, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeSphere(5.0f), Params);
+
 #if ENABLE_DRAW_DEBUG
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(8800, 0.5f, FColor::Red,
-				FString::Printf(TEXT("MANTLE: No wall found (trace dist=%.0f, from Z=%.0f)"),
-					MovementSettings->MantleTraceDistance, Start.Z));
-		}
+	if (bDebug)
+	{
+		DrawDebugLine(GetWorld(), Location, WallHit.ImpactPoint, FColor::Yellow, false, 2.0f, 0, 2.0f);
+		DrawDebugLine(GetWorld(), LedgeStart, LedgeEnd, bLedge ? FColor::Cyan : FColor::Red, false, 2.0f, 0, 2.0f);
+	}
 #endif
+
+	// Starting inside geometry means the wall goes higher than MantleMaxHeight.
+	if (!bLedge || LedgeHit.bStartPenetrating || !IsWalkable(LedgeHit))
+	{
+		return false;
+	}
+
+	const float LedgeZ = LedgeHit.ImpactPoint.Z;
+
+	// 3. Where the capsule ends up: standing on the ledge, its near side just past the edge.
+	FVector Target = WallHit.ImpactPoint + Into * (Radius + MovementSettings->MantleForwardInset);
+	Target.Z = LedgeZ + HalfHeight + 2.0f;
+
+	// 4. Room for both legs: the column straight up from here, and the capsule at the target. The
+	//    column is thinner for the same reason as the wall sweep: the capsule may be touching the
+	//    wall it is about to climb.
+	const FVector Top(Location.X, Location.Y, Target.Z);
+	FHitResult RoomHit;
+	if (GetWorld()->SweepSingleByChannel(RoomHit, Location, Top, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeCapsule(Radius * 0.9f, HalfHeight), Params))
+	{
+		return false;
+	}
+	if (GetWorld()->OverlapBlockingTestByChannel(Target, FQuat::Identity, ECC_Pawn,
+		FCollisionShape::MakeCapsule(Radius, HalfHeight), Params))
+	{
 		return false;
 	}
 
 #if ENABLE_DRAW_DEBUG
-	// Debug: wall hit point (green)
-	DrawDebugPoint(GetWorld(), WallHit.Location, 12.0f, FColor::Green, false, 0.5f);
-#endif
-
-	const FVector LedgeTraceStart = WallHit.Location + Forward * 10.0f + FVector(0, 0, MovementSettings->MantleReachHeight);
-	const FVector LedgeTraceEnd = WallHit.Location + Forward * 10.0f;
-
-#if ENABLE_DRAW_DEBUG
-	// Debug: ledge trace (cyan = searching for ledge surface)
-	DrawDebugLine(GetWorld(), LedgeTraceStart, LedgeTraceEnd, FColor::Cyan, false, 0.5f, 0, 2.0f);
-	DrawDebugPoint(GetWorld(), LedgeTraceStart, 8.0f, FColor::Cyan, false, 0.5f);
-
-	const float WallHitHeight = WallHit.Location.Z;
-	const float CharFeet = CharLoc.Z - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	const float LedgeSearchTop = WallHitHeight + MovementSettings->MantleReachHeight;
-
-	if (GEngine)
+	if (bDebug)
 	{
-		GEngine->AddOnScreenDebugMessage(8801, 0.0f, FColor::Yellow,
-			FString::Printf(TEXT("MANTLE: Wall hit at Z=%.0f | Feet at Z=%.0f | Search top Z=%.0f | Reach=%.0f"),
-				WallHitHeight, CharFeet, LedgeSearchTop, MovementSettings->MantleReachHeight));
+		DrawDebugCapsule(GetWorld(), Target, HalfHeight, Radius, FQuat::Identity, FColor::Green, false, 2.0f);
 	}
 #endif
 
-	if (!GetWorld()->LineTraceSingleByChannel(OutHit, LedgeTraceStart, LedgeTraceEnd, ECC_Visibility, Params))
-	{
-#if ENABLE_DRAW_DEBUG
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(8802, 0.5f, FColor::Red,
-				TEXT("MANTLE: No ledge surface found (trace went through - wall too tall for MantleReachHeight?)"));
-		}
-#endif
-		return false;
-	}
-
-#if ENABLE_DRAW_DEBUG
-	// Debug: ledge hit point
-	DrawDebugPoint(GetWorld(), OutHit.Location, 12.0f, FColor::Blue, false, 0.5f);
-
-	const float LedgeHeight = OutHit.Location.Z;
-	const float CharFeetZ = CharLoc.Z - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	const float HeightAboveFeet = LedgeHeight - CharFeetZ;
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(8803, 0.0f, FColor::Cyan,
-			FString::Printf(TEXT("MANTLE: Ledge at Z=%.0f | %.0f UU above feet | Normal.Z=%.2f %s"),
-				LedgeHeight, HeightAboveFeet, OutHit.Normal.Z,
-				OutHit.Normal.Z > 0.7f ? TEXT("OK") : TEXT("TOO STEEP!")));
-	}
-
-	// Draw the mantle target location
-	const FVector TargetLoc = OutHit.Location + FVector(0, 0, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
-	DrawDebugSphere(GetWorld(), TargetLoc, 20.0f, 8, OutHit.Normal.Z > 0.7f ? FColor::Green : FColor::Red, false, 1.0f);
-#endif
-
-	return OutHit.Normal.Z > 0.7f;
+	OutLedge.TargetLocation = Target;
+	OutLedge.ExitDirection = Into;
+	OutLedge.Height = LedgeZ - FeetZ;
+	return true;
 }
 
 // ==================== Air Movement ====================
@@ -3856,15 +4071,26 @@ void UApexMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSecon
 	}
 	else if (IsFalling() && !bIsSliding)
 	{
-		// Wall bounce when pushing forward, or while balled up in the air.
-		if (IsAccelerationForward() || bIsCrouchedInAir)
+		// Mantle first: pushing forward into a ledge in reach climbs it, and a started mantle owns
+		// the move, so neither the bounce nor the wallrun below gets to look at the same wall. It
+		// starts moving on this same move rather than idling one in Flying.
+		TryMantle();
+		if (bIsMantling)
 		{
-			CheckForWallBounce();
+			UpdateMantle(DeltaSeconds);
 		}
-
-		if (!bIsWallRunning)
+		else
 		{
-			CheckForWallRun();
+			// Wall bounce when pushing forward, or while balled up in the air.
+			if (IsAccelerationForward() || bIsCrouchedInAir)
+			{
+				CheckForWallBounce();
+			}
+
+			if (!bIsWallRunning)
+			{
+				CheckForWallRun();
+			}
 		}
 	}
 
@@ -3938,10 +4164,11 @@ void UApexMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 
 void UApexMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration)
 {
-	// Momentum only: these three states drive Velocity themselves and must not get the normal input
+	// Momentum only: these states drive Velocity themselves and must not get the normal input
 	// acceleration on top. The zeroing happens here rather than in GetMaxAcceleration so that
 	// Acceleration keeps pointing where the player is pushing. See GetMaxAcceleration.
-	if (bIsSliding || bIsWallRunning || bIsGroundDashing)
+	// The mantle is here because it flies: PhysFlying would otherwise accelerate it along the input.
+	if (bIsSliding || bIsWallRunning || bIsGroundDashing || bIsMantling)
 	{
 		const FVector InputAcceleration = Acceleration;
 		Acceleration = FVector::ZeroVector;
@@ -4846,6 +5073,8 @@ void UApexMovementComponent::ResetMovementState()
 		RestoreWallRunCapsule();
 	}
 
+	EndMantle(false);
+
 	// Reset cooldowns
 	SlideCooldownRemaining = 0.0f;
 	SlideBoostCooldownRemaining = 0.0f;
@@ -4866,6 +5095,10 @@ void UApexMovementComponent::ResetMovementState()
 	// A player who died holding ADS respawns without the speed cap; the next press sets it again.
 	bIsAiming = false;
 	bSlideFireStreak = false;
+	bAimSpeedCapIgnored = false;
+	bTacticalSprinting = false;
+	bTacticalSprintRequested = false;
+	TacticalSprintReadyTime = -1000.0f;
 
 	// Reset jump count
 	CurrentJumpCount = 0;
@@ -4883,6 +5116,7 @@ void UApexMovementComponent::ResetMovementState()
 	bWantsToSprint = false;
 	bSprintKeyHeld = false;
 	SprintSuppressedUntil = -1000.0f;
+	SlideSuppressedUntil = -1000.0f;
 	bWantsSlideOnLand = false;
 
 	// Stop velocity

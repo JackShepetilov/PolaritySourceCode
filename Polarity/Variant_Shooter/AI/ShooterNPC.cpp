@@ -4,6 +4,8 @@
 #include "Variant_Shooter/AI/ShooterNPC.h"
 #include "Variant_Shooter/AI/SquadSpawn/Squad.h"
 #include "Variant_Shooter/Weapons/ShooterWeapon_Melee.h"
+#include "Variant_Shooter/Weapons/ShooterWeapon_Shotgun.h"
+#include "Variant_Shooter/AI/NPCMeleeStrikeComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "AI/Coordination/ThreatComponent.h"
 #include "AI/PolarityTeams.h"
@@ -44,6 +46,7 @@
 #include "../DamageTypes/DamageType_Ranged.h"
 #include "../DamageTypes/DamageType_Fragmentation.h"
 #include "Variant_Shooter/Grenades/GrenadeProjectile.h"
+#include "Variant_Shooter/Grenades/GrenadeDefinition.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/OverlapResult.h"
 #include "Curves/CurveFloat.h"
@@ -57,6 +60,7 @@
 #include "../UI/EMFChargeWidgetSubsystem.h"
 #include "Curves/CurveFloat.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
 #include "Polarity/Checkpoint/CheckpointSubsystem.h"
 #include "XPSubsystem.h"
 #include "Engine/GameInstance.h"
@@ -80,6 +84,9 @@
 #include "CameraShakeComponent.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
+#include "Variant_Shooter/Progression/KillCreditSubsystem.h"
+#include "Variant_Shooter/Progression/WeaponMasteryComponent.h"
+#include "Variant_Shooter/Progression/WeaponMasteryDefinition.h"
 
 // polarity.debug.hitparts 1: every hit on a soldier writes to the log which part of the body took it
 // and what it did (armour, limb, helmet), tag [HITPART]. The record of a fight has the same line
@@ -399,6 +406,7 @@ AShooterNPC::AShooterNPC(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	AccuracyComponent = CreateDefaultSubobject<UAIAccuracyComponent>(TEXT("AccuracyComponent"));
+	MeleeStrike = CreateDefaultSubobject<UNPCMeleeStrikeComponent>(TEXT("MeleeStrike"));
 	LootDrop = CreateDefaultSubobject<ULootDropComponent>(TEXT("LootDrop"));
 	// Melee retreat is gone: backing off because the target got close was a per-NPC reflex, and it
 	// fought with everything else that decides where an NPC stands (tactical space scoring, squad
@@ -500,6 +508,12 @@ void AShooterNPC::BeginPlay()
 		{
 			WeaponClass = WeaponOptions[SelectedWeaponOption].Weapon;
 		}
+	}
+
+	// The bench poser shows any gun, whatever this enemy would roll.
+	if (BenchWeaponOverride)
+	{
+		WeaponClass = BenchWeaponOverride;
 	}
 
 	Super::BeginPlay();
@@ -640,6 +654,39 @@ void AShooterNPC::Tick(float DeltaTime)
 
 	DropAimHoldIfAbandoned();
 
+	// A glare running out puts the aim back, unless a full dazzle took over meanwhile. @see ApplyGlare
+	if (GlareUntil > 0.0f && HasAuthority() && GetWorld() && GetWorld()->GetTimeSeconds() >= GlareUntil)
+	{
+		GlareUntil = -1.0f;
+		if (AccuracyComponent && !IsDazzled())
+		{
+			AccuracyComponent->SetDazzleSpreadMultiplier(1.0f);
+		}
+	}
+
+	// The headache lives on the server's accuracy component and runs out by the clock; the flag that
+	// shows it to everybody follows it here. @see bHeadache
+	if (HasAuthority() && AccuracyComponent)
+	{
+		const bool bAche = !bIsDead && AccuracyComponent->HasHeadache();
+		if (bAche != bHeadache)
+		{
+			bHeadache = bAche;
+			RefreshHeadacheFX();
+		}
+
+		// A headache takes the sprint and the slide away [author, 2026-10-15]; renewed every frame, so
+		// they come back on their own when it runs out.
+		if (bAche)
+		{
+			if (UApexMovementComponent* const AcheApex = GetApexMovement())
+			{
+				AcheApex->SuppressSprint(0.2f);
+				AcheApex->SuppressSlide(0.2f);
+			}
+		}
+	}
+
 	// Pin the off hand to the weapon, the same way the player's third person body does it. NPCs run
 	// the same anim blueprints, so the Two Bone IK node is already there; nothing was writing its
 	// transform and alpha, which left the left hand wherever the animation put it.
@@ -720,6 +767,21 @@ void AShooterNPC::Tick(float DeltaTime)
 	// the corner until the turret is gone.
 	if (!bTankRamming && !bEscaping) { TickTurretCover(DeltaTime); }
 
+	// Fire discipline: what this soldier sees of the one it fights, a few times a second. Only foot
+	// soldiers report, and only a shooter that reports is held to the reaction and the aimed rounds.
+	// @see UAIAccuracyComponent::UpdateSight
+	SightReportClock -= DeltaTime;
+	if (AccuracyComponent && SightReportClock <= 0.0f)
+	{
+		SightReportClock = 0.1f;
+		const AShooterAIController* const Brain = Cast<AShooterAIController>(GetController());
+		if (Brain && Brain->IsInfantry())
+		{
+			AActor* const Watched = CurrentAimTarget.IsValid() ? CurrentAimTarget.Get() : Brain->GetCurrentTarget();
+			AccuracyComponent->UpdateSight(Watched, Watched && HasLineOfSightTo(Watched));
+		}
+	}
+
 	// [BENCH] State over the head, redrawn every frame: what this NPC is doing and why it is or is
 	// not shooting, in words, so the bench can be read by eye without the log.
 	if (NPCBench::IsOn() && !IsA<AFlyingDrone>() && !IsA<AKamikazeDroneNPC>())
@@ -750,7 +812,7 @@ void AShooterNPC::Tick(float DeltaTime)
 		const bool bSuppressed = AccuracyComponent && AccuracyComponent->IsSuppressed();
 		const bool bSuppFire = AccuracyComponent && AccuracyComponent->IsFiringSuppressive();
 		const FString Label = FString::Printf(
-			TEXT("%s  [%s]  HP %.0f\n>> %s%s\ncover: %s%s\ntarget: %s\n%s%s%s\nmag %d/%d%s%s"),
+			TEXT("%s  [%s]  HP %.0f\n>> %s%s\ncover: %s%s\ntarget: %s\n%s%s%s\nmag %d/%d%s%s\nstress %.2f  reaction %.2f s%s"),
 			*GetName(), Weapon ? *Weapon->GetClass()->GetName() : TEXT("no weapon"), CurrentHP,
 			*TacticNote.ToString(),
 			AccuracyComponent && AccuracyComponent->IsPinFire() ? TEXT("  [PIN: shoots near, not at]") : TEXT(""),
@@ -761,7 +823,11 @@ void AShooterNPC::Tick(float DeltaTime)
 			bSuppFire ? TEXT("  [SUPPRESSIVE FIRE: misses on purpose]") : TEXT(""),
 			Weapon ? Weapon->GetBulletCount() : 0, Weapon ? Weapon->GetMagazineSize() : 0,
 			bIsReloadingWeapon ? TEXT("  RELOADING") : TEXT(""),
-			Move && Move->IsCrouching() ? TEXT("  CROUCH") : TEXT(""));
+			Move && Move->IsCrouching() ? TEXT("  CROUCH") : TEXT(""),
+			AccuracyComponent ? AccuracyComponent->GetStress() : 0.0f,
+			AccuracyComponent ? AccuracyComponent->GetReactionSeconds() : 0.0f,
+			AccuracyComponent && CurrentAimTarget.IsValid() && !AccuracyComponent->IsReactionDone(CurrentAimTarget.Get())
+				? TEXT("  [REACTING: rounds miss on purpose]") : TEXT(""));
 
 		DrawDebugString(GetWorld(), FVector(0.0f, 0.0f, GetSimpleCollisionHalfHeight() + 70.0f), Label,
 			this, Colour, 0.0f, true, 1.1f);
@@ -2067,6 +2133,50 @@ bool AShooterNPC::IsDazzled() const
 	return World && DazzleEndTime > World->GetTimeSeconds();
 }
 
+void AShooterNPC::ApplyGlare(AActor* Source, float Duration, float SpreadMultiplier)
+{
+	const UWorld* const World = GetWorld();
+	if (!HasAuthority() || bIsDead || Duration <= 0.0f || !World || !AccuracyComponent || IsDazzled())
+	{
+		return;
+	}
+	if (GlareUntil < World->GetTimeSeconds())
+	{
+		// Comes on: the aim worsens and whatever it had of the target, it has to find again.
+		AccuracyComponent->SetDazzleSpreadMultiplier(SpreadMultiplier);
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s glared by %s (spread x%.1f)"), *GetName(), *GetNameSafe(Source), SpreadMultiplier);
+	}
+	GlareUntil = FMath::Max(GlareUntil, World->GetTimeSeconds() + Duration);
+}
+
+void AShooterNPC::ApplyKeepAway(AActor* Source, float Seconds)
+{
+	const UWorld* const World = GetWorld();
+	if (!HasAuthority() || bIsDead || !Source || Seconds <= 0.0f || !World)
+	{
+		return;
+	}
+	if (!IsKeepAwayActive() || KeepAwaySource.Get() != Source)
+	{
+		// The line is where it stands now, a little inside: it may hold, step aside or back, not close in.
+		KeepAwaySource = Source;
+		KeepAwayDistance = FMath::Max(200.0f, static_cast<float>(FVector::Dist2D(GetActorLocation(), Source->GetActorLocation())) - 100.0f);
+		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s kept away from %s: no closer than %.0f cm"), *GetName(), *GetNameSafe(Source), KeepAwayDistance);
+	}
+	KeepAwayUntil = FMath::Max(KeepAwayUntil, World->GetTimeSeconds() + Seconds);
+}
+
+bool AShooterNPC::IsKeepAwayActive() const
+{
+	const UWorld* const World = GetWorld();
+	return World && KeepAwaySource.IsValid() && World->GetTimeSeconds() < KeepAwayUntil;
+}
+
+bool AShooterNPC::IsKeptAwayFrom(const FVector& Point) const
+{
+	return IsKeepAwayActive() && FVector::Dist2D(Point, KeepAwaySource->GetActorLocation()) < KeepAwayDistance;
+}
+
 void AShooterNPC::ApplyDazzle(AActor* Source, float Duration, float SpreadMultiplier, UMaterialInterface* Overlay)
 {
 	if (!HasAuthority() || bIsDead || Duration <= 0.0f || !GetWorld())
@@ -2254,7 +2364,7 @@ void AShooterNPC::TickDazzle(float DeltaTime)
 			{
 				DazzlePhase = EDazzlePhase::Hiding;
 				DazzleEndTime = FMath::Max(DazzleEndTime, GetWorld()->GetTimeSeconds() + DazzleMinHideTime);
-				if (bWantsToShoot && CurrentAimTarget.Get() == Source)
+				if (bWantsToShoot && CurrentAimTarget.Get() == Source && !IsKeepAwayActive())
 				{
 					StopShooting();
 				}
@@ -2270,8 +2380,17 @@ void AShooterNPC::TickDazzle(float DeltaTime)
 	}
 	else if (DazzlePhase == EDazzlePhase::Hiding)
 	{
-		// Down and quiet until the time is up. A shot the retreat left queued is dropped.
-		if (bWantsToShoot && CurrentAimTarget.Get() == Source)
+		// Held off by a strobe or a burner [author, 2026-10-15]: it does not sit there quiet, it keeps
+		// firing at the light from where it got to, badly (the dazzle spread). Otherwise down and quiet
+		// until the time is up; a shot the retreat left queued is dropped.
+		if (IsKeepAwayActive())
+		{
+			if (bHasGun && bScan && (!bWantsToShoot || CurrentAimTarget.Get() != Source))
+			{
+				StartShooting(Source, /*bHasExternalPermission*/ true);
+			}
+		}
+		else if (bWantsToShoot && CurrentAimTarget.Get() == Source)
 		{
 			StopShooting();
 		}
@@ -2607,8 +2726,15 @@ float AShooterNPC::AbsorbDamageWithShieldField(float Damage, struct FDamageEvent
 		PastArmour = Damage * UDamageType_Fragmentation::GetArmorBypassFraction(DamageEvent.DamageTypeClass);
 	}
 
+	// How hard the hit bites the armour: the weapon's own number when it sets one, else the damage
+	// type's. Every weapon hit arrives with the weapon as its causer, on the host and from a client.
+	const AShooterWeapon* const CauserWeapon = Cast<AShooterWeapon>(DamageCauser);
+	const float ArmorScale = CauserWeapon
+		? CauserWeapon->GetArmorDamageScale(DamageEvent.DamageTypeClass)
+		: UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass);
+
 	AActor* const Attacker = (EventInstigator && EventInstigator->GetPawn()) ? EventInstigator->GetPawn() : DamageCauser;
-	return PastArmour + Shield->AbsorbDamage(Damage - PastArmour, Attacker, HitComponent, UDamageType_Ranged::GetArmorDamageScale(DamageEvent.DamageTypeClass));
+	return PastArmour + Shield->AbsorbDamage(Damage - PastArmour, Attacker, HitComponent, ArmorScale);
 }
 
 float AShooterNPC::MeasureKnockdownRoom(const FVector& Direction, float Distance) const
@@ -3039,6 +3165,14 @@ void AShooterNPC::NotifyGrenadeThreat(AGrenadeProjectile* Grenade, const FVector
 		return;
 	}
 
+	// It went off and works on over a wider reach (the microwave): whoever got only out of the bang
+	// and is still inside the reach starts over, now out of all of it.
+	if (GrenadeEscapePhase != EGrenadeEscapePhase::Inactive && EscapeGrenade.Get() == Grenade
+		&& Radius > EscapeRadius + 1.0f && FVector::Dist(GetActorLocation(), Center) <= Radius)
+	{
+		EndGrenadeEscape();
+	}
+
 	// Already running from this one: follow where it now lies. One grenade at a time, the first.
 	if (GrenadeEscapePhase != EGrenadeEscapePhase::Inactive)
 	{
@@ -3057,6 +3191,12 @@ void AShooterNPC::NotifyGrenadeThreat(AGrenadeProjectile* Grenade, const FVector
 
 	// Out of its reach already: nothing to run from.
 	if (FVector::Dist(GetActorLocation(), Center) > Radius + GrenadeEscapeMargin * 0.5f)
+	{
+		return;
+	}
+
+	// Behind a wall from one a wall stops (or out of every live grenade's reach): safe where it is.
+	if (!AGrenadeProjectile::IsPointInDanger(World, GetActorLocation()))
 	{
 		return;
 	}
@@ -3115,31 +3255,33 @@ bool AShooterNPC::ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) cons
 		return false;
 	}
 
+	// No corner to be had (StartGrenadeEscapeMove asks the cover search first): a spot out of the
+	// reach, or behind a wall from it for the kinds a wall stops, on the side away from the enemy.
+	// Rings of spots round the grenade; a safe one wins, the soonest reached. For one that goes
+	// through walls with its edge off the navmesh (another floor), the farthest reachable is the
+	// last resort.
 	const FVector Me = GetActorLocation();
+	const AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	const AActor* const Threat = AIController ? AIController->GetCurrentTarget() : nullptr;
+	const FVector ToThreat = Threat ? (Threat->GetActorLocation() - Me).GetSafeNormal2D() : FVector::ZeroVector;
+
 	FVector Away = (Me - EscapeCenter).GetSafeNormal2D();
 	if (Away.IsNearlyZero())
 	{
 		Away = -GetActorForwardVector().GetSafeNormal2D();
 	}
 
-	// A sprint, roughly: the walk speed a sprint is built on, and a bit.
-	const float Speed = FMath::Max(Move->MaxWalkSpeed, 300.0f) * 1.3f;
+	const float Speed = FMath::Max(Move->MaxWalkSpeed, 300.0f);
 	const float SafeOut = EscapeRadius + GrenadeEscapeMargin;
+	static constexpr float Angles[] = { 0.0f, 45.0f, -45.0f, 90.0f, -90.0f, 135.0f, -135.0f, 180.0f };
+	const float Rings[] = { EscapeRadius * 0.55f, EscapeRadius * 0.8f, SafeOut };
 
-	FCollisionQueryParams LineParams(SCENE_QUERY_STAT(GrenadeEscapeCover), false, this);
-	LineParams.AddIgnoredActor(EscapeGrenade.Get());
-
-	static constexpr float Angles[] = { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f, 110.0f, -110.0f };
 	float BestScore = -TNumericLimits<float>::Max();
 	bool bFound = false;
-
 	for (const float Angle : Angles)
 	{
 		const FVector Direction = Away.RotateAngleAxis(Angle, FVector::UpVector);
-
-		// Two spots on each line: just past a wall from it (close, if there is one), and out of reach.
-		const float Distances[] = { EscapeRadius * 0.55f, SafeOut };
-		for (const float FromCenter : Distances)
+		for (const float FromCenter : Rings)
 		{
 			FNavLocation OnNav;
 			if (!NavSys->ProjectPointToNavigation(EscapeCenter + Direction * FromCenter, OnNav, FVector(300.0f, 300.0f, 300.0f)))
@@ -3147,18 +3289,7 @@ bool AShooterNPC::ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) cons
 				continue;
 			}
 			const FVector Spot = OnNav.Location;
-
-			// A wall between the grenade and the chest at the spot: the blast stops at it as well.
-			FHitResult Wall;
-			const bool bShielded = World->LineTraceSingleByChannel(Wall, EscapeCenter + FVector(0.0f, 0.0f, 40.0f),
-				Spot + FVector(0.0f, 0.0f, 100.0f), ECC_Visibility, LineParams);
-			const bool bOut = FVector::Dist(Spot, EscapeCenter) >= EscapeRadius + GrenadeEscapeMargin * 0.5f;
-
-			// The close spot is only worth a path search when it is behind something.
-			if (!bOut && !bShielded)
-			{
-				continue;
-			}
+			const bool bSafe = !AGrenadeProjectile::IsPointInDanger(World, Spot);
 
 			UNavigationPath* const Path = NavSys->FindPathToLocationSynchronously(World, Me, Spot, const_cast<AShooterNPC*>(this));
 			if (!Path || !Path->IsValid() || Path->IsPartial())
@@ -3166,9 +3297,11 @@ bool AShooterNPC::ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) cons
 				continue;
 			}
 
+			// Toward the enemy costs: running at him to get away from a grenade is dying twice over.
 			const float Seconds = Path->GetPathLength() / Speed;
-			// In time: the soonest wins. Too late anyway: the farthest from the grenade wins.
-			const float Score = Seconds <= TimeLeft - 0.1f ? 1000.0f - Seconds : FVector::Dist(Spot, EscapeCenter) * 0.1f - Seconds;
+			const float TowardEnemy = ToThreat.IsNearlyZero() ? 0.0f
+				: FMath::Max(0.0f, static_cast<float>(FVector::DotProduct((Spot - Me).GetSafeNormal2D(), ToThreat)));
+			const float Score = (bSafe ? 1000.0f : static_cast<float>(FVector::Dist(Spot, EscapeCenter)) * 0.1f) - Seconds - TowardEnemy * 3.0f;
 			if (Score > BestScore)
 			{
 				BestScore = Score;
@@ -3178,6 +3311,106 @@ bool AShooterNPC::ChooseGrenadeEscapeGoal(float TimeLeft, FVector& OutGoal) cons
 		}
 	}
 	return bFound;
+}
+
+void AShooterNPC::StartGrenadeEscapeMove(bool bHaveGoal)
+{
+	AGrenadeProjectile* const Grenade = EscapeGrenade.Get();
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	if (!Grenade || !AIController)
+	{
+		EndGrenadeEscape();
+		return;
+	}
+	if (!bHaveGoal && !ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal))
+	{
+		// Nowhere to go: back to the fight where it stands. Never crouched waiting for it.
+		UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s has nowhere to go, fights where it stands"), *GetName());
+		EndGrenadeEscape();
+		return;
+	}
+
+	GrenadeEscapePhase = EGrenadeEscapePhase::Moving;
+	EscapeScanTimer = 0.25f;
+	UpdateGrenadeEscapeGait(/*bForce*/ true);
+	AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s goes to %s %s (%.0f cm from the grenade)"),
+		*GetName(), bHaveGoal ? TEXT("a corner at") : TEXT("open ground at"), *EscapeGoal.ToCompactString(), FVector::Dist(EscapeGoal, EscapeCenter));
+}
+
+void AShooterNPC::UpdateGrenadeEscapeGait(bool bForce)
+{
+	AGrenadeProjectile* const Grenade = EscapeGrenade.Get();
+	AShooterAIController* const AIController = Cast<AShooterAIController>(GetController());
+	const UWorld* const World = GetWorld();
+	if (!Grenade || !AIController || !World)
+	{
+		return;
+	}
+	const float Now = World->GetTimeSeconds();
+	UApexMovementComponent* const Apex = GetApexMovement();
+	UCharacterMovementComponent* const CMC = GetCharacterMovement();
+
+	// What it shoots at on the way, if anything [author, 2026-10-15]: the working microwave itself while
+	// it backs out of the core; otherwise the enemy pressing it. Pressed by fire it does not sprint with
+	// its back to the gun: it backs off shooting, and may not make it, which is what the thrower's fire
+	// is for. Seen but not pressed: it walks back shooting while that is in time, and runs when it is not.
+	AActor* ShootAt = nullptr;
+	const UGrenadeDefinition* const Type = Grenade->GetDefinition();
+	if (Grenade->IsWorking() && Type && Type->IsShotAtWhileWorking())
+	{
+		ShootAt = Grenade;
+	}
+	else if (AActor* const Threat = AIController->GetCurrentTarget())
+	{
+		const bool bUnderFire = (AccuracyComponent && AccuracyComponent->IsSuppressed()) || Now - LastDamageTakenTime < 1.5f;
+		const bool bSees = AIController->SeesAnyEnemy();
+		const float Walk = FMath::Max(CMC ? CMC->MaxWalkSpeed : 400.0f, 100.0f);
+		const bool bInTime = Grenade->IsWorking() || FVector::Dist(GetActorLocation(), EscapeGoal) / Walk <= Grenade->GetTimeToDetonate() - 0.2f;
+		if (bUnderFire || (bSees && bInTime))
+		{
+			ShootAt = Threat;
+		}
+	}
+
+	const bool bShoot = ShootAt != nullptr;
+	if (!bForce && bShoot == bEscapeShooting && (!bShoot || CurrentAimTarget.Get() == ShootAt))
+	{
+		return;
+	}
+	bEscapeShooting = bShoot;
+
+	if (bShoot)
+	{
+		if (Apex)
+		{
+			Apex->StopSprint();
+		}
+		if (CMC)
+		{
+			CMC->bOrientRotationToMovement = false;
+			CMC->bUseControllerDesiredRotation = true;
+		}
+		AIController->SetFocus(ShootAt);
+		StartShooting(ShootAt, /*bHasExternalPermission*/ true);
+	}
+	else
+	{
+		StopShooting();
+		AIController->ClearFocus(EAIFocusPriority::Gameplay);
+		if (CMC)
+		{
+			CMC->bOrientRotationToMovement = true;
+			CMC->bUseControllerDesiredRotation = false;
+		}
+		// Refused while a headache holds: it walks. @see bHeadache
+		if (Apex)
+		{
+			Apex->StartSprint();
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s %s"), *GetName(),
+		bShoot ? *FString::Printf(TEXT("backs off shooting at %s"), *GetNameSafe(ShootAt)) : TEXT("runs, not shooting"));
 }
 
 void AShooterNPC::TickGrenadeEscape(float DeltaTime)
@@ -3193,14 +3426,12 @@ void AShooterNPC::TickGrenadeEscape(float DeltaTime)
 	const float Now = World ? World->GetTimeSeconds() : 0.0f;
 
 	// Gone off, gone, or taken over by something that owns the body (a stun, a fall, a grab).
-	if (!World || !AIController || bIsDead || !Grenade || Grenade->HasDetonated() || Now > EscapeGiveUpAt
+	if (!World || !AIController || bIsDead || !Grenade || !Grenade->IsDangerous() || Now > EscapeGiveUpAt
 		|| bIsInKnockback || bIsCaptured || bIsLaunched)
 	{
 		EndGrenadeEscape();
 		return;
 	}
-
-	UApexMovementComponent* const Apex = GetApexMovement();
 
 	if (GrenadeEscapePhase == EGrenadeEscapePhase::Reacting)
 	{
@@ -3221,73 +3452,63 @@ void AShooterNPC::TickGrenadeEscape(float DeltaTime)
 		GrenadeEscape::PauseTree(this, AIController);
 		StopShooting();
 
-		if (ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal))
+		// A corner first, out of the enemy's sight and out of the grenade's reach: the same search a
+		// fight uses, which already refuses corners inside a live grenade's reach. @see IsPointInDanger
+		UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>();
+		AActor* const Threat = AIController->GetCurrentTarget();
+		if (Finder && Threat && Finder->RequestCover(Threat))
 		{
-			GrenadeEscapePhase = EGrenadeEscapePhase::Running;
-
-			// Turned and running, not backing off with the gun up.
-			if (UCharacterMovementComponent* const CMC = GetCharacterMovement())
-			{
-				CMC->bOrientRotationToMovement = true;
-				CMC->bUseControllerDesiredRotation = false;
-			}
-			if (Apex)
-			{
-				Apex->StartSprint();
-			}
-			AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
-			UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s runs to %s (%.0f cm from the grenade)"),
-				*GetName(), *EscapeGoal.ToCompactString(), FVector::Dist(EscapeGoal, EscapeCenter));
+			GrenadeEscapePhase = EGrenadeEscapePhase::Searching;
+			EscapeSearchUntil = Now + 0.5f;
+			return;
 		}
-		else
-		{
-			// Nowhere to go: down where it stands.
-			GrenadeEscapePhase = EGrenadeEscapePhase::Holding;
-			SetTurretPeekCrouch(/*bCrouched*/ true);
-			UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s has nowhere to run, gets down"), *GetName());
-		}
-		EscapeScanTimer = 0.25f;
+		StartGrenadeEscapeMove(/*bHaveGoal*/ false);
 		return;
 	}
 
-	if (bWantsToShoot)
+	if (GrenadeEscapePhase == EGrenadeEscapePhase::Searching)
 	{
-		StopShooting();
-	}
-
-	if (GrenadeEscapePhase == EGrenadeEscapePhase::Running)
-	{
-		const float Arrive = GrenadeEscape::ArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
-		if (FVector::Dist2D(GetActorLocation(), EscapeGoal) <= Arrive)
+		const UCoverFinderComponent* const Finder = FindComponentByClass<UCoverFinderComponent>();
+		if (Finder && Finder->IsSearching() && Now < EscapeSearchUntil)
 		{
-			GrenadeEscapePhase = EGrenadeEscapePhase::Holding;
-			AIController->StopMovement();
-			if (Apex)
-			{
-				Apex->StopSprint();
-			}
-			SetTurretPeekCrouch(/*bCrouched*/ true);
 			return;
 		}
-
-		EscapeScanTimer -= DeltaTime;
-		if (EscapeScanTimer <= 0.0f)
+		const bool bCorner = Finder && Finder->HasCover() && !AGrenadeProjectile::IsPointInDanger(World, Finder->GetCover().HideLocation);
+		if (bCorner)
 		{
-			// Bounced on (NotifyGrenadeThreat set the timer below zero), or the spot is next to it.
-			if (EscapeScanTimer < -0.5f || FVector::Dist(EscapeGoal, EscapeCenter) < EscapeRadius * 0.5f)
-			{
-				ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal);
-			}
-			EscapeScanTimer = 0.25f;
+			EscapeGoal = Finder->GetCover().HideLocation;
+		}
+		StartGrenadeEscapeMove(bCorner);
+		return;
+	}
 
-			// Re-issued only while the path follower is not already taking it there.
-			const UPathFollowingComponent* const Path = AIController->GetPathFollowingComponent();
-			const bool bMovingThere = Path && Path->GetStatus() == EPathFollowingStatus::Moving
-				&& FVector::Dist2D(Path->GetPathDestination(), EscapeGoal) < 50.0f;
-			if (!bMovingThere)
-			{
-				AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
-			}
+	// Moving. There: straight back to the fight, from the corner or the open ground it reached.
+	const float Arrive = GrenadeEscape::ArriveRadius + GetSimpleCollisionRadius() * 1.1f + 5.0f;
+	if (FVector::Dist2D(GetActorLocation(), EscapeGoal) <= Arrive)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s is clear of it"), *GetName());
+		EndGrenadeEscape();
+		return;
+	}
+
+	EscapeScanTimer -= DeltaTime;
+	if (EscapeScanTimer <= 0.0f)
+	{
+		// Bounced on (NotifyGrenadeThreat set the timer below zero), or the spot is in its reach now.
+		if (EscapeScanTimer < -0.5f || AGrenadeProjectile::IsPointInDanger(World, EscapeGoal))
+		{
+			ChooseGrenadeEscapeGoal(Grenade->GetTimeToDetonate(), EscapeGoal);
+		}
+		EscapeScanTimer = 0.25f;
+		UpdateGrenadeEscapeGait(/*bForce*/ false);
+
+		// Re-issued only while the path follower is not already taking it there.
+		const UPathFollowingComponent* const Path = AIController->GetPathFollowingComponent();
+		const bool bMovingThere = Path && Path->GetStatus() == EPathFollowingStatus::Moving
+			&& FVector::Dist2D(Path->GetPathDestination(), EscapeGoal) < 50.0f;
+		if (!bMovingThere)
+		{
+			AIController->MoveToLocation(EscapeGoal, GrenadeEscape::ArriveRadius * 0.5f);
 		}
 	}
 }
@@ -3303,6 +3524,12 @@ void AShooterNPC::EndGrenadeEscape()
 	GrenadeEscapePhase = EGrenadeEscapePhase::Inactive;
 	EscapeGrenade = nullptr;
 
+	if (bEscapeShooting)
+	{
+		StopShooting();
+		bEscapeShooting = false;
+	}
+
 	if (AShooterAIController* const AIController = Cast<AShooterAIController>(GetController()))
 	{
 		if (bWasActing)
@@ -3316,10 +3543,6 @@ void AShooterNPC::EndGrenadeEscape()
 	if (UApexMovementComponent* const Apex = GetApexMovement())
 	{
 		Apex->StopSprint();
-	}
-	if (bWasActing)
-	{
-		SetTurretPeekCrouch(/*bCrouched*/ false);
 	}
 	RestoreGroundCombatRotation(this);
 	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s back to the fight"), *GetName());
@@ -3379,6 +3602,44 @@ void AShooterNPC::ReportDamageNumber(float Damage, float HealthDamage, FDamageEv
 		}
 	}
 	AShooterPlayerController* const ShooterPC = Cast<AShooterPlayerController>(PC);
+
+	// Run experience: every player who hurt it is paid when it dies, whatever dealt the last blow
+	// [author, 2026-10-16]. Here because every hit that writes health comes through this function.
+	const bool bAlreadyPaid = UKillCreditSubsystem::IsPaid(this);
+	const bool bKillingHit = (bIsDead || CurrentHP <= 0.0f) && !bAlreadyPaid;
+	if (PC && PC->PlayerState)
+	{
+		UKillCreditSubsystem::NoteDamage(this, PC->PlayerState);
+	}
+	if (bKillingHit)
+	{
+		UKillCreditSubsystem::NoteKill(this);
+	}
+
+	// Weapon mastery: the gun the hit came from, up the causer's owners, and its holder's player
+	// [author, 2026-10-16]. A blast whose causer is a projectile owned by the pawn counts for no gun.
+	if (PC && !bAlreadyPaid)
+	{
+		const AShooterWeapon* HitWeapon = nullptr;
+		for (const AActor* Step = DamageCauser; Step && !HitWeapon; Step = Step->GetOwner())
+		{
+			HitWeapon = Cast<AShooterWeapon>(Step);
+		}
+		UWeaponMasteryComponent* const Mastery = UWeaponMasteryComponent::FindFor(PC);
+		if (HitWeapon && HitWeapon->MasteryDefinition && Mastery)
+		{
+			Mastery->AddXP(HitWeapon->MasteryDefinition,
+				HitWeapon->MasteryDefinition->XPPerHit + (bKillingHit ? HitWeapon->MasteryDefinition->XPPerKill : 0));
+		}
+		if (bKillingHit)
+		{
+			if (AShooterCharacter* const Killer = Cast<AShooterCharacter>(PC->GetPawn()))
+			{
+				Killer->NoteKill();
+			}
+		}
+	}
+
 	if (!ShooterPC)
 	{
 		// An enemy's own fire, a prop, the world: nobody to show a number to.
@@ -3437,6 +3698,17 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	// ignore if already dead
 	if (bIsDead)
 	{
+		return 0.0f;
+	}
+
+	// One that cannot be damaged keeps its health and everything that follows from a hit (the bench
+	// poser's soldier [author, 2026-10-17]). Who shot it is still news: OnDamageTaken goes out with no
+	// damage, and the poser moves on to the next gun on it.
+	if (!CanBeDamaged())
+	{
+		const FVector Where = DamageEvent.IsOfType(FPointDamageEvent::ClassID)
+			? FVector(static_cast<const FPointDamageEvent&>(DamageEvent).HitInfo.ImpactPoint) : GetActorLocation();
+		OnDamageTaken.Broadcast(this, 0.0f, DamageEvent.DamageTypeClass, Where, DamageCauser);
 		return 0.0f;
 	}
 
@@ -3545,6 +3817,16 @@ float AShooterNPC::TakeDamage(float Damage, struct FDamageEvent const& DamageEve
 	}
 
 	UFightRecorderSubsystem::NoteDamage(this, EventInstigator, DamageCauser, Damage, CurrentHP);
+
+	// Being hit shakes the hand for a while; being hurt, for good. @see UAIAccuracyComponent::GetStress
+	if (AccuracyComponent && Damage > 0.0f)
+	{
+		AccuracyComponent->AddStress(AccuracyComponent->StressFromHit);
+		AccuracyComponent->NoteAlert();
+		LastDamageTakenTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		const float MaxHealth = GetMaxHealth();
+		AccuracyComponent->SetWoundFraction(MaxHealth > 0.0f ? 1.0f - FMath::Max(CurrentHP, 0.0f) / MaxHealth : 0.0f);
+	}
 
 	// Where on the body it landed and what that did, into the record of the fight, straight after
 	// the "hit" line it belongs to (that one names who fired). One word per outcome, no spaces: the
@@ -3981,10 +4263,17 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 			AimTarget = Brain->GetFocalPoint();
 		}
 
-		// Use AccuracyComponent for spread calculation
+		// Use AccuracyComponent for spread calculation. A shotgun's pellets are laid round this
+		// direction afterwards, so a round meant to miss has to stay out by the pattern too.
 		if (AccuracyComponent)
 		{
-			AimDir = AccuracyComponent->CalculateAimDirection(AimTarget, CurrentAimTarget.Get());
+			const AShooterWeapon_Shotgun* const Shotgun = Cast<AShooterWeapon_Shotgun>(Weapon);
+			if (Weapon)
+			{
+				AccuracyComponent->SetShotOrigin(Weapon->GetMuzzleWorldLocation());
+			}
+			AimDir = AccuracyComponent->CalculateAimDirection(AimTarget, CurrentAimTarget.Get(),
+				Shotgun ? Shotgun->GetPelletSpreadAngle() : 0.0f);
 		}
 		else
 		{
@@ -4010,6 +4299,16 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 		{
 			AimDir = UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Forward, AimVarianceHalfAngle);
 		}
+	}
+
+	// An aimed round under fire discipline was put on a point of the body (or just off it) by its
+	// roll: the gun aims at that point, not at the end of the eye's ray. From the muzzle a line to a
+	// point far behind him passes beside him by the eye-to-muzzle offset, and about a third of the
+	// rolls that should have landed missed (CORNER bench, 2026-10-14). @see UAIAccuracyComponent::MakeHit
+	if (CurrentAimTarget.IsValid() && AccuracyComponent && AccuracyComponent->WasLastRoundPlaced()
+		&& !AccuracyComponent->WasLastRoundDeliberateMiss())
+	{
+		return AimSource + AimDir * FVector::Dist(AimSource, AimTarget);
 	}
 
 	// calculate the unobstructed aim target location
@@ -4059,6 +4358,132 @@ FVector AShooterNPC::GetWeaponTargetLocation()
 
 	// return either the impact point or the trace end
 	return OutHit.bBlockingHit ? OutHit.ImpactPoint : OutHit.TraceEnd;
+}
+
+void AShooterNPC::BeginShoveStun(float Seconds)
+{
+	if (bIsDead || !GetWorld())
+	{
+		return;
+	}
+
+	// The same flag every other knockback raises: it is what holds the trigger up.
+	bIsInKnockback = true;
+	StopShooting();
+	if (AAIController* const AI = Cast<AAIController>(GetController()))
+	{
+		AI->StopMovement();
+		AI->ClearFocus(EAIFocusPriority::Gameplay);
+	}
+
+	// The shove turned the body square to the hit: nothing turns it back while it plays out.
+	if (!bInShoveStun)
+	{
+		bInShoveStun = true;
+		if (UCharacterMovementComponent* const Move = GetCharacterMovement())
+		{
+			bShoveSavedDesiredRotation = Move->bUseControllerDesiredRotation;
+			Move->bUseControllerDesiredRotation = false;
+		}
+		bShoveSavedControllerYaw = bUseControllerRotationYaw;
+		bUseControllerRotationYaw = false;
+	}
+	GetWorldTimerManager().SetTimer(ShoveStunTimer, this, &AShooterNPC::EndShoveStun, FMath::Max(Seconds, 0.05f), false);
+}
+
+void AShooterNPC::EndShoveStun()
+{
+	if (!bInShoveStun)
+	{
+		return;
+	}
+	bInShoveStun = false;
+	if (UCharacterMovementComponent* const Move = GetCharacterMovement())
+	{
+		Move->bUseControllerDesiredRotation = bShoveSavedDesiredRotation;
+	}
+	bUseControllerRotationYaw = bShoveSavedControllerYaw;
+
+	// Only the shove's own hold: a knockback of another kind still running keeps its flag.
+	if (!bIsKnockbackInterpolating && !bStunnedByExplosion && !bIsCaptured && !bIsLaunched)
+	{
+		bIsInKnockback = false;
+	}
+	if (!bIsDead && bWantsToShoot && CurrentAimTarget.IsValid())
+	{
+		TryStartShooting();
+	}
+}
+
+bool AShooterNPC::IsMeleeBusy() const
+{
+	return MeleeStrike && MeleeStrike->IsBusy();
+}
+
+void AShooterNPC::ReturnToGunAfterMelee()
+{
+	if (Weapon)
+	{
+		Weapon->SetActorHiddenInGame(false);
+	}
+	if (bIsDead)
+	{
+		return;
+	}
+
+	// Reload on the move: the close fight backs off while it reloads.
+	if (!TryBeginReload(false) && bWantsToShoot && CurrentAimTarget.IsValid())
+	{
+		TryStartShooting();
+	}
+}
+
+void AShooterNPC::Multicast_PlayMeleeStrike_Implementation(UAnimMontage* Holster, UAnimMontage* Strike, float BlendIn)
+{
+	UAnimInstance* const Anim = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	if (!Anim || !Strike)
+	{
+		return;
+	}
+
+	// Both start now: the holster at full weight, handing over to the strike over BlendIn. Same slot
+	// group, so playing the strike blends the holster out over the strike's blend in.
+	if (Holster)
+	{
+		Anim->Montage_Play(Holster, 1.0f);
+		FTimerHandle HideGun;
+		GetWorldTimerManager().SetTimer(HideGun, FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (Weapon && IsMeleeBusy())
+			{
+				Weapon->SetActorHiddenInGame(true);
+			}
+		}), FMath::Max(BlendIn, 0.01f), false);
+	}
+	Anim->Montage_PlayWithBlendIn(Strike, FAlphaBlendArgs(Holster ? BlendIn : Strike->BlendIn.GetBlendTime()));
+}
+
+void AShooterNPC::Multicast_PlayMeleeDraw_Implementation(UAnimMontage* Draw)
+{
+	if (Weapon)
+	{
+		Weapon->SetActorHiddenInGame(false);
+	}
+	UAnimInstance* const Anim = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	if (Anim && Draw)
+	{
+		Anim->Montage_Play(Draw, 1.0f);
+	}
+}
+
+bool AShooterNPC::IsCurrentShotDeliberateMiss() const
+{
+	return AccuracyComponent && AccuracyComponent->WasLastRoundDeliberateMiss();
+}
+
+bool AShooterNPC::IsCurrentShotPlaced() const
+{
+	return AccuracyComponent && AccuracyComponent->WasLastRoundPlaced();
 }
 
 void AShooterNPC::AddWeaponClass(const TSubclassOf<AShooterWeapon>& InWeaponClass)
@@ -4147,6 +4572,36 @@ void AShooterNPC::Die()
 	// raise the dead flag
 	bIsDead = true;
 	UFightRecorderSubsystem::NoteDeath(this, LastKillingDamageCauser);
+
+	// Nothing aches any more: the effect on the head goes with the life.
+	bHeadache = false;
+	RefreshHeadacheFX();
+
+	// A friend going down close by frightens everybody of the side who stands near. A death is rare
+	// enough for one pass over the soldiers on the level.
+	if (UWorld* const World = GetWorld(); World && HasAuthority())
+	{
+		for (TActorIterator<AShooterNPC> It(World); It; ++It)
+		{
+			AShooterNPC* const Mate = *It;
+			if (Mate == this || Mate->bIsDead || !Mate->AccuracyComponent || Mate->GetGenericTeamId() != GetGenericTeamId())
+			{
+				continue;
+			}
+			const float Radius = Mate->AccuracyComponent->StressAllyDeathRadius;
+			if (FVector::DistSquared(Mate->GetActorLocation(), GetActorLocation()) <= FMath::Square(Radius))
+			{
+				Mate->AccuracyComponent->AddStress(Mate->AccuracyComponent->StressFromAllyDeath);
+
+				// With a headache it does not take it in stride: it freezes. The window to take the
+				// second one. @see UAIAccuracyComponent::ApplyHeadache
+				if (Mate->AccuracyComponent->HasHeadache())
+				{
+					Mate->BeginFlinch(Mate->AccuracyComponent->AllyDeathFlinchSeconds);
+				}
+			}
+		}
+	}
 
 	if (NPCBench::IsOn())
 	{
@@ -4599,6 +5054,31 @@ void AShooterNPC::OnRep_Distracted()
 	RefreshStatusOverlay();
 }
 
+void AShooterNPC::OnRep_Headache()
+{
+	RefreshHeadacheFX();
+}
+
+void AShooterNPC::RefreshHeadacheFX()
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	if (bHeadache && !bIsDead && HeadacheFX && !HeadacheFXComponent && GetMesh())
+	{
+		HeadacheFXComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(HeadacheFX, GetMesh(), HeadacheFXSocket,
+			FVector::ZeroVector, FRotator::ZeroRotator, EAttachLocation::SnapToTarget, /*bAutoDestroy*/ true);
+	}
+	else if ((!bHeadache || bIsDead) && HeadacheFXComponent)
+	{
+		// Let what is in the air fade out rather than cut it.
+		HeadacheFXComponent->Deactivate();
+		HeadacheFXComponent = nullptr;
+	}
+}
+
 void AShooterNPC::RefreshStatusOverlay()
 {
 	USkeletalMeshComponent* MeshComp = GetMesh();
@@ -4692,6 +5172,7 @@ void AShooterNPC::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME(AShooterNPC, ReplicatedMaxHP);
 	DOREPLIFETIME(AShooterNPC, bShieldBypassActive);
 	DOREPLIFETIME(AShooterNPC, bDistracted);
+	DOREPLIFETIME(AShooterNPC, bHeadache);
 	DOREPLIFETIME(AShooterNPC, ShieldBypassDamageMultiplier);
 	DOREPLIFETIME(AShooterNPC, PledgedShieldLoan);
 	DOREPLIFETIME(AShooterNPC, TacticalOverlayMaterial);
@@ -5500,6 +5981,20 @@ void AShooterNPC::TryStartShooting()
 		return;
 	}
 
+	// Going in with the gun put away, or striking. @see UNPCMeleeStrikeComponent
+	if (IsMeleeBusy())
+	{
+		ReportShootGate(40, TEXT("BLOCKED melee: gun away"));
+		return;
+	}
+
+	// A friend just fell next to it and it has a headache. @see BeginFlinch
+	if (GetWorld() && GetWorld()->GetTimeSeconds() < FlinchUntil)
+	{
+		ReportShootGate(41, TEXT("BLOCKED flinch: a friend fell"));
+		return;
+	}
+
 	if (IsFireLocked())
 	{
 		ReportShootGate(40, TEXT("BLOCKED disarmed by a melee hit"));
@@ -5770,6 +6265,11 @@ void AShooterNPC::NotifyTargetAcquired(AActor* NewTarget)
 bool AShooterNPC::IsInPerceptionDelay() const
 {
 	if (PerceptionDelay <= 0.0f || TargetAcquiredTime < 0.0f) return false;
+
+	// [author, 2026-10-14] A soldier under fire discipline has its reaction instead: the trigger may go
+	// down at once, the rounds miss until the reaction has run. This hold (0.75 s, longer than any
+	// reaction) made the first round of every new target an aimed one. @see UAIAccuracyComponent
+	if (AccuracyComponent && AccuracyComponent->IsUnderFireDiscipline()) return false;
 	return (GetWorld()->GetTimeSeconds() - TargetAcquiredTime) < PerceptionDelay;
 }
 
@@ -8141,7 +8641,8 @@ void AShooterNPC::OnWeaponShotFired()
 	// bIsShooting is already false still went somewhere, and the report counts rounds, not intent.
 	++NPCBench::ShotsThisWindow.FindOrAdd(this);
 	NPCBench::LastBusyTime.Add(this, GetWorld()->GetTimeSeconds());
-	UFightRecorderSubsystem::NoteShot(this, CurrentAimTarget.Get(), AccuracyComponent && AccuracyComponent->IsPinFire());
+	UFightRecorderSubsystem::NoteShot(this, CurrentAimTarget.Get(), AccuracyComponent && AccuracyComponent->IsPinFire(),
+		IsCurrentShotDeliberateMiss());
 	if (NPCBench::IsOn())
 	{
 		AActor* const Target = CurrentAimTarget.Get();
@@ -8155,7 +8656,7 @@ void AShooterNPC::OnWeaponShotFired()
 		// fired in either never reaches the target however the aim itself works, so the report has
 		// to be able to tell those rounds apart from real misses.
 		UE_LOG(LogTemp, Log,
-			TEXT("[BENCH] SHOT npc=%s weapon=%s target=%s ray=%s onTarget=%d dist=%.0f crouched=%d spread=%.1f supp=%d suppfire=%d cover=%s"),
+			TEXT("[BENCH] SHOT npc=%s weapon=%s target=%s ray=%s onTarget=%d dist=%.0f crouched=%d spread=%.1f supp=%d suppfire=%d cover=%s meantToMiss=%d stress=%.2f"),
 			*GetName(), *GetNameSafe(Weapon ? Weapon->GetClass() : nullptr), *GetNameSafe(Target),
 			*NPCBench::ReadableName(RayHit), bOnTarget ? 1 : 0,
 			Target ? FVector::Dist(GetActorLocation(), Target->GetActorLocation()) : -1.0f,
@@ -8163,7 +8664,9 @@ void AShooterNPC::OnWeaponShotFired()
 			AccuracyComponent ? AccuracyComponent->LastCalculatedSpread : -1.0f,
 			AccuracyComponent && AccuracyComponent->IsSuppressed() ? 1 : 0,
 			AccuracyComponent && AccuracyComponent->IsFiringSuppressive() ? 1 : 0,
-			NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)));
+			NPCBench::CoverPhaseName(static_cast<uint8>(TurretCoverPhase)),
+			IsCurrentShotDeliberateMiss() ? 1 : 0,
+			AccuracyComponent ? AccuracyComponent->GetStress() : 0.0f);
 
 		if (Record)
 		{
@@ -8267,6 +8770,19 @@ bool AShooterNPC::TryBeginReload(bool bTactical)
 		return false;
 	}
 
+	// [author, 2026-10-14] Dry in a close fight: the fork. Going in and striking can pay better than
+	// backing off to reload. @see UNPCMeleeStrikeComponent::WantsToStrike
+	if (!bTactical && bDumpMagazine && MeleeStrike && !MeleeStrike->IsBusy() && !MeleeStrike->JustChoseTheGun()
+		&& MeleeStrike->WantsToStrike(CurrentAimTarget.Get()))
+	{
+		Weapon->StopFiring();
+		CurrentBurstShots = 0;
+		ReleaseAttackPermission();
+		StopPermissionRetryTimer();
+		MeleeStrike->Begin(CurrentAimTarget.Get());
+		return true;
+	}
+
 	bIsReloadingWeapon = true;
 
 	// Out of the fight for the duration: trigger up, and the attack slot goes back to the
@@ -8300,6 +8816,12 @@ void AShooterNPC::BeginReload()
 
 	const float ReloadTime = Weapon->GetReloadTime();
 
+	// Said out loud: anybody near enough hears the gun go quiet for a while.
+	if (ReloadCallSound)
+	{
+		Multicast_ReloadCall();
+	}
+
 	if (NPCReloadMontage && !Weapon->GetThirdPersonReloadMontage(EWeaponReloadStage::Primary))
 	{
 		// One rate for both ends, so the animation and the magazine finish together whatever the
@@ -8315,9 +8837,35 @@ void AShooterNPC::BeginReload()
 	}
 
 	// The weapon fills its own magazine on its own timer; this one only decides when the NPC is
-	// allowed to shoot again, so it is deliberately not shorter than the weapon's.
+	// allowed to shoot again, so it is deliberately not shorter than the weapon's. Stress keeps the
+	// trigger up longer: fumbling the magazine. @see UAIAccuracyComponent::GetReloadTimeMultiplier
+	const float StressedReload = ReloadTime * (AccuracyComponent ? AccuracyComponent->GetReloadTimeMultiplier() : 1.0f);
 	GetWorldTimerManager().SetTimer(ReloadResumeTimer, this, &AShooterNPC::FinishReloadAndResume,
-		FMath::Max(ReloadTime, 0.05f), false);
+		FMath::Max(StressedReload, 0.05f), false);
+}
+
+void AShooterNPC::Multicast_ReloadCall_Implementation()
+{
+	if (ReloadCallSound && !bIsDead)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, ReloadCallSound, GetActorLocation());
+	}
+}
+
+void AShooterNPC::BeginFlinch(float Seconds)
+{
+	UWorld* const World = GetWorld();
+	if (bIsDead || !World || Seconds <= 0.0f)
+	{
+		return;
+	}
+	FlinchUntil = FMath::Max(FlinchUntil, World->GetTimeSeconds() + Seconds);
+	StopShooting();
+	if (AccuracyComponent)
+	{
+		AccuracyComponent->RestartReaction();
+	}
+	SayTactic(TEXT("FLINCH: a friend fell next to it"));
 }
 
 void AShooterNPC::Multicast_PlayReloadMontage_Implementation(float PlayRate)

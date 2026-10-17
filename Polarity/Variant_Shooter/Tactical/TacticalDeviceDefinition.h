@@ -23,6 +23,24 @@ class UStaticMesh;
 class UTacticalDeviceComponent;
 class UTacticalDeviceHandler;
 
+/** [author, 2026-10-15] The flashlight and the laser have three: off, at work, and the active use
+ *  (the strobe, the eye burner). One key cycles them. Devices without modes run while aiming. */
+UENUM(BlueprintType)
+enum class ETacticalDeviceMode : uint8
+{
+	Off,
+	Normal,
+	Active
+};
+
+/** Which of the two light devices this is. */
+UENUM(BlueprintType)
+enum class ETacticalLightKind : uint8
+{
+	Flashlight,
+	Laser
+};
+
 /**
  * Base: the battery and the parts every device shares (sounds, a looping effect on the rail, the
  * overlay put on whatever it affects). Abstract: the subclass is what the device does.
@@ -36,6 +54,9 @@ public:
 
 	/** Build the runtime object that runs this device for one owner. */
 	virtual UTacticalDeviceHandler* CreateHandler(UTacticalDeviceComponent* Owner) const PURE_VIRTUAL(UTacticalDeviceDefinition::CreateHandler, return nullptr;);
+
+	/** Switched by its own key through Off, Normal, Active instead of running while aiming. */
+	virtual bool UsesModes() const { return false; }
 
 	// ==================== Battery ====================
 	//
@@ -174,6 +195,82 @@ public:
 	UTacticalDevice_Light();
 
 	virtual UTacticalDeviceHandler* CreateHandler(UTacticalDeviceComponent* Owner) const override;
+	virtual bool UsesModes() const override { return true; }
+
+	/** Flashlight or laser: the same light, two ways of using it (see the modes below). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Light")
+	ETacticalLightKind Kind = ETacticalLightKind::Flashlight;
+
+	// ==================== Modes [author, 2026-10-15] ====================
+	//
+	// Normal: a light to work by. The face it lands on is put off a little (the reaction starts over,
+	// the aim is a little worse, a little stress), nobody is driven off. The soldiers who SEE the
+	// light (the lamp itself, or the laser's beam) are alerted and turn to it; at night from much
+	// further than by day (UWorldDarknessSubsystem).
+	//
+	// Active, flashlight: the strobe. Seen from further still, it piles on stress, and whoever it
+	// holds in the face may not come closer: it backs off or goes to a corner away from the light,
+	// firing at it badly (AShooterNPC::ApplyDazzle with the drive-off, ApplyKeepAway).
+	// Active, laser: the eye burner. Up close, on the head bone exactly, it is the strobe. At any
+	// range the beam shows everybody who sees it where the shooter is, and the soldier it is held on
+	// (or by) is pinned: it stays down behind its cover and wants another corner
+	// (UAIAccuracyComponent::NotePainted, FSTTask_ShooterPeek).
+
+	/** Seconds a full charge lasts in Normal. 0: Normal costs nothing (and the charge refills). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes", meta = (ClampMin = "0.0", Units = "s"))
+	float NormalDuration = 0.0f;
+
+	/** Normal: a face held in the light this long is put off (s). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Normal", meta = (ClampMin = "0.0", Units = "s"))
+	float NormalGlareSeconds = 1.5f;
+
+	/** Normal: the put-off soldier's aim is this much worse while it lasts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Normal", meta = (ClampMin = "1.0"))
+	float NormalSpreadMultiplier = 1.5f;
+
+	/** Normal: stress per second of light in the face. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Normal", meta = (ClampMin = "0.0"))
+	float NormalStressPerSecond = 0.1f;
+
+	/** How far a soldier sees the light by day (cm)... */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Seen", meta = (ClampMin = "0.0", Units = "cm"))
+	float SeenRangeDay = 600.0f;
+
+	/** ...and at night (cm). Lerped by the darkness. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Seen", meta = (ClampMin = "0.0", Units = "cm"))
+	float SeenRangeNight = 4000.0f;
+
+	/** Active: the seen range times this. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Seen", meta = (ClampMin = "1.0"))
+	float ActiveSeenScale = 2.0f;
+
+	/** Active: stress per second of light in the face (the strobe, the burner up close). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Active", meta = (ClampMin = "0.0"))
+	float ActiveStressPerSecond = 0.8f;
+
+	/** Active: a soldier held in it may not come closer than it was, for this long after (s). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Active", meta = (ClampMin = "0.0", Units = "s"))
+	float ActiveKeepAwaySeconds = 2.0f;
+
+	/** Active flashlight: flashes per second. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Active", meta = (ClampMin = "1.0"))
+	float StrobeRate = 12.0f;
+
+	/** Active laser: closer than this, the head bone exactly, it burns like the strobe (cm). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Laser", meta = (ClampMin = "0.0", Units = "cm"))
+	float BurnRange = 1000.0f;
+
+	/** Active laser: the head bone it has to be on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Laser")
+	FName BurnBone = FName("head");
+
+	/** Active laser: the soldier the dot is within this of is pinned (cm). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Laser", meta = (ClampMin = "0.0", Units = "cm"))
+	float PaintRadius = 150.0f;
+
+	/** Active laser: stress per second for the pinned one. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Modes|Laser", meta = (ClampMin = "0.0"))
+	float PaintStressPerSecond = 0.5f;
 
 	/** Reach, cm. Flashlight about 15 m, laser further. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Light", meta = (ClampMin = "100.0", Units = "cm"))

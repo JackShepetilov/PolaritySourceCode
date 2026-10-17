@@ -7,12 +7,15 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Engine/NetSerialization.h"
+#include "Variant_Shooter/Tactical/TacticalDeviceDefinition.h"
 #include "TacticalDeviceComponent.generated.h"
 
 class AShooterCharacter;
 class AShooterWeapon;
 class UTacticalDeviceDefinition;
 class UTacticalDeviceHandler;
+class UInputAction;
+class UEnhancedInputComponent;
 struct FDamageEvent;
 
 /**
@@ -35,6 +38,7 @@ UCLASS(ClassGroup = (Polarity), meta = (BlueprintSpawnableComponent))
 class POLARITY_API UTacticalDeviceComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 
@@ -58,6 +62,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Tactical")
 	bool IsChargeReady() const;
 
+	// ==================== Modes [author, 2026-10-15] ====================
+
+	/** Cycles Off -> Normal -> Active -> Off on a device that has modes (the flashlight, the laser).
+	 *  Active is skipped while the charge is not ready. Set on the Blueprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tactical|Input")
+	TObjectPtr<UInputAction> ModeCycleAction;
+
+	/** Called from the character's input setup. */
+	void BindInput(UEnhancedInputComponent* Input);
+
+	/** The mode of a device that has modes (Off for one that does not). */
+	UFUNCTION(BlueprintPure, Category = "Tactical")
+	ETacticalDeviceMode GetMode() const { return Mode; }
+
 	// ==================== For the handlers ====================
 
 	AShooterCharacter* GetCharacter() const;
@@ -69,9 +87,27 @@ public:
 	 *  server and the owner, close enough on the others. */
 	void GetAim(FVector& OutOrigin, FVector& OutDirection) const;
 
+	/** Where the device's light goes [author, 2026-10-15]: the screen centre while the gun is steady,
+	 *  down the barrel in a sprint, a slide, a jump, and as a string of fire goes on, blended by
+	 *  AShooterWeapon::GetDeviceBarrelWeight. Worked out on the owner's machine, which is the only one
+	 *  that sees its first person gun move; the server and the others get it as an offset from the aim
+	 *  (DeviceAimOffset), so the light lands for everybody where it is drawn. */
+	void GetDeviceAim(FVector& OutOrigin, FVector& OutDirection) const;
+
+	/** Where the rounds go before their spread [author, 2026-10-15]: the screen centre, or down the
+	 *  barrel in a sprint, a jump, a slide, a wall run. Read by AShooterCharacter::GetWeaponTargetLocation.
+	 *  The laser's beam is this plus the next round's spread (AShooterWeapon::GetNextShotOffset). */
+	void GetShotAim(FVector& OutOrigin, FVector& OutDirection) const;
+
 	/** Where the device's own effects start: the rail mesh (first person for the owner, third person
 	 *  for everybody else), else the muzzle, else the eyes. */
 	FVector GetVisualOrigin() const;
+
+	/** GetVisualOrigin as the owner SEES it. The first person gun is drawn with a field of view of its
+	 *  own (Docs/Gotchas/Camera_FirstPerson.md): its sideways and up offsets from the camera are scaled
+	 *  in the picture, so its rail is not where its bones are. A beam, which is world geometry, has to
+	 *  start at the point that lands on the same pixel. Elsewhere the same as GetVisualOrigin. */
+	FVector GetApparentVisualOrigin() const;
 
 	/** Server: take charge off (the shield pays with it). Switches the device off at zero. */
 	void SpendCharge(float Fraction);
@@ -100,6 +136,41 @@ private:
 
 	UPROPERTY(Replicated)
 	float Charge = 1.0f;
+
+	/** The device's direction in the aim's own frame (X ahead). Sent up by the owner, a few times a
+	 *  second; everybody else reads it. @see GetDeviceAim */
+	UPROPERTY(Replicated)
+	FVector_NetQuantizeNormal DeviceAimOffset = FVector(1.0f, 0.0f, 0.0f);
+
+	UFUNCTION(Server, Unreliable)
+	void Server_SetDeviceAimOffset(FVector_NetQuantizeNormal Offset);
+
+	/** Owner: where the device points right now (world), the smoothed blend, and "straight ahead" in
+	 *  the gun's own frame, learned while the gun is steady. */
+	FVector OwnerDeviceDirection = FVector::ForwardVector;
+	FVector OwnerShotDirection = FVector::ForwardVector;
+	bool bOwnerAimValid = false;
+
+	/** The beam's direction in the aim's own frame, eased toward where it should be. */
+	FVector BeamInAimFrame = FVector(1.0f, 0.0f, 0.0f);
+	float OwnerBarrelWeight = 0.0f;
+	FVector BarrelInGunFrame = FVector::ZeroVector;
+	float DeviceAimSendClock = 0.0f;
+
+	/** Owner: work the blend out for this frame. */
+	void UpdateOwnerDeviceAim(float DeltaTime);
+
+	/** @see GetMode. Everybody gets it: the strobe and the burner are drawn for all. */
+	UPROPERTY(Replicated)
+	ETacticalDeviceMode Mode = ETacticalDeviceMode::Off;
+
+	void OnModeCyclePressed();
+
+	UFUNCTION(Server, Reliable)
+	void Server_CycleMode();
+
+	/** The next mode from Current, skipping Active without the charge for it. */
+	ETacticalDeviceMode NextMode(ETacticalDeviceMode Current) const;
 
 	/** Seconds left before the charge starts coming back. Server. */
 	float RechargeWait = 0.0f;

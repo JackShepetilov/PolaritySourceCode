@@ -3,6 +3,7 @@
 #include "Variant_Shooter/Pickups/GrenadePickup.h"
 
 #include "Variant_Shooter/Grenades/GrenadeDefinition.h"
+#include "Components/StaticMeshComponent.h"
 
 AGrenadePickup::AGrenadePickup()
 {
@@ -16,6 +17,17 @@ void AGrenadePickup::BeginPlay()
 	if (HasAuthority())
 	{
 		RebuildItem();
+	}
+
+	// A pile with no mesh of its own (dropped to make room for another kind) shows the type's. Before
+	// Super, which turns the physics on: a body needs the mesh to simulate. On a client Item has
+	// arrived with the actor, before BeginPlay.
+	const UGrenadeDefinition* const Def = Type ? Type.Get() : Cast<UGrenadeDefinition>(Item.Payload);
+	if (Mesh && !Mesh->GetStaticMesh() && Def && Def->PickupMesh)
+	{
+		Mesh->SetStaticMesh(Def->PickupMesh);
+		Mesh->SetRelativeScale3D(Def->PickupMeshScale);
+		Mesh->SetVisibility(true);
 	}
 
 	Super::BeginPlay();

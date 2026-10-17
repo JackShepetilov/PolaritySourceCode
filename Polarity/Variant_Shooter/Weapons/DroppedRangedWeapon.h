@@ -26,7 +26,67 @@ class USoundBase;
 class UAnimMontage;
 class UPrimitiveComponent;
 class UCurveFloat;
+class UCurveVector;
 struct FHitResult;
+
+/**
+ * The spear throw's toss, replicated so every machine flies its own copy against the thrower's view:
+ * the gun leaves the hand, rises, tumbles and comes down in front of the camera for the slap
+ * [author, 2026-10-16]. Offsets are in the thrower's view space (X forward, Y right, Z up).
+ */
+USTRUCT()
+struct FSpearTossState
+{
+	GENERATED_BODY()
+
+	/** Null: no toss. */
+	UPROPERTY()
+	TObjectPtr<AShooterCharacter> Thrower;
+
+	/** Server world time the toss began (AGameStateBase::GetServerWorldTimeSeconds). */
+	UPROPERTY()
+	double StartTime = 0.0;
+
+	/** Seconds from the hand to the slap. */
+	UPROPERTY()
+	float Duration = 0.5f;
+
+	UPROPERTY()
+	FVector StartOffset = FVector::ZeroVector;
+
+	UPROPERTY()
+	FQuat StartRotation = FQuat::Identity;
+
+	/** Where the slap meets it. */
+	UPROPERTY()
+	FVector EndOffset = FVector(55.0f, 0.0f, -5.0f);
+
+	/** How far above the straight line it rises. */
+	UPROPERTY()
+	float Apex = 25.0f;
+
+	/** Whole turns it tumbles on the way, about SpinAxis. */
+	UPROPERTY()
+	float Turns = 1.0f;
+
+	/** The axis of that tumble in view space: (0,1,0) end over end, (1,0,0) a barrel roll, (0,0,1) a
+	 *  flat spin. */
+	UPROPERTY()
+	FVector SpinAxis = FVector(0.0f, 1.0f, 0.0f);
+
+	/** How the tumble slows towards the slap: 1 even, higher slows sooner. */
+	UPROPERTY()
+	float SpinEase = 2.0f;
+
+	/** Optional: the turn drawn by hand over the toss, 0..1 on the time axis, X roll / Y pitch / Z yaw in
+	 *  degrees about the view's axes. Replaces Turns/SpinAxis/SpinEase. */
+	UPROPERTY()
+	TObjectPtr<UCurveVector> RotationCurve;
+
+	/** Optional: extra offset in view space over the toss, 0..1 on the time axis, in cm, added to the arc. */
+	UPROPERTY()
+	TObjectPtr<UCurveVector> PathCurve;
+};
 
 UCLASS(Blueprintable)
 class POLARITY_API ADroppedRangedWeapon : public AActor, public IGrappleFetchable
@@ -258,6 +318,30 @@ public:
 	 *  rather than ammo that silently vanished. */
 	void SpawnLeftoverDrop(AShooterCharacter* Player, int32 Rounds);
 
+	// ==================== Spear throw (weapon mastery) ====================
+	// AShooterCharacter::TryStartSpearThrow. The gun is tossed up in front of the thrower's camera,
+	// slapped forward, flies point first spinning about its flight, and stuns what it hits like a
+	// flashbang, with no damage [author, 2026-10-16]. Then it is an ordinary drop.
+
+	/** Server: start the toss. Toss carries the shape (Duration, the hand's StartOffset/StartRotation in
+	 *  view space as his own machine measured them, the end point, the tumble); Thrower and StartTime are
+	 *  filled in here. Every machine flies it from here. */
+	void BeginSpearToss(AShooterCharacter* Thrower, const FSpearTossState& Toss);
+
+	/** The thrower's view on this machine: the camera on his own, the replicated aim elsewhere. */
+	static void GetThrowerView(const AShooterCharacter* Thrower, FVector& OutLocation, FQuat& OutRotation);
+
+	/** Server: the slap. Physics back on, point first along Direction at Speed, spinning about the
+	 *  flight at SpinDegPerSec; the first enemy it meets is stunned for StunSeconds. With a Target the
+	 *  flight turns towards it at up to TurnRateDegPerSec until it hits, passes it or the target dies. */
+	void LaunchSpear(const FVector& Direction, float Speed, float SpinDegPerSec, float StunSeconds,
+		AActor* Target = nullptr, float TurnRateDegPerSec = 0.0f);
+
+	/** Where a thrown spear aims on Target: the middle of the chest for a character. */
+	static FVector GetSpearAimPoint(const AActor* Target);
+
+	bool IsSpearTossing() const { return SpearToss.Thrower != nullptr; }
+
 protected:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
@@ -335,4 +419,31 @@ private:
 
 	/** Called when pull interpolation completes: hide self, grant weapon */
 	void CompletePull();
+
+	// ==================== Spear throw ====================
+
+	UPROPERTY(ReplicatedUsing = OnRep_SpearToss)
+	FSpearTossState SpearToss;
+
+	UFUNCTION()
+	void OnRep_SpearToss();
+
+	/** Every machine: fly the toss against the thrower's view. */
+	void UpdateSpearToss();
+
+	/** Server, in flight: spin about the flight; the first hit stuns and ends it. */
+	bool bSpearFlying = false;
+	FTimerHandle SpearPawnBlockTimer;
+
+	/** The enemy the slap locked, and how fast the flight may turn to him. Server. */
+	TWeakObjectPtr<AActor> SpearTarget;
+	float SpearTurnRate = 0.0f;
+
+	/** Server, in flight: turn the velocity towards SpearTarget, keeping the speed. */
+	void SteerSpear(float DeltaTime);
+	float SpearSpinSpeed = 720.0f;
+	float SpearStunSeconds = 2.5f;
+
+	UPROPERTY()
+	TWeakObjectPtr<AShooterCharacter> SpearThrower;
 };

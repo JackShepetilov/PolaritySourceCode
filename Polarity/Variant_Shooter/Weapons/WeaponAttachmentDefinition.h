@@ -205,6 +205,58 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Modifiers", meta = (EditCondition = "bOverrideADSZoom", ClampMin = "1.0", ClampMax = "20.0"))
 	float ADSZoomOverride = 2.0f;
 
+	// ---------- Handling penalties, available on EVERY attachment type ----------
+	// Multipliers on durations, not speeds: 1.2 takes 20% longer. Installed attachments multiply
+	// together; stock/upgrade speed bonuses still divide the resulting time. 1 preserves the gun.
+
+	/** Multiplies ADSBlendInTime. 1.2 = entering ADS takes 20% longer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|ADS", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ADSBlendInTimeMultiplier = 1.0f;
+
+	/** Multiplies ADSBlendOutTime. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|ADS", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ADSBlendOutTimeMultiplier = 1.0f;
+
+	/** Multiplies draw duration, including the authored montage when DrawDuration is 0. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Switch", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float DrawDurationMultiplier = 1.0f;
+
+	/** Multiplies holster duration, including the authored montage when HolsterDuration is 0. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Switch", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float HolsterDurationMultiplier = 1.0f;
+
+	/** Multiplies the delay between ending a sprint and firing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Sprint", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float SprintToFireTimeMultiplier = 1.0f;
+
+	/** Multiplies primary (empty-magazine) reload time, with timers, animation and audio together. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Reload", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ReloadDurationMultiplier = 1.0f;
+
+	/** Multiplies secondary (rounds remaining) reload time. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Reload", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float SecondaryReloadTimeMultiplier = 1.0f;
+
+	/** Multiplies the opening stage of a per-round reload. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Reload|Per Round", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ReloadStartDurationMultiplier = 1.0f;
+
+	/** Multiplies the insertion time of ONE round. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Reload|Per Round", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ReloadLoopDurationMultiplier = 1.0f;
+
+	/** Multiplies the closing stage of a per-round reload. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|Reload|Per Round", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ReloadEndDurationMultiplier = 1.0f;
+
+	/** Multiplies how fast the arms tire in the sight. 1.2 = tired 20% sooner. @see AShooterWeapon::ADSFatigueDelay */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|ADS Fatigue", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ADSFatigueRateMultiplier = 1.0f;
+
+	/** Multiplies how far a tired sight wanders. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Handling|ADS Fatigue", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float ADSFatigueSwayMultiplier = 1.0f;
+
 	// ---------- Magazine, after the Apex extended energy mag ----------
 	//
 	// Apex levels are capacity only (reload speed moved to stocks in its season 10), and capacity is
@@ -252,6 +304,11 @@ public:
 	 *  suppressor: 0.2 turns 50 m into 10. 1 leaves the gun as loud as it is. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides, ClampMin = "0.0", ClampMax = "4.0"))
 	float ShotNoiseRangeMultiplier = 1.0f;
+
+	/** Selects this weapon's SuppressedFireSound and SuppressedMuzzleFlashFX. Each weapon owns its
+	 *  own suppressed effects; the attachment only enables them. AI hearing is configured above. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attachment|Muzzle", meta = (EditCondition = "Type == EWeaponAttachmentType::Muzzle", EditConditionHides))
+	bool bIsSuppressor = false;
 
 	/** Socket on THIS attachment's mesh where the muzzle flash and the tracer start (the end of the
 	 *  flash hider). None or missing = the first socket with "Muzzle" in its name, else the mesh's

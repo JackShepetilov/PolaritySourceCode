@@ -565,6 +565,10 @@ void AShooterPlayerController::BindToPossessedCharacter(APawn* InPawn)
 
 void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 {
+	if (!HasAuthority() || !GetWorld() || GetWorld()->bIsTearingDown)
+	{
+		return;
+	}
 	// Mech parts survive death (author 2026-09-30, Docs/Lane_Camps_Design_2026-09-30.md). The body and
 	// its bag die together, so the parts are read off the old bag here and put into the new one below.
 	TArray<FInventoryItem> KeptParts;
@@ -587,6 +591,13 @@ void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 	// find the player start
 	TArray<AActor*> ActorList;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APlayerStart::StaticClass(), ActorList);
+	TArray<AActor*> HubStarts;
+	for (AActor* Start : ActorList)
+	{
+		if (Start->ActorHasTag(TEXT("CombatBenchHubSpawn"))) HubStarts.Add(Start);
+	}
+	const bool bRespawnInHub = !HubStarts.IsEmpty();
+	if (bRespawnInHub) ActorList = MoveTemp(HubStarts);
 
 	if (ActorList.Num() > 0)
 	{
@@ -596,10 +607,22 @@ void AShooterPlayerController::OnPawnDestroyed(AActor* DestroyedActor)
 		// spawn a character at the player start
 		const FTransform SpawnTransform = RandomPlayerStart->GetActorTransform();
 
-		if (AShooterCharacter* RespawnedCharacter = GetWorld()->SpawnActor<AShooterCharacter>(CharacterClass, SpawnTransform))
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+		TSubclassOf<AShooterCharacter> RespawnClass = CharacterClass;
+		if (bRespawnInHub && Cast<AShooterCharacter>(DestroyedActor)) RespawnClass = DestroyedActor->GetClass();
+		if (AShooterCharacter* RespawnedCharacter = GetWorld()->SpawnActor<AShooterCharacter>(RespawnClass, SpawnTransform, SpawnParams))
 		{
 			// possess the character
 			Possess(RespawnedCharacter);
+			SetControlRotation(SpawnTransform.Rotator());
+			ClientSetRotation(SpawnTransform.Rotator(), true);
+			if (bRespawnInHub)
+			{
+				ClientSetViewTarget(RespawnedCharacter);
+				ClientSetCameraFade(false);
+			}
+			UE_LOG(LogTemp, Log, TEXT("[BENCH] respawn %s at %s (%s)"), *GetName(), *GetNameSafe(RandomPlayerStart), *RespawnedCharacter->GetActorLocation().ToString());
 
 			if (UInventoryComponent* const NewInventory = RespawnedCharacter->GetInventoryComponent())
 			{

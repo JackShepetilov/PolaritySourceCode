@@ -18,6 +18,7 @@
 
 class AShooterWeapon;
 class AInventoryPickup;
+class UGrenadeDefinition;
 
 /** What is in a cell. */
 UENUM(BlueprintType)
@@ -54,8 +55,9 @@ enum class EInventorySlotKind : uint8
 	 *  Added at the end: the numbers of the kinds before it are saved in assets. */
 	Medkit,
 
-	/** Grenades of one type (Payload: the UGrenadeDefinition). Stacks, per type. Thrown on its own key
-	 *  (UGrenadeComponent) [author, 2026-10-14]. Added at the end, for the same reason as Medkit. */
+	/** Grenades of one type (Payload: the UGrenadeDefinition). Thrown on its own key (UGrenadeComponent)
+	 *  [author, 2026-10-14]. Added at the end, for the same reason as Medkit. Since 2026-10-16 an item of
+	 *  this kind never lands in a cell: TryAdd routes it to the gadget section (FGadgetStack). */
 	Grenade
 };
 
@@ -192,4 +194,27 @@ struct FInventoryItem
 		return Kind == EInventorySlotKind::Currency || Kind == EInventorySlotKind::Ammo || Kind == EInventorySlotKind::Medkit
 			|| Kind == EInventorySlotKind::Grenade;
 	}
+};
+
+/**
+ * One kind of gadget the player carries: grenades and thrown drones (UGrenadeDefinition).
+ *
+ * Gadgets live in their own section of the inventory, not in the bag's cells [author, 2026-10-16]:
+ * so many kinds, so many of each, one total. See UInventoryComponent::GetGadgets and
+ * Docs/GameDesign_Tactical_To_PowerFantasy_2026-10-11.md section 11.
+ */
+USTRUCT(BlueprintType)
+struct FGadgetStack
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	TObjectPtr<UGrenadeDefinition> Type = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	int32 Count = 0;
+
+	/** What it came in as, so dropping the kind puts the same pickup back on the floor. */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
+	TSubclassOf<AInventoryPickup> PickupClass = nullptr;
 };

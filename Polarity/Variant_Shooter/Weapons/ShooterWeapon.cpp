@@ -38,6 +38,7 @@
 #endif
 #include "PolarityCharacter.h"
 #include "ApexMovementComponent.h"
+#include "MovementSettings.h"
 #include "Variant_Shooter/AI/NPCRiotShieldComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/GameplayStatics.h"
@@ -124,6 +125,7 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "Variant_Shooter/AI/SniperTurretNPC.h"
 #include "Variant_Shooter/AI/Boss/BossCharacter.h"
 #include "Variant_Shooter/ShooterCharacter.h"
+#include "Variant_Shooter/Tactical/TacticalDeviceComponent.h"
 #include "Variant_Shooter/HitMarkerComponent.h"
 #include "TutorialSubsystem.h"
 #include "Variant_Shooter/ShooterDummy.h"
@@ -136,6 +138,7 @@ static TAutoConsoleVariable<int32> CVarNoVFX(
 #include "VFX/VFXVariantSequenceSubsystem.h"
 #include "Variant_Shooter/Shield/HitZoneComponent.h"
 #include "Variant_Shooter/Shield/HelmetComponent.h"
+#include "Variant_Shooter/DamageTypes/DamageType_Ranged.h"
 
 namespace ZoneFeedback
 {
@@ -374,7 +377,7 @@ void AShooterWeapon::SetLoadedRoundVisible(bool bFirstPerson, bool bThirdPerson,
 	}
 }
 
-void AShooterWeapon::ScheduleLoadedRoundReveal(float ThirdPersonStretch)
+void AShooterWeapon::ScheduleLoadedRoundReveal(float FirstPersonStretch, float ThirdPersonStretch)
 {
 	if (LoadedRoundBoneName.IsNone() || !GetWorld())
 	{
@@ -383,10 +386,11 @@ void AShooterWeapon::ScheduleLoadedRoundReveal(float ThirdPersonStretch)
 
 	// A zero delay has to be done now: SetTimer drops a timer whose rate is not positive.
 	FTimerManager& Timers = GetWorldTimerManager();
-	if (LoadedRoundRevealTime > KINDA_SMALL_NUMBER)
+	const float FirstPersonDelay = LoadedRoundRevealTime * FMath::Max(FirstPersonStretch, 0.0f);
+	if (FirstPersonDelay > KINDA_SMALL_NUMBER)
 	{
 		Timers.SetTimer(LoadedRoundRevealTimer, FTimerDelegate::CreateUObject(this,
-			&AShooterWeapon::SetLoadedRoundVisible, true, false, true), LoadedRoundRevealTime, false);
+			&AShooterWeapon::SetLoadedRoundVisible, true, false, true), FirstPersonDelay, false);
 	}
 	else
 	{
@@ -650,6 +654,9 @@ void AShooterWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	// Owner only: the reserve is read by the reload and by the HUD, and both live on the machine of
 	// whoever is holding the gun. Nobody else has a reason to know it.
 	DOREPLIFETIME_CONDITION(AShooterWeapon, EnergyReserve, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AShooterWeapon, bRegeneratingReserve, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AShooterWeapon, bFiniteEnergyReserve, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AShooterWeapon, EnergyReserveMagazines, COND_OwnerOnly);
 }
 
 UWeaponAttachmentDefinition* AShooterWeapon::GetAttachmentOfType(EWeaponAttachmentType InType) const
@@ -980,8 +987,8 @@ void AShooterWeapon::PlayReloadAudioAtProgress(float Progress)
 	if (ReloadAudioComponent)
 	{
 		const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * FMath::Max(0.0f, Snd->GetDuration());
-		// Pitch is playback rate: the track keeps up with a stock's faster montage.
-		ReloadAudioComponent->SetPitchMultiplier(GetStockReloadSpeed());
+		// Pitch follows the same retimed FP timeline as the hands and weapon mechanics.
+		ReloadAudioComponent->SetPitchMultiplier(GetReloadStagePlayRate(GetCurrentReloadStage()));
 		ReloadAudioComponent->Play(StartTime);
 		// The resume path needs the audio's OWN clock, not a montage fraction: a cue's GetDuration
 		// may not match the audible content, and Play(StartTime) clamps into it invisibly.
@@ -1003,7 +1010,7 @@ void AShooterWeapon::RestartReloadAudioAtSeconds(float OffsetSeconds)
 	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Snd, GetRootComponent());
 	if (ReloadAudioComponent)
 	{
-		ReloadAudioComponent->SetPitchMultiplier(GetStockReloadSpeed());
+		ReloadAudioComponent->SetPitchMultiplier(GetReloadStagePlayRate(GetCurrentReloadStage()));
 		ReloadAudioComponent->Play(FMath::Max(0.0f, OffsetSeconds));
 		ReloadAudioWorldStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 		ReloadAudioStartOffset = FMath::Max(0.0f, OffsetSeconds);
@@ -1224,7 +1231,7 @@ void AShooterWeapon::DiscoverNotifiedReloadSound()
 	if (NotifiedReloadSound && GetWorld())
 	{
 		// The notify fires this many seconds after the montage starts, which is right about now.
-		NotifiedReloadSoundBeginWorldTime = GetWorld()->GetTimeSeconds() + TriggerTime / GetStockReloadSpeed();
+		NotifiedReloadSoundBeginWorldTime = GetWorld()->GetTimeSeconds() + TriggerTime / GetReloadStagePlayRate(ShellStage);
 		UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload audio comes from a montage notify (%s at %.2fs) - playback taken over"),
 			*GetName(), *GetNameSafe(NotifiedReloadSound), TriggerTime);
 	}
@@ -1293,11 +1300,11 @@ void AShooterWeapon::StopNotifiedReloadSoundInWorld()
 
 void AShooterWeapon::BeginReloadAudioPitch(EWeaponReloadStage Stage, float Duration)
 {
-	ReloadAudioPitch = GetStockReloadSpeed();
+	ReloadAudioPitch = GetReloadStagePlayRate(Stage);
 	ReloadPitchSounds.Reset();
 	ReloadAudioPitchUntil = -1.0f;
 
-	// No stock, nothing to retune: the sounds play exactly as they always have.
+	// An unmodified timeline needs no audio retuning.
 	if (FMath::IsNearlyEqual(ReloadAudioPitch, 1.0f) || !GetWorld())
 	{
 		return;
@@ -1467,6 +1474,9 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 		return;
 	}
 	const float StartTime = FMath::Clamp(Progress, 0.0f, 1.0f) * Animation->GetPlayLength();
+	const float Duration = GetReloadStageDuration(ShellStage);
+	const float PlayRate = Mesh == ThirdPersonMesh && Duration > KINDA_SMALL_NUMBER
+		? Animation->GetPlayLength() / Duration : GetReloadStagePlayRate(ShellStage);
 	{
 		if (UAnimMontage* Montage = Cast<UAnimMontage>(Animation))
 		{
@@ -1480,7 +1490,7 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 				BlendArgs.BlendTime = ReloadResumeBlendDuration;
 				BlendArgs.BlendOption = ReloadResumeBlendOption;
 				BlendArgs.CustomCurve = ReloadResumeBlendCurve;
-				Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, GetStockReloadSpeed(), EMontagePlayReturnType::MontageLength, StartTime, false);
+				Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, PlayRate, EMontagePlayReturnType::MontageLength, StartTime, false);
 			}
 		}
 		else
@@ -1497,7 +1507,7 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 			if (SingleNode)
 			{
 				SingleNode->SetPosition(StartTime, false);
-				SingleNode->SetPlayRate(GetStockReloadSpeed());
+				SingleNode->SetPlayRate(PlayRate);
 				SingleNode->SetPlaying(true);
 			}
 		}
@@ -1506,14 +1516,13 @@ void AShooterWeapon::ResumeWeaponReloadAnimation(USkeletalMeshComponent* Mesh, U
 
 void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 {
-	// Stage fallbacks stay within each perspective. The FP montage still owns gameplay timing.
-	// A stock speeds the whole stage up, gun parts and third person included.
-	const float ReloadSpeed = GetStockReloadSpeed();
+	// Every perspective uses the selected stage's resolved duration. FP weapon parts share the
+	// hands' timeline so their notifies and sounds stay at the same authored moments.
+	const float ReloadSpeed = GetReloadStagePlayRate(Stage);
+	const float Duration = GetReloadStageDuration(Stage);
 	UAnimationAsset* const WeaponAnimFP = GetReloadWeaponAnimation(Stage);
 	PlayWeaponMeshAnimation(FirstPersonMesh, WeaponAnimFP,
 		WeaponAnimFP ? WeaponAnimFP->GetPlayLength() / ReloadSpeed : 0.0f);
-	const UAnimMontage* FirstPersonReload = GetArmsMontageForStage(Stage);
-	const float Duration = (FirstPersonReload ? FirstPersonReload->GetPlayLength() : ReloadTime) / ReloadSpeed;
 	BeginReloadAudioPitch(Stage, Duration);
 
 	// The per round stages crossfade into each other; a magazine reload keeps its montage's own blend.
@@ -1548,7 +1557,8 @@ void AShooterWeapon::PlayReloadEffectsLocally(EWeaponReloadStage Stage)
 	{
 		const UAnimationAsset* const TimedTP = BodyMontageTP ? static_cast<const UAnimationAsset*>(BodyMontageTP) : WeaponAnimTP;
 		const float LengthTP = TimedTP ? TimedTP->GetPlayLength() : 0.0f;
-		ScheduleLoadedRoundReveal(LengthTP > KINDA_SMALL_NUMBER ? Duration / LengthTP : 1.0f);
+		ScheduleLoadedRoundReveal(1.0f / ReloadSpeed,
+			LengthTP > KINDA_SMALL_NUMBER ? Duration / LengthTP : 1.0f);
 	}
 
 	// One sound per reload, not one per shell: the loop stage runs once for every round going in,
@@ -1596,7 +1606,7 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 
 	if (ArmsMontage && WeaponOwner)
 	{
-		WeaponOwner->PlayReloadMontage(ArmsMontage, GetStockReloadSpeed());
+		WeaponOwner->PlayReloadMontage(ArmsMontage, GetReloadStagePlayRate(Stage));
 	}
 
 	// The gun's own moving parts, locally first so the reloading player waits for nothing, then to
@@ -1610,7 +1620,7 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 		// The host's own reload. A client's arrives in AShooterCharacter::Server_ReportWeaponReloaded
 		// and pauses there. The reload length is only an estimate on that side, which is fine: the
 		// draw at the end of the reload pauses the refill again anyway.
-		PauseEnergyRegen(GetActiveReloadTime());
+		PauseEnergyRegen(GetReloadStageDuration(Stage));
 	}
 	else if (AShooterCharacter* OwnerCharacter = Cast<AShooterCharacter>(PawnOwner))
 	{
@@ -1624,31 +1634,52 @@ void AShooterWeapon::PlayReloadStage(EWeaponReloadStage Stage)
 
 float AShooterWeapon::GetActiveReloadTime() const
 {
-	// Every answer below is the stock-free length; the stock divides it.
-	return GetBaseReloadTime() / GetStockReloadSpeed();
+	return GetReloadStageDuration(GetCurrentReloadStage());
 }
 
 float AShooterWeapon::GetBaseReloadTime() const
 {
-	// UsesSecondaryReload asks "is there a round in the chamber", and on a per round weapon the
-	// secondary slot holds the LOOP instead, so that question does not apply and its override must
-	// not be consulted either. What this function answers for such a weapon is the length of the
-	// opening stage, which is all that is scheduled when the reload starts.
-	const bool bSecondary = !bPerRoundReload && UsesSecondaryReload()
-		&& (SecondaryReloadMontage != nullptr || SecondaryReloadMontageTP != nullptr);
+	return GetReloadStageBaseTime(GetCurrentReloadStage());
+}
 
-	// An explicit number wins: some weapons want the magazine to land earlier than the animation
-	// ends, and that is a deliberate feel decision rather than a mistake.
-	const float Override = bSecondary ? SecondaryReloadTime : 0.0f;
+EWeaponReloadStage AShooterWeapon::GetInitialReloadStage() const
+{
+	if (bPerRoundReload)
+	{
+		return EWeaponReloadStage::ShellStart;
+	}
+	const bool bSecondary = UsesSecondaryReload()
+		&& (SecondaryReloadMontage != nullptr || SecondaryReloadMontageTP != nullptr || SecondaryReloadTime > 0.0f);
+	return bSecondary ? EWeaponReloadStage::Secondary : EWeaponReloadStage::Primary;
+}
+
+EWeaponReloadStage AShooterWeapon::GetCurrentReloadStage() const
+{
+	return (bIsReloading || bReloadResumePending) ? ShellStage : GetInitialReloadStage();
+}
+
+float AShooterWeapon::GetReloadStageDurationOverride(EWeaponReloadStage Stage) const
+{
+	switch (Stage)
+	{
+	case EWeaponReloadStage::Primary: return ReloadDuration;
+	case EWeaponReloadStage::Secondary: return SecondaryReloadTime;
+	case EWeaponReloadStage::ShellStart: return ReloadStartDuration;
+	case EWeaponReloadStage::ShellLoop: return ReloadLoopDuration;
+	case EWeaponReloadStage::ShellEnd: return ReloadEndDuration;
+	}
+	return 0.0f;
+}
+
+float AShooterWeapon::GetReloadStageBaseTime(EWeaponReloadStage Stage) const
+{
+	const float Override = GetReloadStageDurationOverride(Stage);
 	if (Override > 0.0f)
 	{
 		return Override;
 	}
 
-	// Otherwise measure the montage that will actually play. This is the point of the whole field:
-	// a duration typed by hand drifts away from the animation the first time an animator retimes it,
-	// and the weapon then fires out of a reload that is still running.
-	if (const UAnimMontage* Montage = GetActiveReloadMontage())
+	if (const UAnimMontage* Montage = GetArmsMontageForStage(Stage))
 	{
 		const float Length = Montage->GetPlayLength();
 		if (Length > 0.0f)
@@ -1657,7 +1688,34 @@ float AShooterWeapon::GetBaseReloadTime() const
 		}
 	}
 
-	return ReloadTime;
+	// No per-round opening/closing animation means no wait; a missing loop is advanced next tick.
+	return (Stage == EWeaponReloadStage::Primary || Stage == EWeaponReloadStage::Secondary)
+		? FMath::Max(ReloadTime, 0.01f) : 0.0f;
+}
+
+float AShooterWeapon::GetReloadStageDuration(EWeaponReloadStage Stage) const
+{
+	const float BaseTime = GetReloadStageBaseTime(Stage);
+	return BaseTime > 0.0f
+		? FMath::Max(0.01f, BaseTime * GetReloadStageHandlingMultiplier(Stage) / GetStockReloadSpeed()) : 0.0f;
+}
+
+float AShooterWeapon::GetReloadStagePlayRate(EWeaponReloadStage Stage) const
+{
+	const float Duration = GetReloadStageDuration(Stage);
+	const UAnimationAsset* Timeline = GetArmsMontageForStage(Stage);
+	if (!Timeline)
+	{
+		Timeline = GetReloadWeaponAnimation(Stage);
+	}
+	if (Timeline)
+	{
+		if (Duration > KINDA_SMALL_NUMBER && Timeline->GetPlayLength() > KINDA_SMALL_NUMBER)
+		{
+			return Timeline->GetPlayLength() / Duration;
+		}
+	}
+	return GetStockReloadSpeed() / GetReloadStageHandlingMultiplier(Stage);
 }
 
 void AShooterWeapon::Multicast_PlayFireEffects_Implementation(bool bLastRound)
@@ -1779,9 +1837,18 @@ float AShooterWeapon::GetShotHeadshotMultiplier() const
 	return HeadshotMultiplier;
 }
 
-float AShooterWeapon::GetShotHeadshotMultiplierAgainst(const AActor* Target) const
+float AShooterWeapon::GetShotHeadshotMultiplierAgainst(const AActor* /*Target*/) const
 {
-	return UHelmetComponent::Find(Target) ? 1.0f : GetShotHeadshotMultiplier();
+	// A helmet used to cancel the multiplier here. Author's call 2026-10-17: it does not, the head
+	// takes the multiplied hit and the helmet's marks count that same number.
+	return GetShotHeadshotMultiplier();
+}
+
+float AShooterWeapon::GetArmorDamageScale(const UClass* DamageTypeClass) const
+{
+	return bOverrideArmorPenetration
+		? FMath::Max(ArmorPenetration, 0.05f)
+		: UDamageType_Ranged::GetArmorDamageScale(DamageTypeClass);
 }
 
 bool AShooterWeapon::GetShotIonization(float& OutChargePerHit) const
@@ -3685,30 +3752,6 @@ void AShooterWeapon::StartFiring()
 	// raise the firing flag
 	bIsFiring = true;
 
-	// ==================== Sprint-out gate ====================
-	// Coming out of a sprint the weapon is still being raised, so the shot waits for the raise to
-	// finish instead of going off from the sprint pose. It is deferred rather than dropped: hold
-	// the trigger through the raise and it fires the moment the gate opens, release and StopFiring
-	// clears the timer. Deliberately measured from when sprinting *ended*, which the movement
-	// component stamps, and not from this call: the two differ when the player was already out of
-	// the sprint before pulling the trigger.
-	if (SprintToFireTime > 0.0f)
-	{
-		if (const APolarityCharacter* PolarityOwner = Cast<APolarityCharacter>(PawnOwner))
-		{
-			if (const UApexMovementComponent* Apex = PolarityOwner->GetApexMovement())
-			{
-				const float GateOpensAt = Apex->GetSprintEndTime() + SprintToFireTime;
-				const float Remaining = GateOpensAt - GetWorld()->GetTimeSeconds();
-				if (Remaining > 0.0f)
-				{
-					GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, Remaining, false);
-					return;
-				}
-			}
-		}
-	}
-
 	// check how much time has passed since we last shot
 	// this may be under the refire rate if the weapon shoots slow enough and the player is spamming the trigger
 	const float TimeSinceLastShot = GetWorld()->GetTimeSeconds() - TimeOfLastShot;
@@ -3782,6 +3825,37 @@ void AShooterWeapon::Fire()
 	{
 		UE_LOG(LogTemp, Verbose, TEXT("[Weapon:%s]   Fire() ABORTED: bIsFiring is false!"), *GetName());
 		return;
+	}
+
+	// Input can request a shot before movement has folded sprint suppression and stamped its end.
+	// Guard the actual shot, including timer/reload continuations, and recheck when it wakes up.
+	// While sprint is still active the old SprintEndTime must never allow the first shot through.
+	const float BaseSprintOutTime = GetSprintToFireTime();
+	if (BaseSprintOutTime > 0.0f)
+	{
+		if (const APolarityCharacter* PolarityOwner = Cast<APolarityCharacter>(PawnOwner))
+		{
+			if (UApexMovementComponent* Apex = PolarityOwner->GetApexMovement())
+			{
+				// Out of a tactical sprint the gun comes up slower [author, 2026-10-16].
+				const UMovementSettings* const MoveSettings = Apex->MovementSettings;
+				const bool bTactical = Apex->IsTacticalSprinting() || Apex->WasLastSprintTactical();
+				const float SprintOutTime = BaseSprintOutTime
+					* (bTactical && MoveSettings ? MoveSettings->TacticalSprintToFireMultiplier : 1.0f);
+				const bool bStillSprinting = Apex->IsSprinting()
+					|| Apex->CurrentMovementState == EPolarityMovementState::Sprinting;
+				const float Remaining = bStillSprinting ? SprintOutTime
+					: Apex->GetSprintEndTime() + SprintOutTime - GetWorld()->GetTimeSeconds();
+				if (Remaining > 0.0f)
+				{
+					Apex->SuppressSprint();
+					GetWorld()->GetTimerManager().SetTimer(RefireTimer, this, &AShooterWeapon::Fire, Remaining, false);
+					UE_LOG(LogTemp, Verbose, TEXT("[WEAPON_HANDLING] %s: sprint-out shot deferred %.3fs, sprinting=%d"),
+						*GetName(), Remaining, bStillSprinting);
+					return;
+				}
+			}
+		}
 	}
 
 	// A weapon with a real magazine cannot fire while it is being filled, and an empty one starts
@@ -3935,7 +4009,13 @@ void AShooterWeapon::Fire()
 	// One trigger pull opens the spread once. Deliberately here and not in the Fire* functions: a
 	// shotgun puts several pellets in the air per pull, and charging them each with a full bloom
 	// would make it the widest weapon in the game after two shots.
+	// Where this round went, for the laser to move on from: the centre for a precise first one.
+	PrevShotOffset = IsLaserFirstShot() ? FVector2D::ZeroVector : NextShotOffset;
+
 	AddShotSpread();
+
+	// The next round's place in the cone, picked now, so the laser can show it before it is fired.
+	RollNextShotOffset();
 
 	// Spent by ConsumeRoundAfterShot; cleared here too in case this weapon's fire path never called it.
 	bShotFromReserve = false;
@@ -4127,6 +4207,68 @@ void AShooterWeapon::FireProjectile(const FVector& TargetLocation, float ChargeM
 	}
 
 	ConsumeRoundAfterShot();
+}
+
+float AShooterWeapon::GetDeviceBarrelWeight() const
+{
+	// By what the body is doing, read straight off the movement: the spread multipliers of a gun do
+	// not have to rank a sprint above a walk (the Spear's did not, log of 2026-10-15). Firing does not
+	// swing the line: the predicted spread (GetNextShotOffset) already shows a string going wide.
+	const AShooterCharacter* const ShooterOwner = Cast<AShooterCharacter>(PawnOwner);
+	const UApexMovementComponent* const Apex = ShooterOwner ? ShooterOwner->GetApexMovement() : nullptr;
+	if (!Apex)
+	{
+		return 0.0f;
+	}
+	const bool bSwinging = Apex->IsFalling() || Apex->IsSprinting() || Apex->IsSliding() || Apex->IsWallRunning();
+	return bSwinging ? 1.0f - FMath::Clamp(ShooterOwner->GetADSAlpha(), 0.0f, 1.0f) : 0.0f;
+}
+
+void AShooterWeapon::RollNextShotOffset()
+{
+	// Even by area over the disc: the root of a uniform number for the radius.
+	const float Radius = FMath::Sqrt(FMath::FRand());
+	const float Angle = FMath::FRand() * 2.0f * PI;
+	NextShotOffset = FVector2D(Radius * FMath::Cos(Angle), Radius * FMath::Sin(Angle));
+}
+
+FVector AShooterWeapon::ApplyShotOffset(const FVector& Dir, float ConeDegrees, const FVector2D& Offset)
+{
+	if (ConeDegrees <= 0.0f || Offset.IsNearlyZero())
+	{
+		return Dir;
+	}
+	const FRotationMatrix Basis(Dir.Rotation());
+	const float Tangent = FMath::Tan(FMath::DegreesToRadians(ConeDegrees));
+	return (Dir + (Basis.GetUnitAxis(EAxis::Y) * Offset.X + Basis.GetUnitAxis(EAxis::Z) * Offset.Y) * Tangent).GetSafeNormal();
+}
+
+FVector2D AShooterWeapon::GetShownShotOffset() const
+{
+	const UWorld* const World = GetWorld();
+	const float Interval = FMath::Max(GetCurrentRefireRate(), 0.01f);
+	const float Alpha = World ? FMath::Clamp((World->GetTimeSeconds() - TimeOfLastShot) / Interval, 0.0f, 1.0f) : 1.0f;
+	return FMath::Lerp(PrevShotOffset, NextShotOffset, Alpha * Alpha * (3.0f - 2.0f * Alpha));
+}
+
+bool AShooterWeapon::IsLaserFirstShot() const
+{
+	const AShooterCharacter* const ShooterOwner = Cast<AShooterCharacter>(PawnOwner);
+	const UTacticalDeviceComponent* const Tactical = ShooterOwner ? ShooterOwner->GetTacticalDeviceComponent() : nullptr;
+	const UTacticalDevice_Light* const Light = Tactical ? Cast<UTacticalDevice_Light>(Tactical->GetDevice()) : nullptr;
+	if (!Light || Light->Kind != ETacticalLightKind::Laser || Tactical->GetMode() == ETacticalDeviceMode::Off
+		|| Tactical->GetHeldWeapon() != this)
+	{
+		return false;
+	}
+
+	// The feet planted: standing, walking, crouched. Not in the air, not sprinting, not sliding.
+	const UApexMovementComponent* const Apex = ShooterOwner->GetApexMovement();
+	if (!Apex || Apex->IsFalling() || Apex->IsSprinting() || Apex->IsSliding())
+	{
+		return false;
+	}
+	return CurrentBloomDegrees <= SpreadConfig.PerShotDegrees * SpreadConfig.LaserFirstShotBloomShare;
 }
 
 FVector AShooterWeapon::GetMuzzleWorldLocation() const
@@ -4429,7 +4571,10 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 	//
 	// The straight line is the PLAYER's answer and the fallback. An AI firing a projectile that
 	// falls gets the ballistic one instead, below.
-	const float ConeDegrees = GetAimConeDegrees();
+	// A round its shooter meant to miss is already placed off the body: a cone on top can bring it back in.
+	const bool bMeantToMiss = WeaponOwner && WeaponOwner->IsCurrentShotPlaced();
+	// The first round of a string with a laser on goes where the laser is. @see IsLaserFirstShot
+	const float ConeDegrees = (bMeantToMiss || IsLaserFirstShot()) ? 0.0f : GetAimConeDegrees();
 
 	// Ballistic shots scatter their TARGET, everything else scatters its DIRECTION, and the two are
 	// not interchangeable once gravity is involved.
@@ -4460,7 +4605,16 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 			const float Reach = FVector::Dist(SpawnLoc, TargetLocation);
 			const float Radius = Reach * FMath::Tan(FMath::DegreesToRadians(ConeDegrees));
 
-			ScatteredTarget += FMath::VRand() * FMath::FRand() * Radius;
+			// A player's shot takes the offset picked in advance, the one the laser shows.
+			if (PawnOwner && PawnOwner->IsPlayerControlled())
+			{
+				const FRotationMatrix Basis((TargetLocation - SpawnLoc).Rotation());
+				ScatteredTarget += (Basis.GetUnitAxis(EAxis::Y) * NextShotOffset.X + Basis.GetUnitAxis(EAxis::Z) * NextShotOffset.Y) * Radius;
+			}
+			else
+			{
+				ScatteredTarget += FMath::VRand() * FMath::FRand() * Radius;
+			}
 		}
 
 		if (const FVector BallisticDir = SolveBallisticAim(SpawnLoc, ScatteredTarget); !BallisticDir.IsNearlyZero())
@@ -4476,9 +4630,9 @@ FTransform AShooterWeapon::CalculateProjectileSpawnTransform(const FVector& Targ
 		// Here the cone is the right tool, for the reason the original comment gives: it is
 		// range-independent, unlike nudging a point by a fixed number of centimetres.
 		const FVector StraightDir = (TargetLocation - SpawnLoc).GetSafeNormal();
-		AimDir = (ConeDegrees > 0.0f)
-			? UKismetMathLibrary::RandomUnitVectorInConeInDegrees(StraightDir, ConeDegrees)
-			: StraightDir;
+		AimDir = (ConeDegrees <= 0.0f) ? StraightDir
+			: (PawnOwner && PawnOwner->IsPlayerControlled()) ? ApplyNextShotSpread(StraightDir, ConeDegrees)
+			: UKismetMathLibrary::RandomUnitVectorInConeInDegrees(StraightDir, ConeDegrees);
 	}
 
 	const FRotator AimRot = AimDir.Rotation();
@@ -4537,9 +4691,14 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 
 	FVector Direction;
 
-	// A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?:
+	// A round its shooter meant to miss goes down the line it was given. The two rescues below (turn
+	// onto the view direction when the aim point is close or off to the side, the spread cone) both put
+	// a near miss at two metres back into the body: measured on the CORNER bench 2026-10-14.
+	const bool bMeantToMiss = WeaponOwner && WeaponOwner->IsCurrentShotPlaced();
+
+	//A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?:
 	// A??�A�A?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A� 100 A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A? (1 A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�) A??�A�A?A?a�?A�a�?A??�A�A?A?A?A?a�sA�A�A?A??�A�A?A?a�?A�a�? A??�A?a��E?A?a��A?a��a�?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A� A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�?A?a��A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? (< 0.5 A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A? 60 A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�?A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?)
-	if (DistanceToTarget < 100.0f || DotP < 0.5f)
+	if (!bMeantToMiss && (DistanceToTarget < 100.0f || DotP < 0.5f))
 	{
 		// FIX: A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?a��A?a��a�? A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A?a��E?A?A?A?a��A?A�A�A??�A?a��E?A?A?A?a�sA�A�A?
 		Direction = ViewDir;
@@ -4582,10 +4741,11 @@ void AShooterWeapon::ResolveHitscanRay(const FVector& TargetLocation, FVector& O
 	// Spread: turn the aim line inside a cone of the weapon's CURRENT spread, not its authored base
 	// value. A uniform direction in the cone rather than a uniform vector added to it, so the shot
 	// is even across the circle instead of piling up in the middle.
-	const float AimConeDegrees = GetAimConeDegrees();
+	const float AimConeDegrees = (bMeantToMiss || IsLaserFirstShot()) ? 0.0f : GetAimConeDegrees();
 	if (AimConeDegrees > 0.0f)
 	{
-		Direction = UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Direction, AimConeDegrees);
+		Direction = (PawnOwner && PawnOwner->IsPlayerControlled()) ? ApplyNextShotSpread(Direction, AimConeDegrees)
+			: UKismetMathLibrary::RandomUnitVectorInConeInDegrees(Direction, AimConeDegrees);
 	}
 
 	// A??�A�A?A?A?A?a�sA�A?a�zA?A??�A?a��E?A?A?A?a�sA�A�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A?A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a��A?a��a�? A??�A?a��E?A?a�sA�A?A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A? A??�A�A?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?a�sA�A?A??�A?a��E?A?A?A?a�sA�A�A?A??�A?a��E?A?A?A?a��A?A�A�A??�A�A?A?a�sA�A�A??�A�A?A?a�sA�A�
@@ -6287,6 +6447,8 @@ bool AShooterWeapon::StartReload()
 		return false;
 	}
 
+	ShellStage = GetInitialReloadStage();
+	bReloadResumePending = false;
 	bIsReloading = true;
 	bReloadCommitted = false;
 
@@ -6303,11 +6465,8 @@ bool AShooterWeapon::StartReload()
 	// Decided once, here, and carried everywhere else. Recomputing it further down would read an
 	// ammo count that the reload is in the middle of changing, and the two halves of the animation
 	// could then disagree about which reload this is.
-	const bool bSecondary = UsesSecondaryReload()
-		&& (SecondaryReloadMontage != nullptr || SecondaryReloadMontageTP != nullptr);
+	const bool bSecondary = ShellStage == EWeaponReloadStage::Secondary;
 	const float ThisReloadTime = GetActiveReloadTime();
-
-	ShellStage = bSecondary ? EWeaponReloadStage::Secondary : EWeaponReloadStage::Primary;
 
 	// Before the stage plays: if this weapon's reload audio lives in a montage notify, adopt it now
 	// so the whole suspend/resume machinery can control it.
@@ -6326,17 +6485,15 @@ bool AShooterWeapon::StartReload()
 
 // ==================== Per round reload ====================
 //
-// Start, then Loop once per round, then End. Every step is scheduled off the length of the montage
-// it just played, for the same reason the magazine reload is: a hand-typed duration drifts away
-// from the animation the first time somebody retimes it, and the gun then loads a round while the
-// hand is still reaching for it.
+// Start, then Loop once per round, then End. Each step resolves its explicit duration or authored
+// montage length once through the same timing helpers used by its animations and sound.
 
 void AShooterWeapon::BeginPerRoundReload()
 {
 	ShellStage = EWeaponReloadStage::ShellStart;
 	PlayReloadStage(ShellStage);
 
-	const float OpeningTime = (ReloadMontage ? ReloadMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
+	const float OpeningTime = GetReloadStageDuration(ShellStage);
 
 	UE_LOG(LogTemp, Warning, TEXT("[RELOAD_DEBUG] %s: per round reload opening, %d/%d rounds, %.2fs"),
 		*GetName(), CurrentBullets, MagazineSize, OpeningTime);
@@ -6380,8 +6537,7 @@ void AShooterWeapon::AdvancePerRoundReload()
 	ShellStage = EWeaponReloadStage::ShellLoop;
 	PlayReloadStage(ShellStage);
 
-	const UAnimMontage* const LoopMontage = SecondaryReloadMontage ? SecondaryReloadMontage : ReloadMontage;
-	const float LoopTime = (LoopMontage ? LoopMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
+	const float LoopTime = GetReloadStageDuration(ShellStage);
 
 	GetWorld()->GetTimerManager().SetTimer(
 		ReloadTimer, this, &AShooterWeapon::AdvancePerRoundReload, FMath::Max(0.01f, LoopTime), false);
@@ -6391,7 +6547,7 @@ void AShooterWeapon::EndPerRoundReload()
 {
 	ShellStage = EWeaponReloadStage::ShellEnd;
 
-	const float ClosingTime = (ReloadEndMontage ? ReloadEndMontage->GetPlayLength() : 0.0f) / GetStockReloadSpeed();
+	const float ClosingTime = GetReloadStageDuration(ShellStage);
 
 	// No closing animation is a legitimate setup, and then the reload is simply over. Going through
 	// FinishReload either way keeps the "gun is usable again" moment in one place.
@@ -6630,13 +6786,13 @@ void AShooterWeapon::SuspendReloadForHolster()
 	{
 		// The track runs at its pitch, so a second of world time is Pitch seconds of track.
 		SuspendedReloadSoundTime = ReloadAudioStartOffset
-			+ FMath::Max(0.0f, Now - ReloadAudioWorldStartTime) * GetStockReloadSpeed();
+			+ FMath::Max(0.0f, Now - ReloadAudioWorldStartTime) * ReloadAudioPitch;
 	}
 	else if (NotifiedReloadSound && NotifiedReloadSoundBeginWorldTime >= 0.0f)
 	{
 		// The sound was spawned by the montage notify and is not our component yet: its position is
 		// the wall clock since the notify fired.
-		SuspendedReloadSoundTime = FMath::Max(0.0f, Now - NotifiedReloadSoundBeginWorldTime) * GetStockReloadSpeed();
+		SuspendedReloadSoundTime = FMath::Max(0.0f, Now - NotifiedReloadSoundBeginWorldTime) * ReloadAudioPitch;
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[RELOAD_DEBUG] %s: reload suspended at arms %.2f, audio %.2fs (%s)"),
@@ -6668,9 +6824,9 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 	bIsReloading = true;
 	bReloadCommitted = false;
 
-	// The notifies still ahead in the resumed montage start their sounds at the stock's pitch too.
+	// The notifies still ahead in the resumed montage use the resolved stage's playback rate too.
 	// The sound list is the one this stage collected when it began.
-	ReloadAudioPitch = GetStockReloadSpeed();
+	ReloadAudioPitch = GetReloadStagePlayRate(ShellStage);
 	if (!FMath::IsNearlyEqual(ReloadAudioPitch, 1.0f) && !ReloadPitchSounds.IsEmpty() && GetWorld())
 	{
 		ReloadAudioPitchUntil = GetWorld()->GetTimeSeconds()
@@ -6695,7 +6851,7 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 					BlendArgs.BlendTime = ReloadResumeBlendDuration;
 					BlendArgs.BlendOption = ReloadResumeBlendOption;
 					BlendArgs.CustomCurve = ReloadResumeBlendCurve;
-					Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, GetStockReloadSpeed(),
+					Anim->Montage_PlayWithBlendIn(Montage, BlendArgs, GetReloadStagePlayRate(ShellStage),
 						EMontagePlayReturnType::MontageLength, SuspendedReloadProgress * Montage->GetPlayLength(), false);
 				}
 			}
@@ -6740,13 +6896,20 @@ void AShooterWeapon::ResumeReloadAfterEquip()
 		}
 	}
 	const float Remaining = FMath::Max(0.01f, GetActiveReloadTime() * (1.0f - SuspendedReloadProgress));
-	GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
+	if (ShellStage == EWeaponReloadStage::ShellStart || ShellStage == EWeaponReloadStage::ShellLoop)
+	{
+		GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::AdvancePerRoundReload, Remaining, false);
+	}
+	else
+	{
+		GetWorld()->GetTimerManager().SetTimer(ReloadTimer, this, &AShooterWeapon::FinishReload, Remaining, false);
+	}
 }
 
 void AShooterWeapon::CommitReloadFromNotify()
 {
-	// The named bolt-click notify is authoritative for the visual reload moment. The timer remains
-	// a fallback for old montages, but this guard makes notify + fallback idempotent.
+	// Authored timing may finish at the bolt click. With an explicit duration the retimed montage
+	// and its timer own readiness together, so an earlier notify must not shorten the chosen time.
 	if (!bIsReloading || bReloadCommitted)
 	{
 		return;
@@ -6756,6 +6919,11 @@ void AShooterWeapon::CommitReloadFromNotify()
 	{
 		// Per-round montages already credit each shell at their loop boundary. Keep the named notify
 		// harmless on those assets rather than filling the whole tube a second time.
+		return;
+	}
+
+	if (GetReloadStageDurationOverride(ShellStage) > 0.0f)
+	{
 		return;
 	}
 
@@ -6785,7 +6953,7 @@ void AShooterWeapon::SetBulletCount(int32 NewCount)
 	// itself. Push it, along with whether this weapon refills or runs dry.
 	if (HasAuthority())
 	{
-		Client_SyncAmmoState(CurrentBullets, bHasLimitedAmmo);
+		Client_SyncAmmoState(CurrentBullets, bHasLimitedAmmo, MagazineSize);
 	}
 }
 
@@ -6829,8 +6997,10 @@ void AShooterWeapon::RefundRoundNow()
 	UE_LOG(LogTemp, Verbose, TEXT("[BUTTON_DEBUG] %s: round given back, %d in the magazine"), *GetName(), CurrentBullets);
 }
 
-void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool bInHasLimitedAmmo)
+void AShooterWeapon::Client_SyncAmmoState_Implementation(int32 InBullets, bool bInHasLimitedAmmo, int32 InMagazineSize)
 {
+	// A granted preset can arrive before its extended magazine attachment does.
+	MagazineSize = FMath::Max(1, InMagazineSize);
 	CurrentBullets = FMath::Clamp(InBullets, 0, MagazineSize);
 	bHasLimitedAmmo = bInHasLimitedAmmo;
 
@@ -7349,11 +7519,14 @@ float AShooterWeapon::GetOwnerCharge() const
 	return FieldComp->GetSourceDescription().PointChargeParams.Charge;
 }
 
-void AShooterWeapon::SpawnMuzzleFlashEffect()
+UNiagaraSystem* AShooterWeapon::GetEffectiveMuzzleFlashFX() const
 {
-	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	if (const UWeaponAttachmentDefinition* Muzzle = GetAttachmentOfType(EWeaponAttachmentType::Muzzle))
 	{
-		return;
+		if (Muzzle->bIsSuppressor && SuppressedMuzzleFlashFX)
+		{
+			return SuppressedMuzzleFlashFX;
+		}
 	}
 
 	// Determine which VFX to use
@@ -7375,6 +7548,16 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 		// If charge is neutral or appropriate VFX is not set, fall back to default MuzzleFlashFX
 	}
 
+	return VFXToSpawn;
+}
+
+void AShooterWeapon::SpawnMuzzleFlashEffect()
+{
+	if (CVarNoVFX.GetValueOnGameThread() != 0)
+	{
+		return;
+	}
+	UNiagaraSystem* const VFXToSpawn = GetEffectiveMuzzleFlashFX();
 	if (!VFXToSpawn)
 	{
 		return;
@@ -7383,7 +7566,12 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 	// Spawn attached to muzzle socket so VFX follows weapon movement. A mounted muzzle attachment
 	// moves it to the end of the attachment.
 	FName FlashSocket;
-	USceneComponent* const FlashAnchor = GetMuzzleFXAnchor(/*bFirstPerson*/ true, FlashSocket);
+	const bool bFirstPerson = PawnOwner && PawnOwner->IsPlayerControlled() && PawnOwner->IsLocallyControlled();
+	USceneComponent* const FlashAnchor = GetMuzzleFXAnchor(bFirstPerson, FlashSocket);
+	if (!FlashAnchor)
+	{
+		return;
+	}
 	UNiagaraComponent* MuzzleComp = UNiagaraFunctionLibrary::SpawnSystemAttached(
 		VFXToSpawn,
 		FlashAnchor,
@@ -7398,6 +7586,13 @@ void AShooterWeapon::SpawnMuzzleFlashEffect()
 
 	if (MuzzleComp)
 	{
+		if (const UPrimitiveComponent* const AnchorPrimitive = Cast<UPrimitiveComponent>(FlashAnchor))
+		{
+			MuzzleComp->SetFirstPersonPrimitiveType(AnchorPrimitive->FirstPersonPrimitiveType);
+			MuzzleComp->SetOnlyOwnerSee(AnchorPrimitive->bOnlyOwnerSee != 0);
+			MuzzleComp->SetOwnerNoSee(AnchorPrimitive->bOwnerNoSee != 0);
+		}
+
 		// Set muzzle flash parameters
 		MuzzleComp->SetColorParameter(FName("FlashColor"), MuzzleFlashColor);
 		MuzzleComp->SetFloatParameter(FName("Intensity"), MuzzleFlashIntensity);
@@ -7906,9 +8101,16 @@ void AShooterWeapon::SpawnReflectionEffect(const FVector& Location, const FVecto
 
 // ==================== SFX ====================
 
+USoundBase* AShooterWeapon::GetEffectiveFireSound() const
+{
+	const UWeaponAttachmentDefinition* const Muzzle = GetAttachmentOfType(EWeaponAttachmentType::Muzzle);
+	return Muzzle && Muzzle->bIsSuppressor && SuppressedFireSound ? SuppressedFireSound.Get() : FireSound.Get();
+}
+
 void AShooterWeapon::PlayFireSound()
 {
-	if (!FireSound)
+	USoundBase* const SelectedSound = GetEffectiveFireSound();
+	if (!SelectedSound)
 	{
 		return;
 	}
@@ -7944,7 +8146,7 @@ void AShooterWeapon::PlayFireSound()
 	// Play sound at muzzle location with attenuation for proper 3D spatialization
 	UGameplayStatics::SpawnSoundAtLocation(
 		this,
-		FireSound,
+		SelectedSound,
 		MuzzleLocation,
 		FRotator::ZeroRotator,
 		FireSoundVolume,

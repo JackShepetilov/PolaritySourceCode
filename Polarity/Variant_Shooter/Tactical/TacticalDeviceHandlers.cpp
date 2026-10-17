@@ -10,6 +10,9 @@
 #include "Variant_Shooter/Weapons/ShooterProjectile.h"
 #include "Variant_Shooter/Weapons/EnemyBeamBoltSubsystem.h"
 #include "AI/PolarityTeams.h"
+#include "AI/Components/AIAccuracyComponent.h"
+#include "Environment/WorldDarknessSubsystem.h"
+#include "Variant_Shooter/AI/ShooterAIController.h"
 #include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SpotLightComponent.h"
@@ -463,6 +466,154 @@ void UTacticalDeviceHandler_Light::TickActive(float DeltaTime)
 	UpdateVisuals();
 }
 
+float UTacticalDeviceHandler_Light::GetDrainPerSecond() const
+{
+	const UTacticalDevice_Light* const Def = GetLight();
+	if (!Def || !Owner.IsValid())
+	{
+		return Super::GetDrainPerSecond();
+	}
+	const float Seconds = Owner->GetMode() == ETacticalDeviceMode::Active ? Def->ActiveDuration : Def->NormalDuration;
+	return Seconds > 0.0f ? 1.0f / Seconds : 0.0f;
+}
+
+bool UTacticalDeviceHandler_Light::FindBurnPoint(const AShooterNPC* Enemy, const FVector& Origin, const FVector& Direction,
+	float CosHalf, FVector& OutPoint) const
+{
+	const UTacticalDevice_Light* const Def = GetLight();
+	const USkeletalMeshComponent* const Mesh = Enemy ? Enemy->GetMesh() : nullptr;
+	if (!Def || !Mesh || Mesh->GetBoneIndex(Def->BurnBone) == INDEX_NONE)
+	{
+		return false;
+	}
+	const FVector Point = Mesh->GetBoneLocation(Def->BurnBone);
+	if (IsInCone(Origin, Direction, CosHalf, FMath::Min(Def->BurnRange, Def->Range), Point) && HasClearLine(Origin, Point, Enemy))
+	{
+		OutPoint = Point;
+		return true;
+	}
+	return false;
+}
+
+void UTacticalDeviceHandler_Light::ScanPainted(float ScanDeltaTime, const FVector& Origin, const FVector& End)
+{
+	const UTacticalDevice_Light* const Def = GetLight();
+	AActor* const OwnerActor = GetOwnerActor();
+	if (!Def || !OwnerActor || Def->PaintRadius <= 0.0f)
+	{
+		return;
+	}
+
+	// Whoever the beam passes by or the dot lands by: it knows it is the one aimed at.
+	TArray<AShooterNPC*> Candidates;
+	TacticalHandlerUtil::GatherEnemies(OwnerActor->GetWorld(), OwnerActor, Origin, FVector::Dist(Origin, End) + Def->PaintRadius, Candidates);
+	for (AShooterNPC* const Enemy : Candidates)
+	{
+		UAIAccuracyComponent* const Accuracy = Enemy->GetAccuracyComponent();
+		const FVector Chest = Enemy->GetActorLocation();
+		if (!Accuracy || FVector::Dist(FMath::ClosestPointOnSegment(Chest, Origin, End), Chest) > Def->PaintRadius)
+		{
+			continue;
+		}
+		if (!Accuracy->IsPainted())
+		{
+			UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s painted by %s"), *Enemy->GetName(), *OwnerActor->GetName());
+		}
+		Accuracy->NotePainted(0.3f);
+		Accuracy->AddStress(Def->PaintStressPerSecond * ScanDeltaTime);
+	}
+}
+
+void UTacticalDeviceHandler_Light::ScanSeen(const FVector& Origin, const FVector& Direction, const FVector& End, bool bActive)
+{
+	const UTacticalDevice_Light* const Def = GetLight();
+	AActor* const OwnerActor = GetOwnerActor();
+	UWorld* const World = OwnerActor ? OwnerActor->GetWorld() : nullptr;
+	if (!Def || !World)
+	{
+		return;
+	}
+
+	// How far it is seen: by day hardly, by night from far off, the active use further still. The
+	// plain laser is a thin line: only the dark shows it.
+	const bool bLaser = Def->Kind == ETacticalLightKind::Laser;
+	const float Dark = UWorldDarknessSubsystem::GetDarkness(World);
+	float Range = FMath::Lerp(Def->SeenRangeDay, Def->SeenRangeNight, Dark);
+	if (bLaser && !bActive)
+	{
+		Range = Def->SeenRangeNight * Dark;
+	}
+	if (bActive)
+	{
+		Range *= Def->ActiveSeenScale;
+	}
+	if (Range <= 0.0f)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+	const FVector Shooter = OwnerActor->GetActorLocation();
+	const float CosLamp = FMath::Cos(FMath::DegreesToRadians(80.0f));
+	TArray<AShooterNPC*> Candidates;
+	TacticalHandlerUtil::GatherEnemies(World, OwnerActor, Origin, Range, Candidates);
+	for (AShooterNPC* const Enemy : Candidates)
+	{
+		AShooterAIController* const Brain = Cast<AShooterAIController>(Enemy->GetController());
+		if (!Brain)
+		{
+			continue;
+		}
+		const FVector Eyes = Enemy->GetPawnViewLocation();
+
+		// A lamp is seen from in front of it; a beam, wherever along it comes nearest the eyes.
+		FVector Look = Origin;
+		if (bLaser)
+		{
+			Look = FMath::ClosestPointOnSegment(Eyes, Origin, End);
+		}
+		else if (FVector::DotProduct((Eyes - Origin).GetSafeNormal(), Direction) < CosLamp)
+		{
+			continue;
+		}
+		if (!Brain->IsInViewCone(Look))
+		{
+			continue;
+		}
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(TacticalSeen), false, Enemy);
+		Params.AddIgnoredActor(OwnerActor);
+		if (const AShooterWeapon* const Weapon = Owner.IsValid() ? Owner->GetHeldWeapon() : nullptr)
+		{
+			Params.AddIgnoredActor(Weapon);
+		}
+		FHitResult Blocked;
+		if (World->LineTraceSingleByChannel(Blocked, Eyes, Look, ECC_Visibility, Params))
+		{
+			continue;
+		}
+
+		// Seen: the gun comes up and turns that way (and holds there: a light that appears where the
+		// gun is waiting meets the first volley). The burner gives the place away to the whole side.
+		if (UAIAccuracyComponent* const Accuracy = Enemy->GetAccuracyComponent())
+		{
+			Accuracy->NoteAlert();
+		}
+		Brain->LookTowards(Shooter, 3.0f);
+		if (bLaser && bActive)
+		{
+			Brain->BroadcastContactAt(OwnerActor, Shooter, /*bSeenNow*/ true);
+		}
+
+		float& Said = SeenLogTime.FindOrAdd(Enemy);
+		if (Now - Said > 2.0f)
+		{
+			Said = Now;
+			UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s sees %s's %s (%s, darkness %.2f, range %.0f)"), *Enemy->GetName(), *OwnerActor->GetName(),
+				bLaser ? TEXT("laser") : TEXT("light"), bActive ? TEXT("active") : TEXT("normal"), Dark, Range);
+		}
+	}
+}
+
 float UTacticalDeviceHandler_Light::DurationForLitTime(float LitSeconds) const
 {
 	const UTacticalDevice_Light* const Def = GetLight();
@@ -531,17 +682,51 @@ void UTacticalDeviceHandler_Light::ScanTargets(float ScanDeltaTime)
 	}
 
 	FVector Origin, Direction;
-	Owner->GetAim(Origin, Direction);
+	Owner->GetDeviceAim(Origin, Direction);
 	const float CosHalf = FMath::Cos(FMath::DegreesToRadians(Def->ConeHalfAngle));
-	const float Now = OwnerActor->GetWorld()->GetTimeSeconds();
+	UWorld* const World = OwnerActor->GetWorld();
+	const float Now = World->GetTimeSeconds();
+	const bool bActive = Owner->GetMode() == ETacticalDeviceMode::Active;
+	const bool bLaser = Def->Kind == ETacticalLightKind::Laser;
+
+	// Where the light lands: the laser's dot, the far end of what the soldiers may see of the beam.
+	FVector End = Origin + Direction * Def->Range;
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(TacticalLightEnd), false, OwnerActor);
+		if (const AShooterWeapon* const Weapon = Owner->GetHeldWeapon())
+		{
+			Params.AddIgnoredActor(Weapon);
+		}
+		FHitResult Hit;
+		if (World->LineTraceSingleByChannel(Hit, Origin, End, ECC_Visibility, Params))
+		{
+			End = Hit.ImpactPoint;
+		}
+	}
+
+	// Seen from about, four times a second. The burner pins whoever it is held on or by.
+	SeenTimer -= ScanDeltaTime;
+	if (SeenTimer <= 0.0f)
+	{
+		SeenTimer = 0.25f;
+		ScanSeen(Origin, Direction, End, bActive);
+	}
+	if (bLaser && bActive)
+	{
+		ScanPainted(ScanDeltaTime, Origin, End);
+	}
 
 	TArray<AShooterNPC*> Candidates;
-	TacticalHandlerUtil::GatherEnemies(OwnerActor->GetWorld(), OwnerActor, Origin, Def->Range, Candidates);
+	TacticalHandlerUtil::GatherEnemies(World, OwnerActor, Origin, Def->Range, Candidates);
 
 	for (AShooterNPC* const Enemy : Candidates)
 	{
+		// In the face. The burner only counts on the head bone, and only up close.
 		FVector Point;
-		if (!FindLightPoint(Enemy, Origin, Direction, CosHalf, Def->Range, Point))
+		const bool bInFace = (bLaser && bActive)
+			? FindBurnPoint(Enemy, Origin, Direction, CosHalf, Point)
+			: FindLightPoint(Enemy, Origin, Direction, CosHalf, Def->Range, Point);
+		if (!bInFace)
 		{
 			continue;
 		}
@@ -559,8 +744,27 @@ void UTacticalDeviceHandler_Light::ScanTargets(float ScanDeltaTime)
 			continue;
 		}
 
-		const float Duration = FMath::Max(DurationForLitTime(Record.LitSeconds), bStriking ? 1.0f : 0.0f);
-		Enemy->ApplyDazzle(OwnerActor, Duration, Def->DazzleSpreadMultiplier, Def->AffectedOverlayMaterial);
+		UAIAccuracyComponent* const Accuracy = Enemy->GetAccuracyComponent();
+		if (bActive || bStriking)
+		{
+			// The strobe, the burner: dazzled, driven off and kept off, stress piling up.
+			const float Duration = FMath::Max(DurationForLitTime(Record.LitSeconds), bStriking ? 1.0f : 0.0f);
+			Enemy->ApplyDazzle(OwnerActor, Duration, Def->DazzleSpreadMultiplier, Def->AffectedOverlayMaterial);
+			Enemy->ApplyKeepAway(OwnerActor, Def->ActiveKeepAwaySeconds);
+			if (Accuracy)
+			{
+				Accuracy->AddStress(Def->ActiveStressPerSecond * ScanDeltaTime);
+			}
+		}
+		else
+		{
+			// The plain light: put off a little, nothing more.
+			Enemy->ApplyGlare(OwnerActor, Def->NormalGlareSeconds, Def->NormalSpreadMultiplier);
+			if (Accuracy)
+			{
+				Accuracy->AddStress(Def->NormalStressPerSecond * ScanDeltaTime);
+			}
+		}
 
 		if (!Record.bAffectedFXPlayed && Def->AffectedFX)
 		{
@@ -590,8 +794,9 @@ void UTacticalDeviceHandler_Light::UpdateVisuals()
 	}
 
 	FVector AimOrigin, Direction;
-	Owner->GetAim(AimOrigin, Direction);
-	const FVector Start = Owner->GetVisualOrigin();
+	Owner->GetDeviceAim(AimOrigin, Direction);
+	// Where the owner sees the rail, not where its first person bones are: else the beam hangs in the air.
+	const FVector Start = Owner->GetApparentVisualOrigin();
 
 	// Where the light lands: down the aim, to the first thing in the way.
 	FVector End = AimOrigin + Direction * Def->Range;
@@ -606,9 +811,25 @@ void UTacticalDeviceHandler_Light::UpdateVisuals()
 		End = Hit.ImpactPoint;
 	}
 
+	const bool bActive = Owner->GetMode() == ETacticalDeviceMode::Active;
 	if (Spot)
 	{
-		Spot->SetWorldLocationAndRotation(Start, Direction.Rotation());
+		// The lamp sits a little past the end of the barrel, not at the rail: at the rail it is two
+		// centimetres behind the front sight, and three thousand candelas that close burn a white hole
+		// in the middle of the screen on the gun's own metal (author's screenshot, 2026-10-15).
+		static constexpr float LampAheadOfMuzzle = 25.0f;
+		FVector LampAt = Start;
+		if (const AShooterWeapon* const Weapon = Owner->GetHeldWeapon())
+		{
+			LampAt = Weapon->GetMuzzleWorldLocation() + Direction * LampAheadOfMuzzle;
+		}
+		// Aimed at the end of the beam, so the lit spot is where the beam lands and not a lamp's width beside it.
+		Spot->SetWorldLocationAndRotation(LampAt, (End - LampAt).GetSafeNormal().Rotation());
+
+		// The strobe: on and off StrobeRate times a second, brighter when on.
+		const bool bStrobe = bActive && Def->Kind == ETacticalLightKind::Flashlight;
+		const bool bLit = !bStrobe || FMath::Frac(World->GetTimeSeconds() * Def->StrobeRate) < 0.5f;
+		Spot->SetIntensity(bLit ? Def->LightIntensity * (bStrobe ? 2.5f : 1.0f) : 0.0f);
 	}
 
 	if (BeamShape)
@@ -620,8 +841,8 @@ void UTacticalDeviceHandler_Light::UpdateVisuals()
 		{
 			// The engine cylinder stands on Z: point Z down the beam.
 			const FQuat Rotation = FRotationMatrix::MakeFromZ(Beam / Length).ToQuat();
-			TacticalHandlerUtil::PlaceByBounds(BeamShape, Start + Beam * 0.5f, Rotation,
-				FVector(Def->BeamWidth, Def->BeamWidth, Length));
+			const float Width = Def->BeamWidth * (bActive ? 2.0f : 1.0f);
+			TacticalHandlerUtil::PlaceByBounds(BeamShape, Start + Beam * 0.5f, Rotation, FVector(Width, Width, Length));
 		}
 	}
 

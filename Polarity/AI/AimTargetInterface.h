@@ -35,4 +35,9 @@ public:
 	 *  a burst walk over a body instead of stacking in one pixel, so it belongs to the target's size
 	 *  as much as the point does. */
 	virtual float GetAimVerticalJitter() const = 0;
+
+	/** The chance a round aimed at this lands, decided by the target and nobody else; below 0 (the
+	 *  default) the shooter's own aim decides. For a thing that should be hard to hit whoever shoots
+	 *  at it: the working microwave grenade. @see UAIAccuracyComponent::CalculateAimDirection */
+	virtual float GetAimHitChanceOverride() const { return -1.0f; }
 };

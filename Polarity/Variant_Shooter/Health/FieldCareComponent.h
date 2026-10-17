@@ -56,9 +56,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field Care|Medkit", meta = (ClampMin = "1.0"))
 	float MedkitHealAmount = 100.0f;
 
-	/** How long the key is held to take the armour off a body (s). */
+	/** How long taking the armour off a body takes (s). Since 2026-10-17 one press of the take key with
+	 *  the hand pickup animation, not a hold: keep it at AShooterCharacter::HandPickupGrabTime, the
+	 *  moment the hand closes. The hook's take key (bFetchWithHook) still holds for it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field Care|Armor", meta = (ClampMin = "0.1", Units = "s"))
-	float StripTime = 2.0f;
+	float StripTime = 0.4f;
 
 	/** How near the body has to be (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Field Care|Armor", meta = (ClampMin = "50.0", Units = "cm"))

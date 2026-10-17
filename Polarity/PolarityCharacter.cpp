@@ -2,6 +2,8 @@
 
 #include "PolarityCharacter.h"
 #include "AI/BodySamples.h"
+#include "Variant_Shooter/ShoveComponent.h"
+#include "Variant_Shooter/FootstepNoiseComponent.h"
 #include "ApexMovementComponent.h"
 #include "MovementSettings.h"
 #include "CameraShakeComponent.h"
@@ -30,6 +32,9 @@ APolarityCharacter::APolarityCharacter(const FObjectInitializer& ObjectInitializ
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UApexMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
 	ApexMovement = Cast<UApexMovementComponent>(GetCharacterMovement());
+
+	ShoveComponent = CreateDefaultSubobject<UShoveComponent>(TEXT("Shove"));
+	FootstepNoise = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoise"));
 
 	GetCapsuleComponent()->InitCapsuleSize(55.f, 96.0f);
 

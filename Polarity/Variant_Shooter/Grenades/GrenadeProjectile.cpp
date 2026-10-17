@@ -9,11 +9,21 @@
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/GameplayStaticsTypes.h"
+#include "Components/AudioComponent.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "Coop/CoopPlayers.h"
+#include "GameFramework/Controller.h"
+
+namespace GrenadeZones
+{
+	/** Every grenade that is armed or working, for IsPointInDanger. Server only. */
+	static TArray<TWeakObjectPtr<AGrenadeProjectile>> Live;
+}
 
 AGrenadeProjectile::AGrenadeProjectile()
 {
@@ -52,6 +62,85 @@ void AGrenadeProjectile::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	DOREPLIFETIME(AGrenadeProjectile, Definition);
 }
 
+void AGrenadeProjectile::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GrenadeZones::Live.RemoveAll([this](const TWeakObjectPtr<AGrenadeProjectile>& Entry) { return !Entry.IsValid() || Entry.Get() == this; });
+	Super::EndPlay(EndPlayReason);
+}
+
+float AGrenadeProjectile::GetCurrentDangerRadius() const
+{
+	if (!Definition || !IsDangerous())
+	{
+		return 0.0f;
+	}
+	return bWorking ? Definition->GetWorkingDangerRadius() : Definition->DangerRadius;
+}
+
+bool AGrenadeProjectile::IsPointInDanger(const UWorld* World, const FVector& Point)
+{
+	for (const TWeakObjectPtr<AGrenadeProjectile>& Entry : GrenadeZones::Live)
+	{
+		const AGrenadeProjectile* const Grenade = Entry.Get();
+		if (!Grenade || Grenade->GetWorld() != World || !Grenade->Definition)
+		{
+			continue;
+		}
+		const float Radius = Grenade->GetCurrentDangerRadius();
+		const FVector Center = Grenade->bWorking ? Grenade->WorkOrigin : Grenade->DangerCenter;
+		if (Radius <= 0.0f || FVector::DistSquared(Center, Point) > FMath::Square(Radius))
+		{
+			continue;
+		}
+		if (!Grenade->Definition->DoWallsProtect())
+		{
+			return true;
+		}
+		// Behind a wall from it, at chest height: the fragments and the flash stop there.
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(GrenadeZone), false, Grenade);
+		FHitResult Wall;
+		if (!World->LineTraceSingleByChannel(Wall, Center + FVector(0.0f, 0.0f, 40.0f), Point + FVector(0.0f, 0.0f, 100.0f), ECC_Visibility, Params))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+float AGrenadeProjectile::GetAimHitChanceOverride() const
+{
+	return bWorking && Definition && Definition->IsShotAtWhileWorking() ? Definition->GetWorkingHitChance() : -1.0f;
+}
+
+float AGrenadeProjectile::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const int32 Needed = Definition ? Definition->GetHitsToBreak() : 0;
+	if (!HasAuthority() || !bWorking || Needed <= 0 || DamageAmount <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Only the enemy's side breaks it: the thrower and his team shooting near it do not.
+	const APawn* Shooter = EventInstigator ? EventInstigator->GetPawn() : nullptr;
+	if (!Shooter && DamageCauser)
+	{
+		Shooter = DamageCauser->GetInstigator();
+	}
+	if (!Shooter || CoopPlayers::IsPlayer(Shooter))
+	{
+		return 0.0f;
+	}
+
+	++HitsTaken;
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s hit by %s: %d of %d"), *GetName(), *GetNameSafe(Shooter), HitsTaken, Needed);
+	if (HitsTaken >= Needed)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s is broken"), *GetName());
+		StopWorking();
+	}
+	return DamageAmount;
+}
+
 void AGrenadeProjectile::BeginPlay()
 {
 	Super::BeginPlay();
@@ -85,6 +174,7 @@ void AGrenadeProjectile::Launch(UGrenadeDefinition* InDefinition, const FVector&
 	}
 
 	DetonateAt = World->GetTimeSeconds() + InDefinition->FuseTime;
+	GrenadeZones::Live.AddUnique(this);
 	World->GetTimerManager().SetTimer(FuseTimer, this, &AGrenadeProjectile::Detonate, InDefinition->FuseTime, false);
 
 	PredictRest();
@@ -159,7 +249,14 @@ void AGrenadeProjectile::Multicast_Bounce_Implementation(FVector Location, float
 
 bool AGrenadeProjectile::WasHeardBy(const FVector& ListenerLocation) const
 {
+	// Working: everybody inside its reach feels it, the hum and the head both.
+	if (bWorking && Definition)
+	{
+		return FVector::DistSquared(ListenerLocation, WorkOrigin) <= FMath::Square(Definition->GetWorkingDangerRadius());
+	}
+
 	const UWorld* const World = GetWorld();
+	const float HearRadius = Definition ? Definition->BounceHearRadius : 400.0f;
 	return World && World->GetTimeSeconds() - LastBounceTime <= HeardWindow
 		&& FVector::DistSquared(ListenerLocation, LastBounceLocation) <= FMath::Square(HearRadius);
 }
@@ -188,8 +285,30 @@ bool AGrenadeProjectile::WasShoutedTo(const AActor* Listener) const
 void AGrenadeProjectile::WarnAround()
 {
 	UWorld* const World = GetWorld();
-	if (!HasAuthority() || bDetonated || !World || !Definition)
+	if (!HasAuthority() || !IsDangerous() || !World || !Definition)
 	{
+		return;
+	}
+
+	// Working where it went off: the danger is all of its reach, until it stops.
+	if (bWorking)
+	{
+		const float Reach = Definition->GetWorkingDangerRadius();
+		const float Left = FMath::Max(0.0f, WorkEndAt - World->GetTimeSeconds());
+		FCollisionObjectQueryParams WorkObjects(ECC_Pawn);
+		FCollisionQueryParams WorkParams(SCENE_QUERY_STAT(GrenadeWorkWarn), false, this);
+		TArray<FOverlapResult> WorkOverlaps;
+		World->OverlapMultiByObjectType(WorkOverlaps, WorkOrigin, FQuat::Identity, WorkObjects, FCollisionShape::MakeSphere(Reach + 300.0f), WorkParams);
+		TSet<AShooterNPC*> WorkTold;
+		for (const FOverlapResult& Overlap : WorkOverlaps)
+		{
+			AShooterNPC* const NPC = Cast<AShooterNPC>(Overlap.GetActor());
+			if (NPC && !WorkTold.Contains(NPC))
+			{
+				WorkTold.Add(NPC);
+				NPC->NotifyGrenadeThreat(this, WorkOrigin, Reach, Left);
+			}
+		}
 		return;
 	}
 
@@ -228,7 +347,6 @@ void AGrenadeProjectile::Detonate()
 	bDetonated = true;
 
 	World->GetTimerManager().ClearTimer(FuseTimer);
-	World->GetTimerManager().ClearTimer(WarnTimer);
 	if (Movement)
 	{
 		Movement->StopMovementImmediately();
@@ -247,15 +365,91 @@ void AGrenadeProjectile::Detonate()
 	}
 	Multicast_Detonate(Origin);
 
+	// One that works on: stays where it lies, pulses, and the enemies keep being told to get away.
+	const float Active = Definition ? Definition->GetActiveSeconds() : 0.0f;
+	if (Active > 0.0f)
+	{
+		bWorking = true;
+		WorkOrigin = Origin;
+		WorkEndAt = World->GetTimeSeconds() + Active;
+		const float Interval = FMath::Max(0.05f, Definition->GetPulseInterval());
+		World->GetTimerManager().SetTimer(PulseTimer, this, &AGrenadeProjectile::PulseOnce, Interval, true);
+		World->GetTimerManager().SetTimer(WorkEndTimer, this, &AGrenadeProjectile::StopWorking, Active, false);
+		UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s works for %.1f s, a pulse every %.2f s"), *GetName(), Active, Interval);
+		return;
+	}
+
+	World->GetTimerManager().ClearTimer(WarnTimer);
+
 	// Gone from the picture now; the actor lives a moment longer so the multicast gets out with it.
 	SetActorHiddenInGame(true);
 	SetActorEnableCollision(false);
 	SetLifeSpan(1.0f);
 }
 
+void AGrenadeProjectile::PulseOnce()
+{
+	if (!HasAuthority() || !bWorking || !Definition)
+	{
+		return;
+	}
+	Definition->Pulse(this, WorkOrigin);
+	Multicast_Pulse(WorkOrigin);
+}
+
+void AGrenadeProjectile::StopWorking()
+{
+	UWorld* const World = GetWorld();
+	if (!HasAuthority() || !bWorking || !World)
+	{
+		return;
+	}
+	bWorking = false;
+	World->GetTimerManager().ClearTimer(PulseTimer);
+	World->GetTimerManager().ClearTimer(WorkEndTimer);
+	World->GetTimerManager().ClearTimer(WarnTimer);
+	Multicast_StopWorking(WorkOrigin);
+	UE_LOG(LogTemp, Log, TEXT("[GRENADE_DEBUG] %s stops working"), *GetName());
+
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+	SetLifeSpan(1.0f);
+}
+
+void AGrenadeProjectile::Multicast_Pulse_Implementation(FVector Origin)
+{
+	if (Definition && Definition->PulseFX && GetNetMode() != NM_DedicatedServer)
+	{
+		if (UNiagaraComponent* const FX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, Definition->PulseFX, Origin))
+		{
+			FX->SetVariableFloat(FName("User.Radius"), Definition->GetWorkingEffectRadius());
+		}
+	}
+}
+
+void AGrenadeProjectile::Multicast_StopWorking_Implementation(FVector Origin)
+{
+	if (WorkingLoop)
+	{
+		WorkingLoop->FadeOut(0.3f, 0.0f);
+		WorkingLoop = nullptr;
+	}
+	if (Mesh)
+	{
+		Mesh->SetVisibility(false);
+	}
+	if (Definition && Definition->WorkingEndSound && GetNetMode() != NM_DedicatedServer)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, Definition->WorkingEndSound, Origin, FRotator::ZeroRotator,
+			1.0f, 1.0f, 0.0f, Definition->DetonationAttenuation);
+	}
+}
+
 void AGrenadeProjectile::Multicast_Detonate_Implementation(FVector Origin)
 {
-	if (Mesh)
+	// One that works on stays in sight until it stops. @see Multicast_StopWorking
+	const bool bWorksOn = Definition && Definition->GetActiveSeconds() > 0.0f;
+	if (Mesh && !bWorksOn)
 	{
 		Mesh->SetVisibility(false);
 	}
@@ -265,9 +459,22 @@ void AGrenadeProjectile::Multicast_Detonate_Implementation(FVector Origin)
 		return;
 	}
 
+	if (bWorksOn && Definition->WorkingLoopSound)
+	{
+		WorkingLoop = UGameplayStatics::SpawnSoundAttached(Definition->WorkingLoopSound, RootComponent, NAME_None,
+			FVector::ZeroVector, EAttachLocation::KeepRelativeOffset, true, 1.0f, 1.0f, 0.0f, Definition->DetonationAttenuation);
+	}
+
 	if (Definition->DetonationFX)
 	{
-		UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, Definition->DetonationFX, Origin);
+		// A grenade that works on gets its reach and its time handed to the effect (User.Radius,
+		// User.Duration), so the dome is as big and lasts as long as the asset says.
+		if (UNiagaraComponent* const FX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, Definition->DetonationFX, Origin);
+			FX && bWorksOn)
+		{
+			FX->SetVariableFloat(FName("User.Radius"), Definition->GetWorkingEffectRadius());
+			FX->SetVariableFloat(FName("User.Duration"), Definition->GetActiveSeconds());
+		}
 	}
 	if (Definition->DetonationSound)
 	{

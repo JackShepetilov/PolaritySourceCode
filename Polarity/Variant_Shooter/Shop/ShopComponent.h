@@ -75,6 +75,7 @@ UCLASS(ClassGroup = (Polarity))
 class POLARITY_API UShopComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	friend class ABenchLoadoutButton;
 
 public:
 

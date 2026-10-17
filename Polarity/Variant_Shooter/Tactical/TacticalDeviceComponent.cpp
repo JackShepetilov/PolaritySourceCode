@@ -11,6 +11,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
+#include "EnhancedInputComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
+#include "InputAction.h"
 #include "Engine/World.h"
 
 UTacticalDeviceComponent::UTacticalDeviceComponent()
@@ -32,6 +36,182 @@ void UTacticalDeviceComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 
 	// Only the bar reads the charge, and the bar is the owner's.
 	DOREPLIFETIME_CONDITION(UTacticalDeviceComponent, Charge, COND_OwnerOnly);
+	DOREPLIFETIME(UTacticalDeviceComponent, Mode);
+	DOREPLIFETIME_CONDITION(UTacticalDeviceComponent, DeviceAimOffset, COND_SkipOwner);
+}
+
+void UTacticalDeviceComponent::GetDeviceAim(FVector& OutOrigin, FVector& OutDirection) const
+{
+	GetAim(OutOrigin, OutDirection);
+	if (IsLocallyViewed())
+	{
+		if (bOwnerAimValid)
+		{
+			OutDirection = OwnerDeviceDirection;
+		}
+		return;
+	}
+	const AShooterCharacter* const Character = GetCharacter();
+	if (Character)
+	{
+		OutDirection = Character->GetBaseAimRotation().RotateVector(FVector(DeviceAimOffset)).GetSafeNormal();
+	}
+}
+
+void UTacticalDeviceComponent::GetShotAim(FVector& OutOrigin, FVector& OutDirection) const
+{
+	GetAim(OutOrigin, OutDirection);
+	if (IsLocallyViewed())
+	{
+		if (bOwnerAimValid)
+		{
+			OutDirection = OwnerShotDirection;
+		}
+		return;
+	}
+	// Elsewhere only the beam's line is known; close enough for whoever asks (the owner aims its own shots).
+	if (const AShooterCharacter* const Character = GetCharacter())
+	{
+		OutDirection = Character->GetBaseAimRotation().RotateVector(FVector(DeviceAimOffset)).GetSafeNormal();
+	}
+}
+
+void UTacticalDeviceComponent::Server_SetDeviceAimOffset_Implementation(FVector_NetQuantizeNormal Offset)
+{
+	DeviceAimOffset = Offset;
+}
+
+void UTacticalDeviceComponent::UpdateOwnerDeviceAim(float DeltaTime)
+{
+	FVector Origin, AimDir;
+	GetAim(Origin, AimDir);
+	const AShooterCharacter* const Character = GetCharacter();
+	const AShooterWeapon* const Weapon = GetHeldWeapon();
+	const USceneComponent* const Gun = Weapon ? Weapon->GetFirstPersonMesh() : nullptr;
+	if (!Character || !Gun)
+	{
+		OwnerDeviceDirection = AimDir;
+		OwnerShotDirection = AimDir;
+		OwnerBarrelWeight = 0.0f;
+		bOwnerAimValid = false;
+		return;
+	}
+
+	// How far over to the barrel: by the state and by the firing, eased so a change does not snap the light.
+	const float Target = Weapon->GetDeviceBarrelWeight();
+	OwnerBarrelWeight = FMath::FInterpTo(OwnerBarrelWeight, Target, DeltaTime, Weapon->GetSpreadConfig().BarrelBlendSpeed);
+
+	// "Straight ahead" in the gun's own frame, learned while the light is on the centre and the gun is
+	// steady, so it does not matter which way a mesh's muzzle socket happens to face. The barrel then
+	// is that direction carried along as the gun swings in a sprint or a jump.
+	const FQuat GunRotation = Gun->GetComponentQuat();
+	if (OwnerBarrelWeight < 0.05f && !Weapon->IsFiring())
+	{
+		const FVector Ahead = GunRotation.UnrotateVector(AimDir);
+		BarrelInGunFrame = BarrelInGunFrame.IsNearlyZero() ? Ahead
+			: FMath::Lerp(BarrelInGunFrame, Ahead, FMath::Clamp(DeltaTime * 5.0f, 0.0f, 1.0f)).GetSafeNormal();
+	}
+	const FVector Barrel = BarrelInGunFrame.IsNearlyZero() ? AimDir : GunRotation.RotateVector(BarrelInGunFrame).GetSafeNormal();
+	OwnerShotDirection = FMath::Lerp(AimDir, Barrel, OwnerBarrelWeight).GetSafeNormal();
+
+	// Where the beam should be. On the ground: the screen centre, a string of fire or not [author,
+	// 2026-10-15]. Off the ground (and in a sprint, a slide, a wall run) the laser follows the barrel
+	// and shows where the round will go, its spread fading in with the swing. The flashlight just
+	// lights the line.
+	FVector BeamTarget = OwnerShotDirection;
+	const UTacticalDevice_Light* const Light = Cast<UTacticalDevice_Light>(Device);
+	if (Light && Light->Kind == ETacticalLightKind::Laser && OwnerBarrelWeight > 0.001f)
+	{
+		const float Cone = Weapon->IsLaserFirstShot() ? 0.0f : Weapon->GetAimConeDegrees();
+		BeamTarget = AShooterWeapon::ApplyShotOffset(OwnerShotDirection, Cone, Weapon->GetShownShotOffset() * OwnerBarrelWeight);
+	}
+
+	// Eased in the aim's own frame: turning the view carries the beam at once, only its swing off the
+	// centre and back settles over time.
+	const FRotator AimRotation = Character->GetBaseAimRotation();
+	const FVector TargetInAim = AimRotation.UnrotateVector(BeamTarget);
+	const float Ease = 1.0f - FMath::Exp(-Weapon->GetSpreadConfig().BeamEaseSpeed * DeltaTime);
+	BeamInAimFrame = bOwnerAimValid ? FMath::Lerp(BeamInAimFrame, TargetInAim, Ease).GetSafeNormal() : TargetInAim;
+	OwnerDeviceDirection = AimRotation.RotateVector(BeamInAimFrame);
+	bOwnerAimValid = true;
+
+	// [DEVICE_AIM] temporary: why the beam does or does not follow the barrel.
+	{
+		static float LastLog = -100.0f;
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+		if (Now - LastLog > 0.4f)
+		{
+			LastLog = Now;
+			const UApexMovementComponent* const Apex = Character->GetApexMovement();
+			auto Deg = [](const FVector& A, const FVector& B) { return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(FVector::DotProduct(A.GetSafeNormal(), B.GetSafeNormal())), -1.0f, 1.0f))); };
+			UE_LOG(LogTemp, Log, TEXT("[DEVICE_AIM] %s sprint=%d air=%d target=%.2f weight=%.2f barrelOff=%.1f deg deviceOff=%.1f deg calibrated=%d gun=%s rot=%s"),
+				*GetNameSafe(Weapon), Apex && Apex->IsSprinting() ? 1 : 0, Apex && Apex->IsFalling() ? 1 : 0, Target, OwnerBarrelWeight,
+				Deg(AimDir, Barrel), Deg(AimDir, OwnerDeviceDirection), BarrelInGunFrame.IsNearlyZero() ? 0 : 1,
+				*GetNameSafe(Gun), *Gun->GetComponentRotation().ToCompactString());
+		}
+	}
+
+	// Up to the server, which works the light out from it, ten times a second while it differs.
+	const FVector Offset = Character->GetBaseAimRotation().UnrotateVector(OwnerDeviceDirection);
+	DeviceAimSendClock -= DeltaTime;
+	if (DeviceAimSendClock <= 0.0f)
+	{
+		DeviceAimSendClock = 0.1f;
+		if (IsAuthority())
+		{
+			DeviceAimOffset = Offset;
+		}
+		else if (FVector::DotProduct(Offset, FVector(DeviceAimOffset)) < 0.99995f)
+		{
+			DeviceAimOffset = Offset;
+			Server_SetDeviceAimOffset(Offset);
+		}
+	}
+}
+
+void UTacticalDeviceComponent::BindInput(UEnhancedInputComponent* Input)
+{
+	if (Input && ModeCycleAction)
+	{
+		Input->BindAction(ModeCycleAction, ETriggerEvent::Started, this, &UTacticalDeviceComponent::OnModeCyclePressed);
+	}
+}
+
+ETacticalDeviceMode UTacticalDeviceComponent::NextMode(ETacticalDeviceMode Current) const
+{
+	switch (Current)
+	{
+	case ETacticalDeviceMode::Off:
+		return ETacticalDeviceMode::Normal;
+	case ETacticalDeviceMode::Normal:
+		return IsChargeReady() ? ETacticalDeviceMode::Active : ETacticalDeviceMode::Off;
+	default:
+		return ETacticalDeviceMode::Off;
+	}
+}
+
+void UTacticalDeviceComponent::OnModeCyclePressed()
+{
+	if (!Device || !Device->UsesModes())
+	{
+		return;
+	}
+	// The owner switches at once (its own light should not wait a ping); the server's word follows.
+	if (!IsAuthority())
+	{
+		Mode = NextMode(Mode);
+	}
+	Server_CycleMode();
+}
+
+void UTacticalDeviceComponent::Server_CycleMode_Implementation()
+{
+	if (!Device || !Device->UsesModes())
+	{
+		return;
+	}
+	Mode = NextMode(Mode);
+	UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s %s mode %d"), *GetNameSafe(GetOwner()), *GetNameSafe(Device), static_cast<int32>(Mode));
 }
 
 void UTacticalDeviceComponent::BeginPlay()
@@ -110,6 +290,12 @@ bool UTacticalDeviceComponent::WantsToRun() const
 		return false;
 	}
 
+	// A device with modes runs while it is not switched off, aim or no aim.
+	if (Device && Device->UsesModes())
+	{
+		return Mode != ETacticalDeviceMode::Off;
+	}
+
 	// The movement component's aim bit is the one copy every relevant machine agrees on: written by
 	// the owner, carried in the saved move to the server.
 	const UApexMovementComponent* const Apex = Character->GetApexMovement();
@@ -159,6 +345,34 @@ FVector UTacticalDeviceComponent::GetVisualOrigin() const
 	FVector Origin, Direction;
 	GetAim(Origin, Direction);
 	return Origin;
+}
+
+FVector UTacticalDeviceComponent::GetApparentVisualOrigin() const
+{
+	const FVector Real = GetVisualOrigin();
+	if (!IsLocallyViewed())
+	{
+		return Real;
+	}
+	const AShooterCharacter* const Character = GetCharacter();
+	const APlayerController* const PC = Character ? Cast<APlayerController>(Character->GetController()) : nullptr;
+	const APlayerCameraManager* const Camera = PC ? PC->PlayerCameraManager.Get() : nullptr;
+	if (!Camera)
+	{
+		return Real;
+	}
+	const FMinimalViewInfo& View = Camera->GetCameraCacheView();
+	if (!View.bUseFirstPersonParameters)
+	{
+		return Real;
+	}
+
+	// The first person primitives are drawn with their offsets across the view scaled by the FOV
+	// correction about the camera (FViewMatrices::Init), the depth left alone: the rail is seen where
+	// this point is.
+	const float Correction = View.CalculateFirstPersonFOVCorrectionFactor();
+	const FVector Local = View.Rotation.UnrotateVector(Real - View.Location);
+	return View.Location + View.Rotation.RotateVector(FVector(Local.X, Local.Y * Correction, Local.Z * Correction));
 }
 
 void UTacticalDeviceComponent::SpendCharge(float Fraction)
@@ -261,6 +475,8 @@ void UTacticalDeviceComponent::ServerTick(float DeltaTime)
 		{
 			bActive = false;
 		}
+		// A new device starts switched off.
+		Mode = ETacticalDeviceMode::Off;
 		Device = Held;
 		OnRep_Device();
 		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s device now %s"), *GetNameSafe(GetOwner()), *GetNameSafe(Device));
@@ -273,11 +489,27 @@ void UTacticalDeviceComponent::ServerTick(float DeltaTime)
 		return;
 	}
 
+	// The active use spent: back to the plain light, which runs on (Normal costs nothing unless the
+	// device says otherwise, and then it switches off below like any other at zero).
+	if (Mode == ETacticalDeviceMode::Active && Charge <= 0.0f)
+	{
+		Mode = ETacticalDeviceMode::Normal;
+		if (Device->DepletedSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, Device->DepletedSound, GetOwner()->GetActorLocation());
+		}
+	}
+
 	const bool bWants = WantsToRun();
+	const bool bFreeWhileOn = Device->UsesModes() && Handler && Handler->GetDrainPerSecond() <= 0.0f;
 	if (bActive)
 	{
-		if (!bWants || Charge <= 0.0f)
+		if (!bWants || (Charge <= 0.0f && !bFreeWhileOn))
 		{
+			if (Device->UsesModes())
+			{
+				Mode = ETacticalDeviceMode::Off;
+			}
 			bActive = false;
 			RechargeWait = Device->RechargeDelay;
 			if (Charge <= 0.0f && Device->DepletedSound)
@@ -288,21 +520,19 @@ void UTacticalDeviceComponent::ServerTick(float DeltaTime)
 				*GetNameSafe(GetOwner()), *GetNameSafe(Device), Charge);
 		}
 	}
-	else if (bWants && Charge >= Device->MinChargeToActivate)
+	else if (bWants && (Charge >= Device->MinChargeToActivate || bFreeWhileOn))
 	{
 		bActive = true;
 		UE_LOG(LogTemp, Log, TEXT("[TACTICAL_DEBUG] %s %s on (charge %.2f)"),
 			*GetNameSafe(GetOwner()), *GetNameSafe(Device), Charge);
 	}
 
-	if (bActive)
+	// Running and paying for it: drain. Off, or on but free (the plain light): refill.
+	const float Drain = (bActive && Handler) ? Handler->GetDrainPerSecond() : 0.0f;
+	if (Drain > 0.0f)
 	{
-		const float Drain = Handler ? Handler->GetDrainPerSecond() : 0.0f;
 		Charge = FMath::Max(0.0f, Charge - Drain * DeltaTime);
-		if (Drain > 0.0f)
-		{
-			RechargeWait = Device->RechargeDelay;
-		}
+		RechargeWait = Device->RechargeDelay;
 	}
 	else if (RechargeWait > 0.0f)
 	{
@@ -334,9 +564,23 @@ void UTacticalDeviceComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	else if (IsLocallyViewed())
 	{
 		const bool bWants = Device && WantsToRun();
-		bRunNow = bRunningHere ? (bWants && Charge > 0.0f) : (bWants && IsChargeReady());
+		if (Device && Device->UsesModes())
+		{
+			bRunNow = bWants;
+		}
+		else
+		{
+			bRunNow = bRunningHere ? (bWants && Charge > 0.0f) : (bWants && IsChargeReady());
+		}
 	}
 	SetRunningHere(bRunNow);
+
+	// Always on the owner's machine, device or not: the rounds follow the barrel in a sprint or a jump
+	// whatever is on the rail (AShooterCharacter::GetWeaponTargetLocation).
+	if (IsLocallyViewed())
+	{
+		UpdateOwnerDeviceAim(DeltaTime);
+	}
 
 	if (bRunningHere && Handler)
 	{

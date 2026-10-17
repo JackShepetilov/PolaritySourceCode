@@ -56,7 +56,7 @@ public class Polarity : ModuleRules
         // allow list or wrapping every PRAS reference in a guard.
         PublicDependencyModuleNames.Add("RecoilAnimation");
 
-        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "MoviePlayer", "NetCore" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "EMF_Plugin", "SlateCore", "RHI", "MoviePlayer", "NetCore", "CoreOnline" });
 
         // Editor-only: GC batch creator needs UnrealEd (asset saving) and ContentBrowser (selection)
         if (Target.Type == TargetType.Editor)

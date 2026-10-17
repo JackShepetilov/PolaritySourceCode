@@ -3,7 +3,7 @@
 # before it creates. Run one step at a time:
 #   Tools/ue_step.sh Grenades build_assets <step>
 # Steps: root_motion, knockdown_montages, stun_montages, inputs, projectiles, definitions,
-#        player, enemy
+#        player, enemy, microwave
 import unreal
 
 ANIM_KD = "/Game/Variant_Shooter/Anims/Knockdown"
@@ -434,3 +434,126 @@ def sounds():
     print("MODIFIED: DA_Grenade_Flash bang", bang, "ring", ring, "burn", da.get_editor_property("player_burn_material"),
           "mix", da.get_editor_property("player_deaf_mix"))
     _save(OUT_BP + "/DA_Grenade_Flash")
+
+
+VITALS = "/Game/Variant_Shooter/UI/Widgets/HUD/Registry/WBP_Vitals"
+
+
+def _vw(name):
+    return unreal.load_object(None, "{}.{}:WidgetTree.{}".format(VITALS, VITALS.split("/")[-1], name))
+
+
+def hud_survey():
+    for h in unreal.WidgetService.get_hierarchy(VITALS):
+        print(h.export_text()[:220])
+
+
+def hud():
+    """A debug line under the vitals: which grenade G throws and how many, the others on H.
+    Filled by UHudVitalsWidget (GrenadeText, found by name)."""
+    names = [h.get_editor_property("widget_name") for h in unreal.WidgetService.get_hierarchy(VITALS)]
+    if "GrenadeText" not in names:
+        unreal.WidgetService.add_component(VITALS, "TextBlock", "GrenadeText", "BarRow", True)
+        print("ADDED: GrenadeText")
+    text = _vw("GrenadeText")
+    if not text:
+        print("no GrenadeText after adding"); return
+    text.set_editor_property("text", unreal.Text("[G] FRAG x2   [H] FLASH x2"))
+    text.slot.set_horizontal_alignment(unreal.HorizontalAlignment.H_ALIGN_LEFT)
+    text.slot.set_vertical_alignment(unreal.VerticalAlignment.V_ALIGN_BOTTOM)
+    font = _vw("Caption").get_editor_property("font")
+    font.set_editor_property("size", 13)
+    text.set_editor_property("font", font)
+    text.set_editor_property("render_transform", unreal.WidgetTransform(translation=unreal.Vector2D(0.0, 34.0)))
+    res = unreal.ToolsetRegistry.execute_tool("editor_toolset.toolsets.blueprint.BlueprintTools", "compile_blueprint",
+                                             '{"blueprint": {"refPath": "%s.%s"}}' % (VITALS, VITALS.split("/")[-1]))
+    print("compile", res.is_complete, res.error)
+    print("SAVED:", EAL.save_asset(VITALS, False))
+
+
+# ==================== Microwave ====================
+
+def microwave():
+    """The third type (UGrenadeDefinition_Microwave): its flying Blueprint, its asset with the throw
+    copied off the flash, and two of them in the players' starting stock. Leaves frag and flash alone."""
+    flash_bp = unreal.load_asset(OUT_BP + "/BP_Grenade_Flash")
+    bp = _make_bp("BP_Grenade_Microwave", "/Script/Polarity.GrenadeProjectile")
+    unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    mesh = unreal.get_default_object(flash_bp.generated_class()).get_editor_property("mesh").get_editor_property("static_mesh")
+    unreal.get_default_object(bp.generated_class()).get_editor_property("mesh").set_editor_property("static_mesh", mesh)
+    unreal.BlueprintEditorLibrary.compile_blueprint(bp)
+    _save(OUT_BP + "/BP_Grenade_Microwave")
+
+    flash = unreal.load_asset(OUT_BP + "/DA_Grenade_Flash")
+    da = _make_da("DA_Grenade_Microwave", unreal.GrenadeDefinition_Microwave)
+    for p in ("aim_start_montage", "aim_loop_montage", "throw_montage", "throw_release_time", "quick_start_play_rate",
+              "throw_play_rate", "montage_overlap", "aim_preview_delay", "throw_origin_offset", "aim_converge_distance",
+              "icon", "bounce_sound", "detonation_attenuation", "throw_speed", "gravity_scale", "max_per_cell"):
+        da.set_editor_property(p, flash.get_editor_property(p))
+    da.set_editor_property("projectile_class", unreal.load_class(None, OUT_BP + "/BP_Grenade_Microwave.BP_Grenade_Microwave_C"))
+    da.set_editor_property("display_name", "MICROWAVE")
+    # Placeholder until it has a sound of its own: a dull thump, not the flash's bang.
+    da.set_editor_property("detonation_sound", unreal.load_asset("/Game/Audio/Sounds/Grenade/grenade_explode_whack_01"))
+    print("MODIFIED: DA_Grenade_Microwave projectile", da.get_editor_property("projectile_class"),
+          "fuse", da.get_editor_property("fuse_time"), "radius", da.get_editor_property("max_radius"))
+    _save(OUT_BP + "/DA_Grenade_Microwave")
+
+    for bp_path in ("/Game/Variant_Shooter/Blueprints/BP_ShooterCharacter",
+                    "/Game/Variant_Shooter/Tests/LPSP_AR02/BP_ShooterCharacter_AR02_Test"):
+        char_bp, comp = _grenade_component(bp_path)
+        stock = list(comp.get_editor_property("starting_grenades"))
+        if any(s.get_editor_property("type") == da for s in stock):
+            print("EXISTS: microwave in", bp_path)
+            continue
+        s = unreal.GrenadeStock()
+        s.set_editor_property("type", da)
+        s.set_editor_property("count", 2)
+        stock.append(s)
+        comp.set_editor_property("starting_grenades", stock)
+        unreal.BlueprintEditorLibrary.compile_blueprint(char_bp)
+        _, comp = _grenade_component(bp_path)
+        print("MODIFIED:", bp_path, [(x.get_editor_property("type").get_name(), x.get_editor_property("count"))
+                                     for x in comp.get_editor_property("starting_grenades")])
+        _save(bp_path)
+
+
+def fpv():
+    """The FPV drone (UGrenadeDefinition_FPV): its asset, the throw copied off the frag, the project's
+    kamikaze as the drone, and two in the players' starting stock. Leaves the other types alone."""
+    frag = unreal.load_asset(OUT_BP + "/DA_Grenade_Frag")
+    da = _make_da("DA_Grenade_FPV", unreal.GrenadeDefinition_FPV)
+    for p in ("aim_start_montage", "aim_loop_montage", "throw_montage", "throw_release_time", "quick_start_play_rate",
+              "throw_play_rate", "montage_overlap", "aim_preview_delay", "throw_origin_offset", "aim_converge_distance"):
+        da.set_editor_property(p, frag.get_editor_property(p))
+    da.set_editor_property("drone_class", unreal.load_class(None, "/Game/Variant_Shooter/Blueprints/AI/BPs/BP_KamikazeDrone.BP_KamikazeDrone_C"))
+    da.set_editor_property("display_name", "FPV")
+    print("MODIFIED: DA_Grenade_FPV drone", da.get_editor_property("drone_class"), "speed", da.get_editor_property("launch_speed"),
+          "per cell", da.get_editor_property("max_per_cell"))
+    _save(OUT_BP + "/DA_Grenade_FPV")
+
+    bp_path = "/Game/Variant_Shooter/Blueprints/BP_ShooterCharacter"
+    char_bp, comp = _grenade_component(bp_path)
+    stock = list(comp.get_editor_property("starting_grenades"))
+    if any(s.get_editor_property("type") == da for s in stock):
+        print("EXISTS: FPV in", bp_path)
+        return
+    s = unreal.GrenadeStock()
+    s.set_editor_property("type", da)
+    s.set_editor_property("count", 2)
+    stock.append(s)
+    comp.set_editor_property("starting_grenades", stock)
+    unreal.BlueprintEditorLibrary.compile_blueprint(char_bp)
+    _, comp = _grenade_component(bp_path)
+    print("MODIFIED:", bp_path, [(x.get_editor_property("type").get_name(), x.get_editor_property("count"))
+                                 for x in comp.get_editor_property("starting_grenades")])
+    _save(bp_path)
+
+
+def stock_check():
+    """What each player Blueprint actually starts with: the child (the one the game mode spawns) must
+    inherit the parent's list, not keep an old copy of its own."""
+    for bp_path in ("/Game/Variant_Shooter/Blueprints/BP_ShooterCharacter",
+                    "/Game/Variant_Shooter/Tests/LPSP_AR02/BP_ShooterCharacter_AR02_Test"):
+        _, comp = _grenade_component(bp_path)
+        print(bp_path.split("/")[-1], [(x.get_editor_property("type").get_name(), x.get_editor_property("count"))
+                                       for x in comp.get_editor_property("starting_grenades")])

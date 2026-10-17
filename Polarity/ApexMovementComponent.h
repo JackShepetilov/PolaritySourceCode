@@ -26,6 +26,31 @@ enum class EPolarityMovementState : uint8
 	GroundDashing
 };
 
+/** Which mantle is running. Picked by the ledge height above the feet
+ *  (MovementSettings::MantleLowMaxHeight); each has its own animation. */
+UENUM(BlueprintType)
+enum class EApexMantleKind : uint8
+{
+	None,
+	/** Waist-high ledge: a quick hop over the edge. */
+	Low,
+	/** Up to MantleMaxHeight: pull up onto the ledge. */
+	High
+};
+
+/** A ledge a mantle can go to, as FindMantleLedge measured it. */
+struct FApexMantleLedge
+{
+	/** Capsule centre standing on the ledge, past the edge. */
+	FVector TargetLocation = FVector::ZeroVector;
+
+	/** Horizontal, away from the wall: the way the character leaves the mantle. */
+	FVector ExitDirection = FVector::ForwardVector;
+
+	/** Ledge top above the feet. */
+	float Height = 0.0f;
+};
+
 UENUM(BlueprintType)
 enum class EWallSide : uint8
 {
@@ -153,6 +178,11 @@ enum class EPolarityMoveFlag : uint32
 	 *  client decides it, because only that machine runs Fire() for its own gun; the receiving side
 	 *  still applies nothing without the upgrade. */
 	SlideFireStreak      = 1 << 19,
+	/** In the tactical sprint: the sprint runs faster. The controlling machine decides it (the double
+	 *  press, the timer, the cooldown, the gun's mastery), the receiving side only applies the speed. */
+	TacticalSprinting    = 1 << 20,
+	/** Aiming does not cap the ground speed: weapon mastery lifted MovementSettings::ADSSpeed. */
+	AimSpeedCapIgnored   = 1 << 21,
 };
 ENUM_CLASS_FLAGS(EPolarityMoveFlag);
 
@@ -368,6 +398,9 @@ public:
 	 *  after every shot. */
 	float SprintSuppressedUntil = -1000.0f;
 
+	/** World time until which no slide may start. @see SuppressSlide */
+	float SlideSuppressedUntil = -1000.0f;
+
 	/** World time sprinting last ended. The weapon raise gate measures from here. */
 	float SprintEndTime = -1000.0f;
 
@@ -382,6 +415,19 @@ public:
 	 *  and its anim blueprint would keep a dashing teammate in a plain fall. */
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsMantling = false;
+
+	/** Which mantle is running, None outside one. Replicated for the watching machines only, and
+	 *  its OnRep is how they learn that a mantle started or ended (OnMantleStarted / OnMantleEnded
+	 *  fire there from it), so a teammate's body can play its animation. One field on purpose: start
+	 *  and end are both a change of it, and a mantle is far longer than one net update, so two in a
+	 *  row never collapse into "no change". */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_MantleKind, Category = "Apex|State")
+	EApexMantleKind MantleKind = EApexMantleKind::None;
+
+	/** Seconds the running mantle takes. Replicated next to MantleKind so a watching machine can
+	 *  fit the body's animation to it; it arrives in the same update, before the OnRep runs. */
+	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
+	float MantleDuration = 0.0f;
 
 	UPROPERTY(BlueprintReadOnly, Replicated, Category = "Apex|State")
 	bool bIsAirDashing = false;
@@ -704,6 +750,21 @@ public:
 
 	bool IsSlideFireStreak() const { return bSlideFireStreak; }
 
+	/** Owning client, from UpdateADS: the gun's mastery lifts the ADS speed cap. Travels as
+	 *  EPolarityMoveFlag::AimSpeedCapIgnored. */
+	void SetAimSpeedCapIgnored(bool bIgnored) { bAimSpeedCapIgnored = bIgnored; }
+
+	/** In the tactical sprint now. For the anim graph and the HUD. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsTacticalSprinting() const { return bTacticalSprinting; }
+
+	/** The sprint that ended last was tactical: the gun comes up slower out of it. */
+	bool WasLastSprintTactical() const { return bLastSprintWasTactical; }
+
+	/** Seconds until the tactical sprint can start again; 0 when it can. Controlling machine. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetTacticalSprintCooldownRemaining() const;
+
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsAiming() const { return bIsAiming; }
 
@@ -724,11 +785,24 @@ public:
 
 	// ==================== Mantle ====================
 
+	/** A mantle could start now: the state allows it and there is a ledge in front. */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	bool CanMantle() const;
 
+	/** Starts a mantle if CanMantle. Normally nobody calls this: the movement simulation does, on
+	 *  every falling move that pushes forward into a ledge. */
 	UFUNCTION(BlueprintCallable, Category = "Apex|Actions")
 	void TryMantle();
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsMantling() const { return bIsMantling; }
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	EApexMantleKind GetMantleKind() const { return MantleKind; }
+
+	/** Seconds the running mantle takes; 0 outside one. */
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	float GetMantleDuration() const { return MantleDuration; }
 
 	// ==================== Dash ====================
 
@@ -830,6 +904,15 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Apex|State")
 	bool IsSprintSuppressed() const;
+
+	/** Veto starting a slide for Duration seconds (a slide already going runs out). Extends, never
+	 *  shortens. Called on both the server and the owning client for a player, so the two agree.
+	 *  @see UPlayerSuppressionComponent::ApplyHeadache, AShooterNPC (bHeadache) */
+	UFUNCTION(BlueprintCallable, Category = "Apex|Input")
+	void SuppressSlide(float Duration);
+
+	UFUNCTION(BlueprintPure, Category = "Apex|State")
+	bool IsSlideSuppressed() const;
 
 	/** Suppression is deliberately NOT re-tested here: it is already folded into bWantsToSprint
 	 *  once per frame, and that folded value is what the server received. Testing it again would
@@ -1355,6 +1438,23 @@ protected:
 	 *  move flags on the server and on replay. Observers never need it. */
 	bool bSlideFireStreak = false;
 
+	/** ADS does not cap the ground speed. Written by SetAimSpeedCapIgnored on the owning client,
+	 *  restored from the move flags on the server and on replay. */
+	bool bAimSpeedCapIgnored = false;
+
+	/** In the tactical sprint. Decided on the controlling machine (UpdateTacticalSprint), restored
+	 *  from the move flags on the server and on replay; observers receive it for animation. */
+	UPROPERTY(Replicated)
+	bool bTacticalSprinting = false;
+
+	/** Controlling machine: the double press, the timer and the cooldown of the tactical sprint. */
+	void UpdateTacticalSprint();
+	bool bTacticalSprintRequested = false;
+	float LastSprintPressTime = -1000.0f;
+	float TacticalSprintEndTime = 0.0f;
+	float TacticalSprintReadyTime = -1000.0f;
+	bool bLastSprintWasTactical = false;
+
 	/** Multiplier on slide friction from the slide-slot upgrade while bSlideFireStreak; 1 without it. */
 	float GetSlideFireFrictionScale() const;
 
@@ -1464,10 +1564,16 @@ protected:
 	FVector AirDashRedirectTargetDirection = FVector::ZeroVector;
 	float AirDashRedirectSpeed = 0.0f;
 
-	// Mantle state
-	FVector MantleStartLocation;
-	FVector MantleTargetLocation;
-	float MantleAlpha = 0.0f;
+	// Mantle state. Two legs: straight up until the feet clear the ledge, then over the edge.
+	FVector MantleStartLocation = FVector::ZeroVector;
+	FVector MantleTargetLocation = FVector::ZeroVector;
+	FVector MantleExitDirection = FVector::ForwardVector;
+	float MantleElapsed = 0.0f;
+	/** Seconds of MantleDuration spent on the up leg. */
+	float MantleUpDuration = 0.0f;
+	/** Horizontal speed the mantle started with; MantleMomentumRetention of it is handed back. */
+	float MantleEntrySpeed = 0.0f;
+	bool bMantleOverLeg = false;
 
 	// EMF
 	FVector CurrentEMFForce = FVector::ZeroVector;
@@ -1501,8 +1607,16 @@ protected:
 	void PerformWallBounce(const FHitResult& WallHit);
 
 	// Mantle
+	/** Everything about the state that has to allow a mantle, without looking for a ledge. */
+	bool IsMantleAllowedNow() const;
 	void UpdateMantle(float DeltaTime);
-	bool TraceMantleSurface(FHitResult& OutHit) const;
+	/** bReachedTop: the over leg finished, so the exit speed is handed out. False when the mantle is
+	 *  dropped (stuck, a disagreeing move flag, a reset). */
+	void EndMantle(bool bReachedTop);
+	bool FindMantleLedge(FApexMantleLedge& OutLedge) const;
+
+	UFUNCTION()
+	void OnRep_MantleKind();
 
 	// Air
 	void ApplyAirStrafe(float DeltaTime);

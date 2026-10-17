@@ -57,6 +57,29 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground", meta = (ClampMin = "-1.0", ClampMax = "1.0", EditCondition = "bSprintForwardOnly"))
 	float SprintMinForwardDot = 0.5f;
 
+	// ==================== Tactical Sprint ====================
+	// Sprint pressed twice: a faster sprint for a few seconds, then a cooldown [author, 2026-10-16].
+	// Opened per gun by weapon mastery (FWeaponMasteryStep::bAllowTacticalSprint).
+
+	/** Sprint speed (after the gun's SprintSpeedScale) times this, while it lasts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tactical Sprint", meta = (ClampMin = "1.0"))
+	float TacticalSprintSpeedMultiplier = 1.25f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tactical Sprint", meta = (ClampMin = "0.1", Units = "s"))
+	float TacticalSprintDuration = 3.0f;
+
+	/** Counted from the end of the tactical sprint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tactical Sprint", meta = (ClampMin = "0.0", Units = "s"))
+	float TacticalSprintCooldown = 6.0f;
+
+	/** The second press of sprint has to come this soon after the first. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tactical Sprint", meta = (ClampMin = "0.05", Units = "s"))
+	float TacticalSprintDoubleTapWindow = 0.3f;
+
+	/** The gun's sprint-to-fire time times this when the sprint that just ended was tactical. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tactical Sprint", meta = (ClampMin = "1.0"))
+	float TacticalSprintToFireMultiplier = 2.0f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Ground")
 	float CrouchSpeed = 400.0f;
 
@@ -295,15 +318,50 @@ public:
 	float SlideFatigueRecoveryTime = 4.0f;
 
 	// ==================== Mantle ====================
+	// In the air, pushing forward into a wall whose top is in reach: climb onto it. Starts by itself,
+	// there is no button. Heights are the ledge top above the feet.
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle")
-	float MantleReachHeight = 200.0f;
+	bool bEnableMantle = true;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle")
+	/** Lower than this is a step, not a mantle. Keep it above the character's MaxStepHeight. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", Units = "cm"))
+	float MantleMinHeight = 50.0f;
+
+	/** The highest ledge the hands reach. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", Units = "cm"))
+	float MantleMaxHeight = 200.0f;
+
+	/** Up to this height the mantle is EApexMantleKind::Low (the hop over), above it High (the pull up).
+	 *  Only picks the animation; the motion is the same. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", Units = "cm"))
+	float MantleLowMaxHeight = 110.0f;
+
+	/** How far in front of the capsule a wall is looked for. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "1.0", Units = "cm"))
 	float MantleTraceDistance = 50.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle")
-	float MantleDuration = 0.4f;
+	/** How square to the wall the push has to be: 1 straight at it, 0.5 up to 60 degrees off. Brushing
+	 *  a wall at a shallower angle is the wallrun's. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MantleMinWallFacingDot = 0.5f;
+
+	/** How far past the edge the capsule lands, beyond its own radius. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", Units = "cm"))
+	float MantleForwardInset = 10.0f;
+
+	/** Time of the whole mantle at MantleMinHeight. In between it is interpolated by height. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.05", Units = "s"))
+	float MantleDurationAtMinHeight = 0.3f;
+
+	/** Time of the whole mantle at MantleMaxHeight. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.05", Units = "s"))
+	float MantleDurationAtMaxHeight = 0.55f;
+
+	/** Share of the horizontal speed the mantle started with that the character leaves the ledge
+	 *  with, away from the wall. 0 stops dead on top, 1 keeps all of it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Mantle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MantleMomentumRetention = 0.5f;
 
 	// ==================== Wallrun (now uses slide-style momentum) ====================
 
@@ -621,6 +679,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Jump")
 	float JumpShakeDamping = 8.0f;
 
+	// ==================== Camera|Mantle ====================
+
+	/** View-only nod at the start of a mantle. Moves the picture, not the aim. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Mantle")
+	bool bEnableMantleShake = true;
+
+	/** Degrees of pitch; negative looks down. The High mantle gets all of it, the Low one half. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Mantle")
+	float MantleCameraDip = -4.0f;
+
+	/** Low on purpose: the nod peaks a quarter period in (0.125 s at 2 Hz), about when the up leg
+	 *  is at its fastest. The jump's 12 Hz reads as a jolt here. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Mantle")
+	float MantleShakeFrequency = 2.0f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Mantle")
+	float MantleShakeDamping = 5.0f;
+
 	// ==================== Camera|Slide ====================
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Camera|Slide")
@@ -767,7 +843,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
 	bool bEnableADS = true;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")
+	/** Smooths the legacy ADS and wallrun offsets in APolarityCharacter. Also used for the ADS
+	 *  alpha when no weapon is equipped. An equipped weapon uses its ADS blend times in seconds. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "First Person View", meta = (DisplayName = "Offset Interp Speed"))
 	float ADSInterpSpeed = 12.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ADS")

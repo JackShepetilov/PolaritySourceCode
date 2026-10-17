@@ -63,6 +63,18 @@ static bool IsInDeadGroundFrom(const AShooterNPC* Who, const FVector& FloorSpot,
 	{
 		return false;
 	}
+
+	// Dead ground is "I see him and the gun cannot reach him". One that does not know where he is
+	// does not see him: recorded 2026-10-12, four of a garrison said "he is under my wall" and
+	// stayed down while the player was 10 to 30 m from where they thought he was.
+	if (const AShooterAIController* const Brain = Cast<AShooterAIController>(Who->GetController()))
+	{
+		if (Target == Brain->GetCurrentTarget() && !Brain->Notices(Target))
+		{
+			return false;
+		}
+	}
+
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(DeadGround), false, Who);
 	Params.AddIgnoredActor(Target);
 
@@ -1735,6 +1747,13 @@ namespace
 {
 	EStateTreeRunStatus ShooterPush_TickCloseFight(FSTTask_ShooterPush_Data& Data)
 	{
+		// Out of rounds and going in with the gun away: the strike owns the legs and the aim.
+		// @see UNPCMeleeStrikeComponent
+		if (Data.NPC->IsMeleeBusy())
+		{
+			return EStateTreeRunStatus::Running;
+		}
+
 		UWorld* const World = Data.NPC->GetWorld();
 		const float Now = World->GetTimeSeconds();
 		const FVector NPCLocation = Data.NPC->GetActorLocation();
@@ -1782,9 +1801,17 @@ namespace
 			}
 			else if (!Data.bIsShooting && Coordinator && Coordinator->GetPostureFor(Data.NPC) != ESquadPosture::Defense)
 			{
-				// Nobody in view: a sidestep on the spot is the enemy standing in a corner. Go and look.
-				Step = ToThreat * 300.0f;
+				// Nobody in view: a sidestep on the spot is the enemy standing in a corner. Go and look,
+				// by a path to where it thinks he is. A straight step at him walked into the wall between
+				// them, over and over (CORNER bench, 2026-10-14).
+				FVector Place = Threat->GetActorLocation();
+				if (const AShooterAIController* const Brain = Cast<AShooterAIController>(Data.Controller))
+				{
+					Brain->GetKnownPlaceOf(Threat, Place);
+				}
 				Data.NPC->SayTactic(TEXT("CLOSE FIGHT: nobody in view, going to look"));
+				Data.Controller->MoveToLocation(Place, 150.0f);
+				return EStateTreeRunStatus::Running;
 			}
 
 			FNavLocation OnNav;
@@ -3169,8 +3196,11 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 		if (Nearest)
 		{
+			// Close AND in view. Close through a wall is not somebody on top of it: the CORNER bench
+			// (2026-10-14) had a soldier go into the close fight with its enemy 2 m behind a wall, and
+			// in 3 of 8 fights nobody fired for 30 s, the one in the close fight stepping into the wall.
 			const float PlayerDist = FVector::Dist2D(Nearest->GetActorLocation(), Data.NPC->GetActorLocation());
-			if (PlayerDist <= Data.LastStandPlayerDistance)
+			if (PlayerDist <= Data.LastStandPlayerDistance && Data.NPC->HasLineOfSightTo(const_cast<APawn*>(Nearest)))
 			{
 				UE_LOG(LogTemp, Verbose, TEXT("[PEEK_DEBUG] %s -> LAST STAND: enemy %s at %.0f (limit %.0f)"),
 					*GetNameSafe(Data.NPC), *GetNameSafe(Nearest), PlayerDist, Data.LastStandPlayerDistance);
@@ -3219,7 +3249,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// behind its cover; standing where it was just hit is not an answer to it [author,
 		// 2026-10-11: "not all of them get down when hit"].
 		const UAIAccuracyComponent* const OpenPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
-		const bool bOpenPinned = OpenPinned && OpenPinned->IsSuppressed() && Data.LegElapsed >= 1.2f;
+		const bool bOpenPinned = OpenPinned && OpenPinned->IsPinnedDown() && Data.LegElapsed >= 1.2f;
 		if (CVarAIDuckByReason.GetValueOnAnyThread() != 0 && FireTarget
 			&& (Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold || bOpenPinned))
 		{
@@ -3411,7 +3441,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		if (!Data.bIsRelocating && CVarAIDuckByReason.GetValueOnAnyThread() != 0 && ToHideDistance > 150.0f)
 		{
 			const UAIAccuracyComponent* const WalkPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
-			if (((WalkPinned && WalkPinned->IsSuppressed()) || Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold)
+			if (((WalkPinned && WalkPinned->IsPinnedDown()) || Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold)
 				&& BeginRelocationRun(Data, ToHideDistance))
 			{
 				Data.NPC->SayTactic(TEXT("UNDER FIRE: running to cover"));
@@ -3534,6 +3564,16 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		// arena it always reached its verdict first, condemned the spot, and sent the NPC back to
 		// the search: it hid, never stepped out, and did that forever. One trade per spot is the
 		// floor, and only after it has been paid may exposure retire the corner.
+		// A laser held on it or by it for long [author, 2026-10-15]: this corner is known, another one.
+		if (const UAIAccuracyComponent* const PaintAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
+			PaintAccuracy && PaintAccuracy->GetPaintedSeconds() >= PaintAccuracy->PaintedRelocateSeconds && !Finder->IsSearching())
+		{
+			Data.NPC->SayTactic(TEXT("PAINTED: giving the corner up"));
+			Finder->ReleaseCover();
+			EnterPhase(Data, EShooterPeekPhase::Seeking);
+			break;
+		}
+
 		Data.SinceRecheck += DeltaTime;
 		if (Data.bPeekedSinceCover && Data.SinceRecheck >= Data.CoverRecheckInterval)
 		{
@@ -3665,7 +3705,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		const bool bByReason = CVarAIDuckByReason.GetValueOnAnyThread() != 0;
 		const float HideNow = Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f;
 		const UAIAccuracyComponent* const HideAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
-		if (bByReason && HideAccuracy && HideAccuracy->IsSuppressed())
+		if (bByReason && HideAccuracy && HideAccuracy->IsPinnedDown())
 		{
 			Data.DuckUntil = FMath::Max(Data.DuckUntil, HideNow + Data.DuckSecondsOnSuppression);
 		}
@@ -3886,7 +3926,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 
 					// The reasons to get down still apply while it watches.
 					const UAIAccuracyComponent* const WatchPinned = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
-					if (!Data.NPC->IsReloadingWeapon() && !(WatchPinned && WatchPinned->IsSuppressed())
+					if (!Data.NPC->IsReloadingWeapon() && !(WatchPinned && WatchPinned->IsPinnedDown())
 						&& Data.NPC->GetRecentDamage() < Data.DuckDamageThreshold)
 					{
 						// A gun that is held on its target before the shot (a scope) does not fire at the
@@ -3917,7 +3957,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 					// that was watching.
 					if (!Data.NPC->IsReloadingWeapon())
 					{
-						const bool bWatchPinned = WatchPinned && WatchPinned->IsSuppressed();
+						const bool bWatchPinned = WatchPinned && WatchPinned->IsPinnedDown();
 						Data.DuckUntil = (Data.NPC->GetWorld() ? Data.NPC->GetWorld()->GetTimeSeconds() : 0.0f)
 							+ (bWatchPinned ? Data.DuckSecondsOnSuppression : Data.DuckSecondsOnDamage);
 						Data.bShiftAfterDuck = true;
@@ -4003,7 +4043,7 @@ EStateTreeRunStatus FSTTask_ShooterPeek::Tick(FStateTreeExecutionContext& Contex
 		if (CVarAIDuckByReason.GetValueOnAnyThread() != 0)
 		{
 			const UAIAccuracyComponent* const PeekAccuracy = Data.NPC->FindComponentByClass<UAIAccuracyComponent>();
-			const bool bPinned = PeekAccuracy && PeekAccuracy->IsSuppressed();
+			const bool bPinned = PeekAccuracy && PeekAccuracy->IsPinnedDown();
 			const bool bHurt = Data.NPC->GetRecentDamage() >= Data.DuckDamageThreshold;
 			if (bPinned || bHurt)
 			{

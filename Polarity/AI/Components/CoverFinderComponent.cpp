@@ -1,6 +1,7 @@
 ﻿// CoverFinderComponent.cpp
 
-#include "CoverFinderComponent.h"
+#include "CoverFinderComponent.h"
+#include "Variant_Shooter/Grenades/GrenadeProjectile.h"
 
 #include "AI/PolarityTeams.h"
 #include "AI/TacticalSpace.h"
@@ -297,7 +298,7 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	const bool bHolds = Holder && Holder->HasHoldArea();
 
 	// Why candidates fell out, for the one log line that says none was left.
-	int32 LostNoWall = 0, LostOffNav = 0, LostDistance = 0, LostOutside = 0, LostClaimed = 0, LostNotCover = 0;
+	int32 LostNoWall = 0, LostOffNav = 0, LostDistance = 0, LostOutside = 0, LostClaimed = 0, LostNotCover = 0, LostGrenade = 0;
 
 	for (const FVector& RawCandidate : Candidates)
 	{
@@ -341,6 +342,14 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 		if (Holder && !Holder->IsInsideHoldArea(Candidate))
 		{
 			++LostOutside;
+			continue;
+		}
+
+		// Inside the reach of a live grenade and not behind a wall from it: no corner at all. Nor one
+		// closer to a strobe or a burner than this one may come (AShooterNPC::ApplyKeepAway).
+		if (AGrenadeProjectile::IsPointInDanger(GetWorld(), Candidate) || (Holder && Holder->IsKeptAwayFrom(Candidate)))
+		{
+			++LostGrenade;
 			continue;
 		}
 
@@ -422,14 +431,14 @@ void UCoverFinderComponent::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 	}
 
 	UE_LOG(LogCover, Verbose,
-		TEXT("[COVER_DEBUG] %s: %d candidates, %d scored. Lost: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d"),
-		*GetNameSafe(GetOwner()), Candidates.Num(), Scored.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover);
+		TEXT("[COVER_DEBUG] %s: %d candidates, %d scored. Lost: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d, live grenade %d"),
+		*GetNameSafe(GetOwner()), Candidates.Num(), Scored.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover, LostGrenade);
 
 	if (Scored.Num() == 0)
 	{
 		UE_LOG(LogCover, Verbose,
-			TEXT("[COVER_DEBUG] %s: %d candidates, none left: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d"),
-			*GetNameSafe(GetOwner()), Candidates.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover);
+			TEXT("[COVER_DEBUG] %s: %d candidates, none left: no wall to snap to %d, off the navmesh %d, distance %d, outside the held ground %d, claimed %d, wall too far %d, live grenade %d"),
+			*GetNameSafe(GetOwner()), Candidates.Num(), LostNoWall, LostOffNav, LostDistance, LostOutside, LostClaimed, LostNotCover, LostGrenade);
 		OnCoverSearchFinished.Broadcast(false, FCoverSpot());
 		return;
 	}
